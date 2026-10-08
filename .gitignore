@@ -1,0 +1,33 @@
+# Binarios y artefactos de compilación
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Cobertura
+coverage.out
+coverage.html
+*.coverprofile
+
+# Entorno y secretos (la plantilla .env.example sí se versiona)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Temporales
+/tmp/
+*.tmp
+
+# Editores y sistema operativo
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,151 @@
+﻿Listado de rutas de carpetas
+El n·mero de serie del volumen es E890-CD04
+C:.
+|   .env.example
+|   ADR-000_decisiones_arquitectura.md
+|   arbol.txt
+|   CICD.md
+|   go.mod
+|   ORGANIZACION.md
+|   run_full_test_suite.sh
+|   sqlc.yaml
+|   
++---cmd
+|   \---api
+|           main.go
+|           
++---db
+|   |   schema.sql
+|   |   schema.sqlc.sql
+|   |   
+|   \---migrations
+|           000000_esquema_base.down.sql
+|           000000_esquema_base.up.sql
+|           000001_seguridad_reforzada.down.sql
+|           000001_seguridad_reforzada.up.sql
+|           000002_seed_catalogos.down.sql
+|           000002_seed_catalogos.up.sql
+|           000003_calendario_asistencia_vacaciones.down.sql
+|           000003_calendario_asistencia_vacaciones.up.sql
+|           000004_acumulados_liquidaciones.down.sql
+|           000004_acumulados_liquidaciones.up.sql
+|           000005_seed_catalogos_parametricos.down.sql
+|           000005_seed_catalogos_parametricos.up.sql
+|           000006_rol_admin_y_permisos_base.down.sql
+|           000006_rol_admin_y_permisos_base.up.sql
+|           _drop_tablas_original.txt
+|           
++---internal
+|   +---api
+|   |   +---handlers
+|   |   |       auth_handler.go
+|   |   |       contabilidad_handler.go
+|   |   |       contrato_handler.go
+|   |   |       dashboard_handler.go
+|   |   |       empleado_handler.go
+|   |   |       liquidacion_handler.go
+|   |   |       organizacion_handler.go
+|   |   |       planilla_export_handler.go
+|   |   |       routes.go
+|   |   |       
+|   |   \---middleware
+|   |           auth.go
+|   |           context.go
+|   |           errors.go
+|   |           require_permission.go
+|   |           require_permission_test.go
+|   |           respond.go
+|   |           
+|   +---asistencia
+|   |       calendario.go
+|   |       filtros.go
+|   |       handler.go
+|   |       service.go
+|   |       vacaciones_handler.go
+|   |       vacaciones_service.go
+|   |       
+|   +---auth
+|   |       dto.go
+|   |       errors.go
+|   |       service.go
+|   |       
+|   +---config
+|   |       config.go
+|   |       
+|   +---contabilidad
+|   |       domain.go
+|   |       filtro.go
+|   |       repository.go
+|   |       service.go
+|   |       service_test.go
+|   |       sql_adapters.go
+|   |       
+|   +---db
+|   |   |   audit.go
+|   |   |   
+|   |   +---dto
+|   |   |       acumulados_liquidaciones.go
+|   |   |       asistencia.go
+|   |   |       contabilidad.go
+|   |   |       contratos.go
+|   |   |       dashboard.go
+|   |   |       db.go
+|   |   |       empleados.go
+|   |   |       organizacion.go
+|   |   |       planilla_export.go
+|   |   |       planilla_motor.go
+|   |   |       planilla_periodo.go
+|   |   |       prestamos_embargos.go
+|   |   |       security.go
+|   |   |       vacaciones.go
+|   |   |       vacaciones_extra.go
+|   |   |       
+|   |   \---queries
+|   |           acumulados_liquidaciones.sql
+|   |           asistencia_vacaciones.sql
+|   |           dashboard.sql
+|   |           empleados_puestos.sql
+|   |           planilla_export.sql
+|   |           prestamos_embargos.sql
+|   |           security.sql
+|   |           
+|   +---pagination
+|   |       pagination.go
+|   |       
+|   +---planilla
+|   |       acumulados_periodicos.go
+|   |       calculator.go
+|   |       calculator_test.go
+|   |       domain.go
+|   |       export_service.go
+|   |       motor_calculo.go
+|   |       motor_calculo_test.go
+|   |       periodo.go
+|   |       service.go
+|   |       
+|   +---prestamos
+|   |       handlers.go
+|   |       routes.go
+|   |       service.go
+|   |       
+|   +---security
+|   |       hash.go
+|   |       paseto.go
+|   |       
+|   +---services
+|   |       contrato_service.go
+|   |       dashboard_service.go
+|   |       empleado_service.go
+|   |       liquidacion_service.go
+|   |       organizacion_service.go
+|   |       
+|   \---shared
+|       \---decimal
+|               decimal.go
+|               
+\---scripts
+        gen_sqlc_schema.sh
+        rehacer_bd_dev.sh
+        split_schema_a_migraciones.sh
+        verificar_json_object.sh
+        
