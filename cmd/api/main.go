@@ -111,7 +111,7 @@ func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) {
 // buildDeps construye los servicios de los módulos que dependen de la capa
 // de datos (internal/db/dto) y los agrupa en handlers.Deps. Es el único
 // lugar donde se conecta la capa de datos con los servicios: routes.go solo
-// monta rutas. Los servicios de Fase 3 se arman dentro de
+// monta rutas. Los servicios de empleados, contratos y organización se arman dentro de
 // handlers.RegisterRoutes porque reciben *sql.DB directo.
 func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (handlers.Deps, error) {
 	// Verificado contra internal/db/dto/db.go: New(DBTX) *Queries.
@@ -145,16 +145,20 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 
 		Prestamos: prestamos.NewService(sqlDB, queries),
 
-		// Firma tomada de dashboard_service.go (NewDashboardService).
+		// Dashboard gerencial.
 		Dashboard: services.NewDashboardService(services.NewDashboardRepository(queries), sqlDB, 3*time.Second),
 
-		// Firma tomada de liquidacion_service.go. Requiere que *dto.Queries
-		// implemente services.LiquidacionRepository.
+		// Liquidaciones: *dto.Queries debe
+		// implementar services.LiquidacionRepository.
 		Liquidacion: services.NewLiquidacionService(sqlDB, queries, infra.NewMotorRepository(queries)),
 
 		PlanillaExport: planilla.NewExportService(infra.NewExportRepository(queries), infra.NewExportUnitOfWork(sqlDB)),
 
 		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
+
+		// Construidos, sin rutas todavía: se usan desde F20/F24.
+		MotorEmpleado: planilla.NewMotorEmpleado(infra.NewMotorRepository(queries)),
+		Acumulados:    planilla.NewAcumuladosService(infra.NewAcumuladosRepository(queries)),
 
 		Contabilidad: &handlers.ContabilidadDeps{
 			Servicio: contaSvc,
@@ -206,7 +210,7 @@ func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// /health (Fase 8): público, sin auth, con latencia y timestamp. Coexiste
+	// /health: público, sin auth, con latencia y timestamp. Coexiste
 	// con /healthz; ver la nota de integración en dashboard_handler.go.
 	router.GET("/health", handlers.NewDashboardHandler(deps.Dashboard).GetHealth)
 

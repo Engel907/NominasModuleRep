@@ -3,16 +3,15 @@
 // Wiring de rutas de la API bajo el grupo raíz (normalmente
 // router.Group("/api/v1")):
 //
-//   - Fase 3: Empleados / Contratos / Organización.
-//   - Fase 5: Autenticación (internal/auth) — login, refresh, logout, reset
-//     de contraseña (públicas) y gestión de sesiones/roles (protegidas).
-//   - Fase 4: Asistencia (internal/asistencia).
-//   - Fase 12B: Vacaciones (internal/asistencia, VacacionesHandler).
+//   - Autenticación (internal/auth): login, refresh, logout, reset de
+//     contraseña (públicas) y gestión de sesiones/roles (protegidas).
+//   - Empleados / Contratos / Organización.
+//   - Asistencia y Vacaciones (internal/asistencia).
 //   - Préstamos / embargos / terceros (internal/prestamos).
-//   - Fase 6c: Export bancario y boleta de pago (planilla).
-//   - Fase 7: Liquidaciones laborales.
-//   - Fase 8: Dashboard gerencial.
-//   - Fase 11B: Contabilización (internal/contabilidad) — generar y consultar asientos.
+//   - Liquidaciones laborales.
+//   - Export bancario y boleta de pago (planilla).
+//   - Contabilización (internal/contabilidad): generar y consultar asientos.
+//   - Dashboard gerencial.
 //
 // Regla de middleware (ADR-000 sección 3):
 //
@@ -48,19 +47,19 @@ import (
 // Se construyen en cmd/api/main.go (buildDeps) y se pasan acá; así routes.go
 // no tiene que adivinar los constructores de cada módulo.
 type Deps struct {
-	Auth       *auth.Servicio
-	Asistencia *asistencia.Service
-	// Vacaciones (Fase 12B): nil = no se montan las rutas (mismo criterio que
-	// PlanillaExport). Lo arma main.go con asistencia.NewVacacionesService.
+	Auth           *auth.Servicio
+	Asistencia     *asistencia.Service
 	Vacaciones     *asistencia.VacacionesService
 	Prestamos      *prestamos.Service
 	Liquidacion    *services.LiquidacionService
 	Dashboard      *services.DashboardService
 	PlanillaExport *planilla.ExportService
-	// Contabilidad (Fase 11B): nil = no se montan las rutas (mismo criterio que
-	// PlanillaExport). Lo arma main.go con contabilidad.Service, el proveedor de
-	// detalles de la corrida y el lector de asientos.
-	Contabilidad *ContabilidadDeps
+	Contabilidad   *ContabilidadDeps
+
+	// MotorEmpleado y Acumulados están construidos pero aún sin rutas:
+	// se usan desde F20/F24.
+	MotorEmpleado *planilla.MotorEmpleado
+	Acumulados    *planilla.AcumuladosService
 }
 
 // RegisterRoutes monta todos los endpoints de la API.
@@ -72,10 +71,10 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	protegido := rg.Group("")
 	protegido.Use(middleware.AuthPASETO(tokenMaker))
 
-	// --- Auth (Fase 5) ---------------------------------------------------
+	// --- Auth ------------------------------------------------------------
 	NuevoAuthHandler(deps.Auth).RegistrarRutas(publico, protegido)
 
-	// --- Empleados / Contratos / Organización (Fase 3) -------------------
+	// --- Empleados / Contratos / Organización ----------------------------
 	empleadoService := services.NewEmpleadoService(sqlDB)
 	contratoService := services.NewContratoService(sqlDB)
 	clasificacionService := services.NewClasificacionPuestoService(sqlDB)
@@ -89,27 +88,24 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	NewContratoHandler(contratoService).RegisterRoutes(protegido)
 	NewOrganizacionHandler(clasificacionService, programaService, unidadService, puestoService).RegisterRoutes(protegido)
 
-	// --- Asistencia (Fase 4) ---------------------------------------------
+	// --- Asistencia ------------------------------------------------------
 	// Rutas: /turnos, /calendario, /asistencia, /incapacidades.
-	// TODO(fase 9): PUT /turnos/:id responde 501 (DTO de actualización sin
+	// Pendiente: PUT /turnos/:id responde 501 (DTO de actualización sin
 	// definir en handler.actualizarTurno).
 	asistencia.NewHandler(deps.Asistencia).RegisterRoutes(protegido)
 
-	// --- Vacaciones (Fase 12B) -------------------------------------------
+	// --- Vacaciones ------------------------------------------------------
 	// Rutas: /vacaciones/solicitudes (POST), /vacaciones/solicitudes/:id/
 	// {aprobar,rechazar,disfrute} (POST) y /vacaciones/empleados/:empleado_id/
 	// saldo (GET). Cada ruta aplica su RequirePermission dentro de
 	// VacacionesHandler.RegisterRoutes (vacaciones.solicitar / .aprobar /
-	// .registrar_disfrute / .ver). Solo se montan si main.go inyectó el
-	// servicio (buildDeps).
-	if deps.Vacaciones != nil {
-		asistencia.NewVacacionesHandler(deps.Vacaciones).RegisterRoutes(protegido)
-	}
+	// .registrar_disfrute / .ver).
+	asistencia.NewVacacionesHandler(deps.Vacaciones).RegisterRoutes(protegido)
 
 	// --- Préstamos / embargos / terceros ---------------------------------
 	prestamos.RegisterRoutes(protegido, prestamos.NewHandler(deps.Prestamos))
 
-	// --- Liquidaciones (Fase 7) ------------------------------------------
+	// --- Liquidaciones ---------------------------------------------------
 	// No se usa LiquidacionHandler.RegisterRoutes: registra las dos rutas
 	// sin permisos. Acá se montan los mismos métodos con permiso propio por
 	// ruta, porque proyectar (simulación, no altera estado) y procesar
@@ -124,34 +120,28 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 			middleware.RequirePermission("liquidaciones.procesar"), liquidacionHandler.Procesar)
 	}
 
-	// --- Export bancario y boleta (Fase 6c) ------------------------------
+	// --- Export bancario y boleta ----------------------------------------
 	// Permisos según el comentario de PlanillaExportHandler. No se usa su
-	// RegisterRoutes por la misma razón: no aplica RequirePermission.
-	// Solo se montan si main.go inyectó el servicio: hoy no existe una
-	// implementación concreta de planilla.ExportRepository (ver buildDeps).
-	if deps.PlanillaExport != nil {
-		exportHandler := NewPlanillaExportHandler(deps.PlanillaExport)
-		planillas := protegido.Group("/planillas")
-		{
-			planillas.GET("/:id/exportar/bancario",
-				middleware.RequirePermission("planilla.exportar_bancario"), exportHandler.ExportarDispersionBancaria)
-			planillas.GET("/:id/boleta/:empleado_id",
-				middleware.RequirePermission("planilla.ver_boleta"), exportHandler.ObtenerBoletaPago)
-		}
+	// RegisterRoutes porque no aplica RequirePermission.
+	exportHandler := NewPlanillaExportHandler(deps.PlanillaExport)
+	planillas := protegido.Group("/planillas")
+	{
+		planillas.GET("/:id/exportar/bancario",
+			middleware.RequirePermission("planilla.exportar_bancario"), exportHandler.ExportarDispersionBancaria)
+		planillas.GET("/:id/boleta/:empleado_id",
+			middleware.RequirePermission("planilla.ver_boleta"), exportHandler.ObtenerBoletaPago)
 	}
 
-	// --- Contabilidad (Fase 11B) -----------------------------------------
+	// --- Contabilidad ----------------------------------------------------
 	// Generar (escribe: asientos + período a 'contabilizada') y ver (solo
 	// lectura) llevan permisos distintos por segregación de funciones.
-	if deps.Contabilidad != nil {
-		contabilidadHandler := NewContabilidadHandler(*deps.Contabilidad)
-		protegido.POST("/planillas/:id/contabilizar",
-			middleware.RequirePermission("asientos_contables.generar"), contabilidadHandler.Generar)
-		protegido.GET("/asientos-contables",
-			middleware.RequirePermission("asientos_contables.ver"), contabilidadHandler.Listar)
-	}
+	contabilidadHandler := NewContabilidadHandler(*deps.Contabilidad)
+	protegido.POST("/planillas/:id/contabilizar",
+		middleware.RequirePermission("asientos_contables.generar"), contabilidadHandler.Generar)
+	protegido.GET("/asientos-contables",
+		middleware.RequirePermission("asientos_contables.ver"), contabilidadHandler.Listar)
 
-	// --- Dashboard (Fase 8) ----------------------------------------------
+	// --- Dashboard -------------------------------------------------------
 	// GET /health (público) se monta en main.go a nivel raíz, fuera de
 	// /api/v1, para que los probes no pasen por AuthPASETO.
 	dashboardHandler := NewDashboardHandler(deps.Dashboard)
