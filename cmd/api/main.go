@@ -20,6 +20,7 @@ import (
 	"planillas-ccdr/internal/asistencia"
 	"planillas-ccdr/internal/auth"
 	"planillas-ccdr/internal/config"
+	"planillas-ccdr/internal/contabilidad"
 	"planillas-ccdr/internal/db/dto"
 	"planillas-ccdr/internal/planilla"
 	"planillas-ccdr/internal/planilla/infra"
@@ -112,11 +113,6 @@ func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) {
 // lugar donde se conecta la capa de datos con los servicios: routes.go solo
 // monta rutas. Los servicios de Fase 3 se arman dentro de
 // handlers.RegisterRoutes porque reciben *sql.DB directo.
-//
-// Verificado contra el código fuente: auth, dashboard y liquidación.
-// Pendiente de verificar (VERIFICAR:): asistencia y préstamos, cuyo código
-// no he visto. Export de planilla NO tiene implementación concreta de
-// ExportRepository en el repo; ver el comentario en PlanillaExport.
 func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (handlers.Deps, error) {
 	// Verificado contra internal/db/dto/db.go: New(DBTX) *Queries.
 	queries := dto.New(sqlDB)
@@ -128,16 +124,25 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 		return handlers.Deps{}, fmt.Errorf("asistencia: %w", err)
 	}
 
+	cfgConta := contabilidad.ConfigGeneracion{
+		ConceptoAnclaNeto:         "SAL_BASE",
+		ConceptoCuotaPatronalCCSS: "CCSS_PAT",
+	}
+	contaSvc, err := contabilidad.NewService(contabilidad.NewRepositorio(sqlDB), cfgConta)
+	if err != nil {
+		return handlers.Deps{}, fmt.Errorf("contabilidad: %w", err)
+	}
+	contaDetalles, err := contabilidad.NewDetallesSQL(sqlDB, cfgConta, "CCSS_OBR")
+	if err != nil {
+		return handlers.Deps{}, fmt.Errorf("contabilidad: %w", err)
+	}
+
 	return handlers.Deps{
 		// auth.Store son métodos de *dto.Queries (ver auth/service.go).
 		Auth: auth.NuevoServicio(queries, sqlDB, tokenMaker, politicaAuth(cfg.Auth)),
 
-		// VERIFICAR: firma de asistencia.NewService y que appdb.WithAuditContext
-		// tenga la forma que asistencia espera (ver nota sobre las dos
-		// firmas distintas de WithAuditContext en el resumen).
 		Asistencia: asistenciaSvc,
 
-		// VERIFICAR: que *dto.Queries satisfaga prestamos.Querier.
 		Prestamos: prestamos.NewService(sqlDB, queries),
 
 		// Firma tomada de dashboard_service.go (NewDashboardService).
@@ -151,12 +156,15 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 
 		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
 
-		// PlanillaExport: sin asignar a propósito. planilla.ExportRepository
-		// devuelve tipos propios de planilla (FilaDispersionBancaria,
-		// EncabezadoBoletaPago, ...), no filas de dto, así que *dto.Queries
-		// no lo satisface directo y hace falta un adaptador (como
-		// services.NewDashboardRepository) que no existe todavía. RegisterRoutes
-		// omite estas dos rutas mientras el campo sea nil.
+		Contabilidad: &handlers.ContabilidadDeps{
+			Servicio: contaSvc,
+			Detalles: contaDetalles,
+			Lector:   contabilidad.NewLectorSQL(sqlDB),
+			UsuarioID: func(c *gin.Context) (int64, bool) {
+				id := middleware.UsuarioID(c)
+				return id, id > 0
+			},
+		},
 	}, nil
 }
 
