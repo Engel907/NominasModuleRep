@@ -255,8 +255,8 @@ type LiquidacionInput struct {
 type LiquidacionResultado struct {
 	AntiguedadMeses int
 
-	SalarioPromedio6Meses  decimal.Decimal
-	SalarioDiarioPromedio  decimal.Decimal
+	SalarioPromedio6Meses decimal.Decimal
+	SalarioDiarioPromedio decimal.Decimal
 
 	DiasPreaviso  int
 	MontoPreaviso decimal.Decimal
@@ -407,8 +407,8 @@ func CalcularLiquidacion(input LiquidacionInput) (*LiquidacionResultado, error) 
 	antiguedadMeses, _ := mesesCompletosEntre(input.FechaIngreso, input.FechaSalida)
 
 	resultado := &LiquidacionResultado{
-		AntiguedadMeses:        antiguedadMeses,
-		PeriodoAguinaldoDesde:  input.PeriodoAguinaldoDesde,
+		AntiguedadMeses:       antiguedadMeses,
+		PeriodoAguinaldoDesde: input.PeriodoAguinaldoDesde,
 	}
 
 	// --- Salario promedio y salario diario (últimos 6 meses) ---
@@ -490,20 +490,55 @@ var ErrSinDatosLaborales = errors.New("liquidacion: el empleado no tiene contrat
 // en internal/planilla).
 type LiquidacionRepository interface {
 	GetContratoVigente(ctx context.Context, empleadoID int64) (dto.Contrato, error)
-	SumarSalariosBrutosPeriodo(ctx context.Context, arg dto.SumarSalariosBrutosPeriodoParams) (dto.SumarSalariosBrutosPeriodoRow, error)
-	ListSalariosBrutosUltimosPeriodos(ctx context.Context, arg dto.ListSalariosBrutosUltimosPeriodosParams) ([]dto.ListSalariosBrutosUltimosPeriodosRow, error)
+	SumarSalariosBrutosPeriodo(ctx context.Context, empleadoID int64, fechaDesde, fechaHasta time.Time) (dto.SumarSalariosBrutosPeriodoRow, error)
+	ListSalariosBrutosUltimosPeriodos(ctx context.Context, empleadoID int64, fechaCorte time.Time, limit int32) ([]dto.SalarioBrutoPeriodo, error)
 	GetSaldoVacacionesDisponibles(ctx context.Context, empleadoID int64) (decimal.Decimal, error)
-	GetPorcentajeSalarioEscolarVigente(ctx context.Context) (dto.ParametrosSalarioEscolar, error)
+	GetPorcentajeSalarioEscolarVigente(ctx context.Context) (dto.ParametroSalarioEscolar, error)
 
 	// ListarEscalaCesantiaEnFecha retorna los escalones de
 	// parametros_cesantia_escala del régimen indicado, vigentes a `fecha`
 	// (fecha_inicio_vigencia <= fecha AND (fecha_fin_vigencia IS NULL OR
 	// fecha_fin_vigencia >= fecha)), ordenados por anios_servicio_desde.
-	ListarEscalaCesantiaEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]EscalonCesantia, error)
+	ListarEscalaCesantiaEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]dto.EscalaCesantiaRow, error)
 
 	// ListarEscalaPreavisoEnFecha: ídem sobre parametros_preaviso_escala,
 	// ordenado por antiguedad_meses_desde.
-	ListarEscalaPreavisoEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]EscalonPreaviso, error)
+	ListarEscalaPreavisoEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]dto.EscalaPreavisoRow, error)
+}
+
+// Verificación en compilación: *dto.Queries satisface LiquidacionRepository.
+var _ LiquidacionRepository = (*dto.Queries)(nil)
+
+// escalaCesantiaDesdeDTO convierte las filas de dto a los escalones del motor.
+func escalaCesantiaDesdeDTO(filas []dto.EscalaCesantiaRow) []EscalonCesantia {
+	out := make([]EscalonCesantia, 0, len(filas))
+	for _, f := range filas {
+		e := EscalonCesantia{AniosDesde: f.AniosServicioDesde, DiasPorAnio: f.DiasPorAnio}
+		if f.AniosServicioHasta.Valid {
+			v := f.AniosServicioHasta.Decimal
+			e.AniosHasta = &v
+		}
+		if f.TopeAnios.Valid {
+			v := f.TopeAnios.Decimal
+			e.TopeAnios = &v
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// escalaPreavisoDesdeDTO convierte las filas de dto a los escalones del motor.
+func escalaPreavisoDesdeDTO(filas []dto.EscalaPreavisoRow) []EscalonPreaviso {
+	out := make([]EscalonPreaviso, 0, len(filas))
+	for _, f := range filas {
+		e := EscalonPreaviso{MesesDesde: int(f.AntiguedadMesesDesde), DiasPreaviso: int(f.DiasPreaviso)}
+		if f.AntiguedadMesesHasta.Valid {
+			v := int(f.AntiguedadMesesHasta.Int32)
+			e.MesesHasta = &v
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // RegimenResolver resuelve el contrato (y por tanto el régimen laboral)
@@ -554,11 +589,7 @@ func (s *LiquidacionService) prepararInput(ctx context.Context, sol ProyectarSol
 	}
 
 	// Últimos 6 periodos calculados hasta (e incluyendo) fecha_salida.
-	filas, err := s.repo.ListSalariosBrutosUltimosPeriodos(ctx, dto.ListSalariosBrutosUltimosPeriodosParams{
-		EmpleadoID: sol.EmpleadoID,
-		FechaCorte: sol.FechaSalida,
-		Limit:      6,
-	})
+	filas, err := s.repo.ListSalariosBrutosUltimosPeriodos(ctx, sol.EmpleadoID, sol.FechaSalida, 6)
 	if err != nil {
 		return nil, fmt.Errorf("liquidacion: error consultando salarios últimos 6 meses: %w", err)
 	}
@@ -578,16 +609,18 @@ func (s *LiquidacionService) prepararInput(ctx context.Context, sol ProyectarSol
 			return nil, fmt.Errorf("%w: empleado_id=%d sin contrato vigente al %s (no se asume régimen): %v",
 				ErrSinDatosLaborales, sol.EmpleadoID, sol.FechaSalida.Format("2006-01-02"), err)
 		}
-		escalaCesantia, err = s.repo.ListarEscalaCesantiaEnFecha(ctx, contratoEnFecha.RegimenLaboralID, sol.FechaSalida)
+		filasCesantia, err := s.repo.ListarEscalaCesantiaEnFecha(ctx, contratoEnFecha.RegimenLaboralID, sol.FechaSalida)
 		if err != nil {
 			return nil, fmt.Errorf("liquidacion: error resolviendo escala de cesantía (regimen_laboral_id=%d): %w",
 				contratoEnFecha.RegimenLaboralID, err)
 		}
-		escalaPreaviso, err = s.repo.ListarEscalaPreavisoEnFecha(ctx, contratoEnFecha.RegimenLaboralID, sol.FechaSalida)
+		escalaCesantia = escalaCesantiaDesdeDTO(filasCesantia)
+		filasPreaviso, err := s.repo.ListarEscalaPreavisoEnFecha(ctx, contratoEnFecha.RegimenLaboralID, sol.FechaSalida)
 		if err != nil {
 			return nil, fmt.Errorf("liquidacion: error resolviendo escala de preaviso (regimen_laboral_id=%d): %w",
 				contratoEnFecha.RegimenLaboralID, err)
 		}
+		escalaPreaviso = escalaPreavisoDesdeDTO(filasPreaviso)
 	}
 
 	saldoVacaciones, err := s.repo.GetSaldoVacacionesDisponibles(ctx, sol.EmpleadoID)
@@ -602,26 +635,22 @@ func (s *LiquidacionService) prepararInput(ctx context.Context, sol ProyectarSol
 	}
 	periodoDesde, _ := PeriodoAguinaldo(anioAguinaldo, &sol.FechaSalida)
 
-	aguinaldoAgg, err := s.repo.SumarSalariosBrutosPeriodo(ctx, dto.SumarSalariosBrutosPeriodoParams{
-		EmpleadoID:  sol.EmpleadoID,
-		FechaDesde:  periodoDesde,
-		FechaHasta:  sol.FechaSalida,
-	})
+	aguinaldoAgg, err := s.repo.SumarSalariosBrutosPeriodo(ctx, sol.EmpleadoID, periodoDesde, sol.FechaSalida)
 	if err != nil {
 		return nil, fmt.Errorf("liquidacion: error consultando salarios brutos para aguinaldo proporcional: %w", err)
 	}
 
 	return &LiquidacionInput{
-		FechaIngreso:                              contrato.FechaInicioContrato,
-		FechaSalida:                                sol.FechaSalida,
-		MotivoSalida:                                sol.MotivoSalida,
-		AplicaResponsabilidadPatronal:              sol.AplicaResponsabilidadPatronal,
-		SalariosBrutosUltimos6Meses:                salarios,
-		DiasVacacionesPendientes:                    saldoVacaciones,
-		EscalaCesantia:                              escalaCesantia,
-		EscalaPreaviso:                              escalaPreaviso,
-		TotalSalariosBrutosAguinaldoProporcional:    aguinaldoAgg.TotalSalariosBrutos,
-		PeriodoAguinaldoDesde:                        periodoDesde,
+		FechaIngreso:                             contrato.FechaInicioContrato,
+		FechaSalida:                              sol.FechaSalida,
+		MotivoSalida:                             sol.MotivoSalida,
+		AplicaResponsabilidadPatronal:            sol.AplicaResponsabilidadPatronal,
+		SalariosBrutosUltimos6Meses:              salarios,
+		DiasVacacionesPendientes:                 saldoVacaciones,
+		EscalaCesantia:                           escalaCesantia,
+		EscalaPreaviso:                           escalaPreaviso,
+		TotalSalariosBrutosAguinaldoProporcional: aguinaldoAgg.TotalSalariosBrutos,
+		PeriodoAguinaldoDesde:                    periodoDesde,
 	}, nil
 }
 
@@ -661,25 +690,25 @@ func (s *LiquidacionService) ProcesarLiquidacion(ctx context.Context, sol Proyec
 	var liquidacionID int64
 	err = db.WithAuditContext(ctx, s.sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
 		id, err := q.CrearLiquidacion(ctx, dto.CrearLiquidacionParams{
-			EmpleadoID:                                sol.EmpleadoID,
-			FechaSalida:                                sol.FechaSalida,
-			MotivoSalida:                                sol.MotivoSalida,
-			AplicaResponsabilidadPatronal:              sol.AplicaResponsabilidadPatronal,
-			FechaIngreso:                                input.FechaIngreso,
-			AntiguedadMeses:                             int32(resultado.AntiguedadMeses),
-			SalarioPromedio6meses:                       resultado.SalarioPromedio6Meses,
-			SalarioDiarioPromedio:                       resultado.SalarioDiarioPromedio,
-			DiasPreaviso:                                int16(resultado.DiasPreaviso),
-			MontoPreaviso:                               resultado.MontoPreaviso,
-			DiasCesantia:                                resultado.DiasCesantia,
-			MontoCesantia:                               resultado.MontoCesantia,
-			DiasVacacionesPendientes:                    resultado.DiasVacacionesPendientes,
-			MontoVacacionesProporcionales:                resultado.MontoVacacionesProporcionales,
-			PeriodoAguinaldoDesde:                        resultado.PeriodoAguinaldoDesde,
-			TotalSalariosBrutosAguinaldoProporcional:     resultado.TotalSalariosBrutosAguinaldoProporcional,
-			MontoAguinaldoProporcional:                   resultado.MontoAguinaldoProporcional,
-			TotalLiquidacion:                             resultado.TotalLiquidacion,
-			ProcesadoPor:                                 usuarioID,
+			EmpleadoID:                             sol.EmpleadoID,
+			FechaSalida:                            sol.FechaSalida,
+			MotivoSalida:                           sol.MotivoSalida,
+			AplicaResponsabilidadPatronal:          sol.AplicaResponsabilidadPatronal,
+			FechaIngreso:                           input.FechaIngreso,
+			AntiguedadMeses:                        int32(resultado.AntiguedadMeses),
+			SalarioPromedio6Meses:                  resultado.SalarioPromedio6Meses,
+			SalarioDiarioPromedio:                  resultado.SalarioDiarioPromedio,
+			DiasPreaviso:                           int32(resultado.DiasPreaviso),
+			MontoPreaviso:                          resultado.MontoPreaviso,
+			DiasCesantia:                           resultado.DiasCesantia,
+			MontoCesantia:                          resultado.MontoCesantia,
+			DiasVacacionesPendientes:               resultado.DiasVacacionesPendientes,
+			MontoVacacionesProporcionales:          resultado.MontoVacacionesProporcionales,
+			PeriodoAguinaldoDesde:                  resultado.PeriodoAguinaldoDesde,
+			TotalSalariosBrutosAguinaldoProporcion: resultado.TotalSalariosBrutosAguinaldoProporcional,
+			MontoAguinaldoProporcional:             resultado.MontoAguinaldoProporcional,
+			TotalLiquidacion:                       resultado.TotalLiquidacion,
+			ProcesadoPor:                           usuarioID,
 		})
 		if err != nil {
 			return fmt.Errorf("crear liquidacion: %w", err)
@@ -687,24 +716,15 @@ func (s *LiquidacionService) ProcesarLiquidacion(ctx context.Context, sol Proyec
 		liquidacionID = id
 
 		fechaFinVigencia := sol.FechaSalida
-		if err := q.CerrarContratoVigente(ctx, dto.CerrarContratoVigenteParams{
-			EmpleadoID:      sol.EmpleadoID,
-			FechaFinVigencia: fechaFinVigencia,
-		}); err != nil {
+		if err := q.CerrarContratoVigente(ctx, sol.EmpleadoID, fechaFinVigencia); err != nil {
 			return fmt.Errorf("cerrar contrato vigente: %w", err)
 		}
 
-		if err := q.CerrarDatosLaboralesVigente(ctx, dto.CerrarDatosLaboralesVigenteParams{
-			EmpleadoID:      sol.EmpleadoID,
-			FechaFinVigencia: fechaFinVigencia,
-		}); err != nil {
+		if err := q.CerrarDatosLaboralesVigente(ctx, sol.EmpleadoID, fechaFinVigencia); err != nil {
 			return fmt.Errorf("cerrar datos laborales vigentes: %w", err)
 		}
 
-		if err := q.SetEmpleadoActivo(ctx, dto.SetEmpleadoActivoParams{
-			ID:     sol.EmpleadoID,
-			Activo: false,
-		}); err != nil {
+		if err := q.SetEmpleadoActivo(ctx, sol.EmpleadoID, false); err != nil {
 			return fmt.Errorf("desactivar expediente: %w", err)
 		}
 

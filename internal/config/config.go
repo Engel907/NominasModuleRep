@@ -18,10 +18,11 @@ import (
 // variables de entorno (o un archivo .env en desarrollo). Ver
 // .env.example para la lista completa de claves y su significado.
 type Config struct {
-	App      AppConfig
-	Server   ServerConfig
-	Database DatabaseConfig
-	Auth     AuthConfig
+	App        AppConfig
+	Server     ServerConfig
+	Database   DatabaseConfig
+	Auth       AuthConfig
+	Asistencia AsistenciaConfig
 }
 
 type AppConfig struct {
@@ -66,6 +67,10 @@ func (d DatabaseConfig) DSN() string {
 		"%s:%s@tcp(%s:%s)/%s?%s&timeout=%s",
 		d.User, d.Password, d.Host, d.Port, d.Name, params, d.ConnectTimeout,
 	)
+}
+
+type AsistenciaConfig struct {
+	ToleranciaTardanzaMin int
 }
 
 type AuthConfig struct {
@@ -137,6 +142,7 @@ func LoadConfig() (*Config, error) {
 			ConnectTimeout:  v.GetDuration("DB_CONNECT_TIMEOUT_SECONDS") * time.Second,
 			PingTimeout:     v.GetDuration("DB_PING_TIMEOUT_SECONDS") * time.Second,
 		},
+		Asistencia: AsistenciaConfig{ToleranciaTardanzaMin: v.GetInt("ASISTENCIA_TOLERANCIA_TARDANZA_MIN")},
 		Auth: AuthConfig{
 			PasetoLocalKeyHex:   v.GetString("PASETO_LOCAL_KEY_HEX"),
 			AccessTokenDuration: v.GetDuration("PASETO_ACCESS_TOKEN_MINUTES") * time.Minute,
@@ -185,6 +191,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("AUTH_PASSWORD_RESET_TOKEN_MINUTES", 30)
 	v.SetDefault("AUTH_MAX_FAILED_LOGINS", 5)
 	v.SetDefault("AUTH_LOCKOUT_MINUTES", 15)
+	v.SetDefault("ASISTENCIA_TOLERANCIA_TARDANZA_MIN", 0)
 }
 
 // validate atrapa temprano los casos de configuración incompleta que de

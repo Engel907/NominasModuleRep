@@ -19,8 +19,6 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
-
-	"planillas-ccdr/internal/db/dto"
 )
 
 // ============================================================================
@@ -50,71 +48,6 @@ type MotorRepository interface {
 	ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (ContratoVigente, error)
 	ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]ConceptoAplicableFila, error)
 	ListarParametrosHorasExtraEnFecha(ctx context.Context, fecha time.Time) ([]ParametroHoraExtra, error)
-}
-
-type motorQueries interface {
-	ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (dto.ContratoVigenteEnFechaRow, error)
-	ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]dto.ConceptoAplicableRow, error)
-	ListarParametrosHorasExtraEnFecha(ctx context.Context, fecha time.Time) ([]dto.ParametroHoraExtraRow, error)
-}
-
-var _ motorQueries = (*dto.Queries)(nil)
-
-type motorRepository struct{ q motorQueries }
-
-// NewMotorRepository: planilla.NewMotorRepository(dto.New(sqlDB)).
-func NewMotorRepository(q motorQueries) MotorRepository { return &motorRepository{q: q} }
-
-func (r *motorRepository) ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (ContratoVigente, error) {
-	x, err := r.q.ObtenerContratoVigenteEnFecha(ctx, empleadoID, fecha)
-	if err != nil {
-		return ContratoVigente{}, err
-	}
-	return ContratoVigente(x), nil
-}
-
-func (r *motorRepository) ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]ConceptoAplicableFila, error) {
-	rows, err := r.q.ListarConceptosAplicablesEnFecha(ctx, regimenLaboralID, fecha)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ConceptoAplicableFila, 0, len(rows))
-	for _, x := range rows {
-		f := ConceptoAplicableFila{
-			ConceptoOrdenCalculo: ConceptoOrdenCalculo{
-				ConceptoSalarialID:   x.ConceptoSalarialID,
-				Codigo:               x.Codigo,
-				OrdenCalculo:         x.OrdenCalculo,
-				AfectaBaseCCSS:       x.AfectaBaseCCSS,
-				AfectaBaseRenta:      x.AfectaBaseRenta,
-				AfectaBaseAguinaldo:  x.AfectaBaseAguinaldo,
-				AfectaBaseCesantia:   x.AfectaBaseCesantia,
-				AfectaBaseVacaciones: x.AfectaBaseVacaciones,
-			},
-			Naturaleza:       x.Naturaleza,
-			TipoCalculo:      x.TipoCalculo,
-			FormulaID:        x.FormulaID,
-			ExpresionFormula: x.ExpresionFormula,
-		}
-		if x.MontoFijo.Valid {
-			m := x.MontoFijo.Decimal
-			f.MontoFijo = &m
-		}
-		out = append(out, f)
-	}
-	return out, nil
-}
-
-func (r *motorRepository) ListarParametrosHorasExtraEnFecha(ctx context.Context, fecha time.Time) ([]ParametroHoraExtra, error) {
-	rows, err := r.q.ListarParametrosHorasExtraEnFecha(ctx, fecha)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ParametroHoraExtra, 0, len(rows))
-	for _, x := range rows {
-		out = append(out, ParametroHoraExtra{TipoHoraExtraID: x.TipoHoraExtraID, FactorRecargo: x.FactorRecargo})
-	}
-	return out, nil
 }
 
 // ============================================================================

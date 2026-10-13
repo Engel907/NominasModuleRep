@@ -194,16 +194,20 @@ type fakeRepo struct {
 	mapeos     []MapeoConceptoCuenta
 	guardados  []AsientoContable
 	marcado    bool
+	marcadoDe  string // estado desde el que se marcó
+	usuarioTx  int64  // usuario con el que se abrió la tx auditada
+	txAbiertas int
 }
 
-func (f *fakeRepo) EjecutarEnTx(ctx context.Context, fn func(RepositorioTx) error) error {
+func (f *fakeRepo) EjecutarEnTx(ctx context.Context, usuarioID int64, fn func(RepositorioTx) error) error {
+	f.txAbiertas++
+	f.usuarioTx = usuarioID
 	if err := fn(f); err != nil {
 		f.guardados, f.marcado = nil, false // simula rollback
 		return err
 	}
 	return nil
 }
-func (f *fakeRepo) FijarUsuarioAuditoria(context.Context, int64) error { return nil }
 func (f *fakeRepo) ObtenerPeriodoParaContabilizar(context.Context, int64) (PeriodoContable, error) {
 	return f.periodo, nil
 }
@@ -217,22 +221,27 @@ func (f *fakeRepo) GuardarAsiento(_ context.Context, a AsientoContable) (int64, 
 	f.guardados = append(f.guardados, a)
 	return int64(100 + len(f.guardados)), nil
 }
-func (f *fakeRepo) MarcarPeriodoContabilizado(context.Context, int64, string) error {
-	f.marcado = true
+func (f *fakeRepo) MarcarPeriodoContabilizado(_ context.Context, _ int64, estadoActual string) error {
+	f.marcado, f.marcadoDe = true, estadoActual
 	return nil
 }
 
 func TestContabilizarPeriodo(t *testing.T) {
 	base := func() *fakeRepo {
-		return &fakeRepo{periodo: PeriodoContable{ID: 5, FechaFin: time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC), Estado: "aprobada"}, mapeos: mapeosSeed()}
+		return &fakeRepo{periodo: PeriodoContable{ID: 5, FechaFin: time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC), Estado: "pagada"}, mapeos: mapeosSeed()}
 	}
 	svc := func(r *fakeRepo) *Service { s, _ := NewService(r, cfg()); return s }
 
 	t.Run("ok persiste 2 asientos y marca el período", func(t *testing.T) {
 		r := base()
-		as, err := svc(r).ContabilizarPeriodo(context.Background(), 5, 1, []DetallePlanilla{detalleEjemplo(7)})
+		as, err := svc(r).ContabilizarPeriodo(context.Background(), 5, 42, []DetallePlanilla{detalleEjemplo(7)})
 		if err != nil || len(as) != 2 || len(r.guardados) != 2 || !r.marcado {
 			t.Fatalf("err=%v as=%d guardados=%d marcado=%v", err, len(as), len(r.guardados), r.marcado)
+		}
+		// Misma transacción auditada: una sola tx, con el usuario real, y la
+		// transición sale de 'pagada'.
+		if r.txAbiertas != 1 || r.usuarioTx != 42 || r.marcadoDe != "pagada" {
+			t.Errorf("tx=%d usuario=%d marcadoDe=%q", r.txAbiertas, r.usuarioTx, r.marcadoDe)
 		}
 		if as[0].NumeroAsiento == "" || as[0].ID == 0 || as[0].Lineas[0].AsientoContableID != as[0].ID {
 			t.Errorf("asiento sin folio/id: %+v", as[0])
@@ -247,13 +256,19 @@ func TestContabilizarPeriodo(t *testing.T) {
 			t.Fatalf("err=%v guardados=%d marcado=%v", err, len(r.guardados), r.marcado)
 		}
 	})
-	t.Run("estado inválido", func(t *testing.T) {
-		r := base()
-		r.periodo.Estado = "borrador"
-		if _, err := svc(r).ContabilizarPeriodo(context.Background(), 5, 1, []DetallePlanilla{detalleEjemplo(7)}); !errors.Is(err, ErrPeriodoEstadoInvalido) {
-			t.Fatalf("err=%v", err)
-		}
-	})
+	// D4: solo 'pagada' se contabiliza. Cualquier otro estado → error de estado
+	// y NADA persistido ni marcado.
+	for _, estado := range []string{"borrador", "calculada", "aprobada", "contabilizada", "cerrado", ""} {
+		estado := estado
+		t.Run("estado inválido: "+estado, func(t *testing.T) {
+			r := base()
+			r.periodo.Estado = estado
+			_, err := svc(r).ContabilizarPeriodo(context.Background(), 5, 1, []DetallePlanilla{detalleEjemplo(7)})
+			if !errors.Is(err, ErrPeriodoEstadoInvalido) || len(r.guardados) != 0 || r.marcado {
+				t.Fatalf("err=%v guardados=%d marcado=%v", err, len(r.guardados), r.marcado)
+			}
+		})
+	}
 	t.Run("asientos ya generados", func(t *testing.T) {
 		r := base()
 		r.existentes = 2
@@ -261,4 +276,74 @@ func TestContabilizarPeriodo(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+// Neto que no corresponde a ingresos - deducciones: la partida doble lo debe
+// detectar (el motor/BD podrían traer un neto alterado) y no persistir nada.
+func TestContabilizarPeriodo_NetoAlteradoDescuadra(t *testing.T) {
+	r := &fakeRepo{periodo: PeriodoContable{ID: 5, FechaFin: time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC), Estado: "pagada"}, mapeos: mapeosSeed()}
+	s, _ := NewService(r, cfg())
+	det := detalleEjemplo(7)
+	det.Calculo.NetoPagado = d("932981.26") // +0.01
+	_, err := s.ContabilizarPeriodo(context.Background(), 5, 1, []DetallePlanilla{det})
+	var de *DescuadreError
+	if !errors.As(err, &de) || !errors.Is(err, ErrDescuadre) {
+		t.Fatalf("esperaba DescuadreError, obtuve %v", err)
+	}
+	if !de.TotalHaber.Sub(de.TotalDebe).Equal(d("0.01")) {
+		t.Errorf("diferencia = %s, esperaba 0.01", de.TotalHaber.Sub(de.TotalDebe))
+	}
+	if len(r.guardados) != 0 || r.marcado {
+		t.Errorf("no debía persistir nada: guardados=%d marcado=%v", len(r.guardados), r.marcado)
+	}
+}
+
+// Los montos con más de 2 decimales se redondean ANTES de validar/persistir
+// (las columnas son DECIMAL(14,2)): ninguna línea puede llevar más precisión
+// que la que la base va a conservar.
+func TestGenerarAsientos_RedondeaADosDecimales(t *testing.T) {
+	det := detalleEjemplo(7)
+	det.Calculo.DesglosePorConcepto[1] = linea(cHrsExtra, "HRS_EXTRA", "62500.004")
+	det.Calculo.CuotaPatronalCCSS = d("285068.754")
+	det.Calculo.NetoPagado = d("932981.254")
+	as, err := GenerarAsientos(5, []DetallePlanilla{det}, mapeosSeed(), cfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range as {
+		for _, l := range a.Lineas {
+			if !l.MontoDebe.Equal(l.MontoDebe.Round(2)) || !l.MontoHaber.Equal(l.MontoHaber.Round(2)) {
+				t.Errorf("línea con más de 2 decimales: debe=%s haber=%s", l.MontoDebe, l.MontoHaber)
+			}
+		}
+	}
+	if !as[0].TotalDebe().Equal(d("1347568.75")) || !as[1].TotalHaber().Equal(d("1347568.75")) {
+		t.Errorf("totales gasto=%s pasivo=%s", as[0].TotalDebe(), as[1].TotalHaber())
+	}
+}
+
+// Un monto que redondea a cero no genera línea (violaría el CHECK > 0).
+func TestGenerarAsientos_MontoQueRedondeaACeroSeOmite(t *testing.T) {
+	det := detalleEjemplo(7)
+	det.Calculo.DesglosePorConcepto[1] = linea(cHrsExtra, "HRS_EXTRA", "0.004")
+	det.Calculo.TotalIngresos = d("1000000")
+	det.Calculo.NetoPagado = d("870481.25") // 1.000.000 - 129.518,75
+	as, err := GenerarAsientos(5, []DetallePlanilla{det}, mapeosSeed(), cfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range as[0].Lineas {
+		if l.CuentaContableID == 5102 {
+			t.Errorf("no debía existir línea de HRS_EXTRA: %+v", l)
+		}
+	}
+}
+
+// La cuota patronal negativa se rechaza aunque redondee a cero.
+func TestGenerarAsientos_PatronalNegativaFalla(t *testing.T) {
+	det := detalleEjemplo(7)
+	det.Calculo.CuotaPatronalCCSS = d("-0.004")
+	if _, err := GenerarAsientos(5, []DetallePlanilla{det}, mapeosSeed(), cfg()); !errors.Is(err, ErrMontoNegativoOInvalido) {
+		t.Fatalf("esperaba ErrMontoNegativoOInvalido, obtuve %v", err)
+	}
 }

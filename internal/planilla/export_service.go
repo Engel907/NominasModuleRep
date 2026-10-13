@@ -1,24 +1,28 @@
-// Fase 6c — Comprobantes, boletas de pago y exportación bancaria/CCSS.
+// Fase 6c / F09 — Comprobantes, boletas de pago y exportación bancaria.
 //
-// Este archivo separa, igual que el motor de cálculo (ver service.go), el
-// ACCESO A DATOS (ExportRepository, implementado sobre dto.Queries/sqlc)
-// del ARMADO DEL ARCHIVO/RESPUESTA (ExportService), para poder testear el
+// Este archivo separa el ACCESO A DATOS (ExportRepository y ExportUnitOfWork,
+// cuya implementación sobre dto.Queries vive en export_repository.go) del
+// ARMADO DEL ARCHIVO/RESPUESTA (ExportService), para poder testear el
 // formateo del TXT de dispersión y el ensamblado de la boleta sin una BD
-// real.
+// real. Este archivo NO importa internal/db ni internal/db/dto.
 package planilla
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/shopspring/decimal"
 )
 
 // ============================================================================
-// Contratos de lectura (sqlc, ver db/queries/planilla_export.sql)
+// Contratos de lectura (implementados en internal/db/dto/planilla_export.go)
 // ============================================================================
 
 // FilaDispersionBancaria es la fila que necesita el archivo plano de
@@ -52,36 +56,36 @@ type ConceptoBoletaPago struct {
 	Naturaleza     string // 'ingreso' | 'deduccion' — ver conceptos_salariales.naturaleza
 	Monto          decimal.Decimal
 	Cantidad       decimal.Decimal
-	OrdenCalculo   int32
+	// OrdenCalculo viene de orden_calculo_concepto vigente a la fecha fin
+	// del período; 0 si el concepto no tiene orden vigente.
+	OrdenCalculo int32
 }
 
 // EmbargoBoletaPago corresponde a una fila de ObtenerEmbargosBoletaPago.
+//
+// F20: planilla_detalle_embargo hoy solo guarda orden_prioridad y monto
+// (monto efectivamente retenido). F20 agregará monto_calculado,
+// monto_aplicado y saldo_pendiente_insatisfecho; entonces se amplía este struct.
 type EmbargoBoletaPago struct {
-	EmbargoID                  int64
-	TipoEmbargoCodigo          string
-	TipoEmbargoNombre          string
-	PrioridadLegal             int32
-	MontoCalculado             decimal.Decimal
-	MontoAplicado              decimal.Decimal
-	SaldoPendienteInsatisfecho decimal.Decimal
+	EmbargoID         int64
+	TipoEmbargoCodigo string
+	TipoEmbargoNombre string
+	OrdenPrioridad    int32 // planilla_detalle_embargo.orden_prioridad
+	Monto             decimal.Decimal
 }
 
-// ExportRepository es el subconjunto de acceso a datos que necesita este
-// archivo. Se define como interfaz propia (no se reutiliza
-// PayrollRepository de service.go) porque son consultas de LECTURA sobre
-// resultados YA calculados y persistidos — no participan del cálculo puro
-// ni de la estrategia de bloqueo de periodos_planilla.
+// ExportRepository es el subconjunto de acceso a datos de LECTURA que
+// necesita este archivo, sobre resultados YA calculados y persistidos.
 type ExportRepository interface {
 	// ObtenerDetallesPlanillaParaDispersion retorna una fila por empleado
-	// del período, solo si el período está 'calculado' o 'cerrado'. Debe
-	// venir ordenado por nombre (ver query) para que el archivo generado
+	// del período, solo si el período está en EstadosParaDispersion()
+	// (aprobada|pagada). Viene ordenado por nombre e id para que el archivo
 	// sea determinístico entre corridas.
 	ObtenerDetallesPlanillaParaDispersion(ctx context.Context, periodoID int64) ([]FilaDispersionBancaria, error)
 
-	// ObtenerDatosBoletaPago retorna el encabezado agregado. Debe
-	// retornar un error explícito (nunca una fila vacía/zero-value) si no
-	// existe planilla_detalle_empleado para ese periodoID+empleadoID —
-	// mismo criterio de "sin defaults implícitos" del motor de cálculo.
+	// ObtenerDatosBoletaPago retorna el encabezado agregado, solo si el
+	// período está aprobada|pagada|contabilizada. Retorna error explícito
+	// (sql.ErrNoRows envuelto) si no existe: nunca un zero-value.
 	ObtenerDatosBoletaPago(ctx context.Context, periodoID int64, empleadoID int64) (EncabezadoBoletaPago, error)
 
 	ObtenerDesgloseConceptosBoletaPago(ctx context.Context, periodoID int64, empleadoID int64) ([]ConceptoBoletaPago, error)
@@ -90,16 +94,54 @@ type ExportRepository interface {
 }
 
 // ============================================================================
+// Trazabilidad (S14): registro de exportaciones en exportaciones_generadas
+// ============================================================================
+
+// FormatoDispersionTXT es formatos_exportacion.codigo del TXT de dispersión
+// delimitado por comas (lo siembra la migración 000109).
+const FormatoDispersionTXT = "BANCO_TXT_COMAS"
+
+// ExportacionRegistro es lo que se persiste por cada archivo generado.
+type ExportacionRegistro struct {
+	PeriodoID     int64
+	FormatoCodigo string
+	NombreArchivo string
+	HashSHA256    string // hex en minúsculas, 64 caracteres
+	CantidadFilas int64
+	TotalMonto    decimal.Decimal
+	UsuarioID     int64
+}
+
+// ExportRegistrador inserta la fila de trazabilidad.
+type ExportRegistrador interface {
+	RegistrarExportacion(ctx context.Context, r ExportacionRegistro) (int64, error)
+}
+
+// ExportTx es lo que ve el servicio dentro de la transacción auditada:
+// lecturas y registro comparten la MISMA transacción.
+type ExportTx interface {
+	ExportRepository
+	ExportRegistrador
+}
+
+// ExportUnitOfWork ejecuta fn dentro de una transacción auditada
+// (db.WithAuditContext). Si fn devuelve error se hace rollback: no queda
+// registro de un archivo que no se entregó.
+type ExportUnitOfWork interface {
+	EjecutarAuditado(ctx context.Context, usuarioID int64, fn func(ctx context.Context, tx ExportTx) error) error
+}
+
+// ============================================================================
 // Salida: boleta de pago (para serializar como JSON en el handler)
 // ============================================================================
 
 // BoletaPagoOutput es la estructura completa de la boleta individual.
 type BoletaPagoOutput struct {
-	Encabezado EncabezadoBoletaPago
-	Ingresos   []ConceptoBoletaPago
+	Encabezado  EncabezadoBoletaPago
+	Ingresos    []ConceptoBoletaPago
 	Deducciones []ConceptoBoletaPago
-	Embargos   []EmbargoBoletaPago
-	GeneradaEn time.Time
+	Embargos    []EmbargoBoletaPago
+	GeneradaEn  time.Time
 }
 
 // ============================================================================
@@ -107,115 +149,195 @@ type BoletaPagoOutput struct {
 // ============================================================================
 
 const (
-	// dosDecimalesExport se mantiene separado de la constante homónima de
-	// calculations.go (paquete distinto de archivo, mismo paquete
-	// `planilla`) solo por claridad de lectura de este archivo.
 	dosDecimalesExport = int32(2)
 
-	// separadorDispersion: coma, según lo pedido explícitamente
-	// ("TXT delimitado por comas"). ASUNCIÓN a confirmar con el banco real
-	// (BCR/BN/Banco Popular, etc. — cada plataforma SINPE/transferencia
-	// masiva tiene su propio layout; este formato es el mínimo pedido en
-	// la tarea, no un layout oficial verificado).
+	// separadorDispersion: coma ("TXT delimitado por comas"). ASUNCIÓN a
+	// confirmar con el banco real: cada plataforma tiene su propio layout.
 	separadorDispersion = ","
 
-	// finLineaDispersion: CRLF. ASUNCIÓN — varias plataformas bancarias de
-	// procesamiento por lotes en Costa Rica exigen CRLF en archivos planos;
-	// si la plataforma destino específica exige LF, cambiar solo esta
-	// constante.
+	// finLineaDispersion: CRLF. ASUNCIÓN: varias plataformas bancarias por
+	// lotes en Costa Rica exigen CRLF; si la destino exige LF, cambiar aquí.
 	finLineaDispersion = "\r\n"
 )
 
-// ErrPlanillaSinFilasParaDispersion se retorna si el período no tiene
-// ninguna fila 'calculado'/'cerrado' para dispersar — evita generar y
-// entregar un archivo vacío como si fuera válido.
-var ErrPlanillaSinFilasParaDispersion = fmt.Errorf("planilla: no hay filas de dispersión bancaria para el período (¿período no cerrado, o sin empleados con datos bancarios vigentes?)")
+// ErrPlanillaSinFilasParaDispersion: el período no tiene filas dispersables.
+var ErrPlanillaSinFilasParaDispersion = errors.New("planilla: no hay filas de dispersión bancaria para el período (¿período no aprobado/pagado, o sin empleados con datos bancarios vigentes?)")
+
+// ErrUsuarioExportRequerido: la exportación exige un usuario identificado.
+var ErrUsuarioExportRequerido = errors.New("planilla: usuarioID es requerido para exportar")
+
+// Motivos (controlados) por los que una fila de dispersión se rechaza. Son
+// seguros de mostrar al operador: no contienen datos bancarios.
+const (
+	MotivoIBANVacio      = "IBAN vacío"
+	MotivoIBANInvalido   = "IBAN con caracteres no permitidos"
+	MotivoCedulaVacia    = "cédula vacía"
+	MotivoCedulaInvalida = "cédula con caracteres no permitidos"
+	MotivoNetoNoPositivo = "neto a pagar no es positivo"
+	MotivoNetoDecimales  = "neto a pagar con más de 2 decimales"
+)
+
+// FilaDispersionError identifica qué empleado impide generar el archivo y
+// por qué (Motivo es uno de las constantes Motivo*).
+type FilaDispersionError struct {
+	EmpleadoID int64
+	Motivo     string
+}
+
+func (e *FilaDispersionError) Error() string {
+	return fmt.Sprintf("planilla: empleado_id=%d inválido para dispersión: %s", e.EmpleadoID, e.Motivo)
+}
 
 type ExportService struct {
 	repo ExportRepository
+	uow  ExportUnitOfWork
+	now  func() time.Time
 }
 
-func NewExportService(repo ExportRepository) *ExportService {
-	return &ExportService{repo: repo}
+// NewExportService: repo atiende las boletas (solo lectura); uow atiende la
+// dispersión (lectura + registro en una transacción auditada).
+func NewExportService(repo ExportRepository, uow ExportUnitOfWork) *ExportService {
+	return &ExportService{repo: repo, uow: uow, now: time.Now}
 }
 
-// GenerarArchivoDispersionBancaria arma el archivo plano de dispersión
-// bancaria del período: una línea por empleado, formato
-// "IBAN,Cédula,Nombre,Monto", CRLF entre líneas. Monto siempre con 2
-// decimales fijos (StringFixed(2)) — nunca notación científica ni
-// separador de miles, para máxima compatibilidad con parsers bancarios
-// simples.
+// GenerarArchivoDispersionBancaria arma el archivo plano de dispersión del
+// período ("IBAN,Cédula,Nombre,Monto", CRLF) y registra la exportación
+// (quién, cuándo, período, formato, nombre, SHA-256, filas y total) en
+// exportaciones_generadas en la MISMA transacción auditada. Si algo falla,
+// no se entrega archivo ni queda registro.
 //
-// Retorna el buffer y el nombre de archivo sugerido
-// ("dispersion_bancaria_periodo_<id>_<fecha>.txt"); el handler decide qué
-// hacer con ambos (Content-Disposition, etc.).
-func (s *ExportService) GenerarArchivoDispersionBancaria(ctx context.Context, periodoID int64) ([]byte, string, error) {
-	filas, err := s.repo.ObtenerDetallesPlanillaParaDispersion(ctx, periodoID)
-	if err != nil {
-		return nil, "", fmt.Errorf("planilla: error obteniendo filas de dispersión para periodo_id=%d: %w", periodoID, err)
-	}
-	if len(filas) == 0 {
-		return nil, "", ErrPlanillaSinFilasParaDispersion
+// Devuelve el contenido y el nombre de archivo sugerido.
+func (s *ExportService) GenerarArchivoDispersionBancaria(ctx context.Context, periodoID int64, usuarioID int64) ([]byte, string, error) {
+	if usuarioID <= 0 {
+		return nil, "", ErrUsuarioExportRequerido
 	}
 
-	var buf bytes.Buffer
-	for _, fila := range filas {
-		if err := validarFilaDispersion(fila); err != nil {
-			return nil, "", fmt.Errorf("planilla: empleado_id=%d inválido para dispersión: %w", fila.EmpleadoID, err)
+	var (
+		contenido     []byte
+		nombreArchivo string
+	)
+	err := s.uow.EjecutarAuditado(ctx, usuarioID, func(ctx context.Context, tx ExportTx) error {
+		filas, err := tx.ObtenerDetallesPlanillaParaDispersion(ctx, periodoID)
+		if err != nil {
+			return fmt.Errorf("planilla: error obteniendo filas de dispersión para periodo_id=%d: %w", periodoID, err)
+		}
+		if len(filas) == 0 {
+			return ErrPlanillaSinFilasParaDispersion
 		}
 
+		buf, total, err := armarArchivoDispersion(filas)
+		if err != nil {
+			return err
+		}
+
+		nombre := nombreArchivoDispersion(periodoID, s.now())
+		suma := sha256.Sum256(buf)
+		if _, err := tx.RegistrarExportacion(ctx, ExportacionRegistro{
+			PeriodoID:     periodoID,
+			FormatoCodigo: FormatoDispersionTXT,
+			NombreArchivo: nombre,
+			HashSHA256:    hex.EncodeToString(suma[:]),
+			CantidadFilas: int64(len(filas)),
+			TotalMonto:    total,
+			UsuarioID:     usuarioID,
+		}); err != nil {
+			return fmt.Errorf("planilla: no se pudo registrar la exportación del periodo_id=%d: %w", periodoID, err)
+		}
+
+		contenido, nombreArchivo = buf, nombre
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return contenido, nombreArchivo, nil
+}
+
+// armarArchivoDispersion es la parte pura: valida cada fila, arma el TXT y
+// suma el total. Cualquier fila inválida aborta todo (nunca un archivo parcial).
+func armarArchivoDispersion(filas []FilaDispersionBancaria) ([]byte, decimal.Decimal, error) {
+	var buf bytes.Buffer
+	total := decimal.Zero
+	for _, fila := range filas {
+		if err := validarFilaDispersion(fila); err != nil {
+			return nil, decimal.Zero, err
+		}
 		linea := strings.Join([]string{
-			fila.IBAN,
-			fila.Cedula,
+			strings.TrimSpace(fila.IBAN),
+			strings.TrimSpace(fila.Cedula),
 			sanitizarCampoDispersion(fila.NombreCompleto),
 			fila.NetoPagado.StringFixed(dosDecimalesExport),
 		}, separadorDispersion)
-
 		buf.WriteString(linea)
 		buf.WriteString(finLineaDispersion)
+		total = total.Add(fila.NetoPagado)
 	}
-
-	nombreArchivo := fmt.Sprintf("dispersion_bancaria_periodo_%d_%s.txt", periodoID, time.Now().Format("20060102_150405"))
-	return buf.Bytes(), nombreArchivo, nil
+	return buf.Bytes(), total, nil
 }
 
-// validarFilaDispersion evita generar líneas inconsistentes en un archivo
-// que un banco va a procesar sin validación humana previa: IBAN/cédula
-// vacíos, o neto negativo/cero, se rechazan con error explícito en vez de
-// dispersarse silenciosamente (mismo criterio de "nunca defaults
-// implícitos" de ADR-000/domain.go).
+func nombreArchivoDispersion(periodoID int64, t time.Time) string {
+	return fmt.Sprintf("dispersion_bancaria_periodo_%d_%s.txt", periodoID, t.Format("20060102_150405"))
+}
+
+// campoTieneCaracterProhibido: separador o cualquier carácter de control
+// (incluye CR, LF, TAB, NUL) rompería la estructura de la línea.
+func campoTieneCaracterProhibido(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool {
+		return unicode.IsControl(r) || strings.ContainsRune(separadorDispersion, r)
+	}) >= 0
+}
+
+// validarFilaDispersion evita generar líneas inconsistentes en un archivo que
+// un banco procesa sin validación humana previa. Devuelve *FilaDispersionError.
 func validarFilaDispersion(fila FilaDispersionBancaria) error {
-	if strings.TrimSpace(fila.IBAN) == "" {
-		return fmt.Errorf("IBAN vacío")
+	rechazar := func(motivo string) error {
+		return &FilaDispersionError{EmpleadoID: fila.EmpleadoID, Motivo: motivo}
 	}
-	if strings.TrimSpace(fila.Cedula) == "" {
-		return fmt.Errorf("cédula vacía")
+	iban := strings.TrimSpace(fila.IBAN)
+	if iban == "" {
+		return rechazar(MotivoIBANVacio)
+	}
+	if campoTieneCaracterProhibido(iban) {
+		return rechazar(MotivoIBANInvalido)
+	}
+	cedula := strings.TrimSpace(fila.Cedula)
+	if cedula == "" {
+		return rechazar(MotivoCedulaVacia)
+	}
+	if campoTieneCaracterProhibido(cedula) {
+		return rechazar(MotivoCedulaInvalida)
 	}
 	if !fila.NetoPagado.IsPositive() {
-		return fmt.Errorf("neto_pagado no es positivo (%s)", fila.NetoPagado.StringFixed(dosDecimalesExport))
+		return rechazar(MotivoNetoNoPositivo)
+	}
+	// StringFixed(2) redondearía en silencio: un monto con más de 2 decimales
+	// indica un dato corrupto, no algo que haya que "arreglar" al pagar.
+	if !fila.NetoPagado.Equal(fila.NetoPagado.Round(dosDecimalesExport)) {
+		return rechazar(MotivoNetoDecimales)
 	}
 	return nil
 }
 
-// sanitizarCampoDispersion reemplaza el separador y saltos de línea que
-// pudieran venir en un nombre (ej. nombres compuestos con coma en algún
-// registro mal capturado) para no romper el parseo por columnas del
-// archivo. No trunca ni transforma acentos/mayúsculas — eso es decisión
-// del layout bancario real, no verificada aquí.
+// sanitizarCampoDispersion reemplaza por espacio el separador y cualquier
+// carácter de control (CR, LF, TAB, NUL...) y recorta los extremos. No trunca
+// ni transforma acentos/mayúsculas: eso depende del layout bancario real.
 func sanitizarCampoDispersion(campo string) string {
-	campo = strings.ReplaceAll(campo, separadorDispersion, " ")
-	campo = strings.ReplaceAll(campo, "\r", " ")
-	campo = strings.ReplaceAll(campo, "\n", " ")
+	campo = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || strings.ContainsRune(separadorDispersion, r) {
+			return ' '
+		}
+		return r
+	}, campo)
 	return strings.TrimSpace(campo)
 }
 
 // ObtenerBoletaPago ensambla la boleta individual de un empleado en un
-// período: encabezado + desglose de conceptos (separado en ingresos y
-// deducciones por conceptos_salariales.naturaleza) + embargos aplicados.
+// período: encabezado + desglose (ingresos/deducciones por naturaleza) +
+// embargos aplicados. Solo períodos aprobada|pagada|contabilizada.
 func (s *ExportService) ObtenerBoletaPago(ctx context.Context, periodoID int64, empleadoID int64) (*BoletaPagoOutput, error) {
 	encabezado, err := s.repo.ObtenerDatosBoletaPago(ctx, periodoID, empleadoID)
 	if err != nil {
-		return nil, fmt.Errorf("planilla: no se encontró planilla_detalle_empleado para periodo_id=%d, empleado_id=%d: %w", periodoID, empleadoID, err)
+		return nil, fmt.Errorf("planilla: boleta no disponible para periodo_id=%d, empleado_id=%d (inexistente o período no aprobado): %w", periodoID, empleadoID, err)
 	}
 
 	conceptos, err := s.repo.ObtenerDesgloseConceptosBoletaPago(ctx, periodoID, empleadoID)
@@ -237,10 +359,6 @@ func (s *ExportService) ObtenerBoletaPago(ctx context.Context, periodoID int64, 
 		case "deduccion":
 			deducciones = append(deducciones, c)
 		default:
-			// Naturaleza desconocida: no se descarta silenciosamente el
-			// concepto (perdería visibilidad en la boleta), pero tampoco
-			// se asume un lado — se reporta como error explícito para
-			// que se corrija el dato en conceptos_salariales.
 			return nil, fmt.Errorf("planilla: concepto %q tiene naturaleza desconocida %q", c.CodigoConcepto, c.Naturaleza)
 		}
 	}
@@ -250,6 +368,6 @@ func (s *ExportService) ObtenerBoletaPago(ctx context.Context, periodoID int64, 
 		Ingresos:    ingresos,
 		Deducciones: deducciones,
 		Embargos:    embargos,
-		GeneradaEn:  time.Now(),
+		GeneradaEn:  s.now(),
 	}, nil
 }

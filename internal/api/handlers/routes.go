@@ -48,8 +48,8 @@ import (
 // Se construyen en cmd/api/main.go (buildDeps) y se pasan acá; así routes.go
 // no tiene que adivinar los constructores de cada módulo.
 type Deps struct {
-	Auth           *auth.Servicio
-	Asistencia     *asistencia.Service
+	Auth       *auth.Servicio
+	Asistencia *asistencia.Service
 	// Vacaciones (Fase 12B): nil = no se montan las rutas (mismo criterio que
 	// PlanillaExport). Lo arma main.go con asistencia.NewVacacionesService.
 	Vacaciones     *asistencia.VacacionesService

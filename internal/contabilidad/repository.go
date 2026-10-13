@@ -3,34 +3,41 @@ package contabilidad
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
+	auditdb "planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
 )
 
-// Wiring: contabilidad.NewRepositorio(dto.NewContabilidadStore(sqlDB)).
+// Wiring (main.go / buildDeps):
+//
+//	contabilidad.NewRepositorio(sqlDB)
+//
+// Toda escritura pasa por db.WithAuditContext: fija @auditoria_usuario_id para
+// los triggers trg_aud_*, abre la transacción, hace commit/rollback y limpia la
+// variable de sesión antes de devolver la conexión al pool. Este paquete no
+// abre transacciones por su cuenta.
 
-type store interface {
-	EnTx(ctx context.Context, fn func(q *dto.ContabilidadQueries) error) error
-}
+type repositorio struct{ sqlDB *sql.DB }
 
-type repositorio struct{ s store }
+func NewRepositorio(sqlDB *sql.DB) Repositorio { return &repositorio{sqlDB: sqlDB} }
 
-func NewRepositorio(s store) Repositorio { return &repositorio{s: s} }
-
-func (r *repositorio) EjecutarEnTx(ctx context.Context, fn func(tx RepositorioTx) error) error {
-	return r.s.EnTx(ctx, func(q *dto.ContabilidadQueries) error { return fn(&repoTx{q: q}) })
+func (r *repositorio) EjecutarEnTx(ctx context.Context, usuarioID int64, fn func(tx RepositorioTx) error) error {
+	return auditdb.WithAuditContext(ctx, r.sqlDB, usuarioID, func(_ context.Context, q *dto.Queries) error {
+		return fn(&repoTx{q: q.Contabilidad()})
+	})
 }
 
 type repoTx struct{ q *dto.ContabilidadQueries }
 
-func (t *repoTx) FijarUsuarioAuditoria(ctx context.Context, usuarioID int64) error {
-	return t.q.FijarUsuarioAuditoria(ctx, usuarioID)
-}
-
 func (t *repoTx) ObtenerPeriodoParaContabilizar(ctx context.Context, periodoID int64) (PeriodoContable, error) {
 	x, err := t.q.ObtenerPeriodoParaContabilizar(ctx, periodoID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return PeriodoContable{}, fmt.Errorf("%w: periodo_id=%d", ErrPeriodoNoExiste, periodoID)
+		}
 		return PeriodoContable{}, err
 	}
 	return PeriodoContable{ID: x.ID, FechaFin: x.FechaFin, Estado: x.Estado}, nil

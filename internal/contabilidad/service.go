@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"planillas-ccdr/internal/planilla"
 )
 
 // ============================================================================
@@ -168,7 +170,12 @@ func partidasEmpleado(d DetallePlanilla, porConcepto map[int64]map[int64][]Mapeo
 		if l.Monto.IsNegative() {
 			return nil, fmt.Errorf("%w: concepto %q de empleado_id=%d con monto negativo %s", ErrMontoNegativoOInvalido, l.Codigo, emp, l.Monto)
 		}
-		if l.Monto.IsZero() {
+		// Redondeo a 2 decimales ANTES de acumular: la BD es DECIMAL(14,2) y
+		// MySQL redondearía por su cuenta al insertar; si se validara con más
+		// decimales que los persistidos, un asiento "cuadrado" en memoria
+		// podría quedar descuadrado en la base.
+		monto := l.Monto.Round(dosDecimales)
+		if monto.IsZero() {
 			continue
 		}
 		ms, err := mapeosDe(l.ConceptoSalarialID, l.Codigo)
@@ -179,11 +186,11 @@ func partidasEmpleado(d DetallePlanilla, porConcepto map[int64]map[int64][]Mapeo
 			if m.ConceptoCodigo == cfg.ConceptoAnclaNeto && m.TipoMovimiento == MovimientoHaber {
 				continue // esa línea es el neto, se agrega abajo
 			}
-			out = append(out, partida{m, l.ConceptoSalarialID, l.Monto})
+			out = append(out, partida{m, l.ConceptoSalarialID, monto})
 		}
 	}
 
-	if pat := d.Calculo.CuotaPatronalCCSS; pat.IsNegative() {
+	if pat := d.Calculo.CuotaPatronalCCSS.Round(dosDecimales); d.Calculo.CuotaPatronalCCSS.IsNegative() {
 		return nil, fmt.Errorf("%w: cuota patronal negativa en empleado_id=%d", ErrMontoNegativoOInvalido, emp)
 	} else if pat.IsPositive() {
 		id, ok := idPorCodigo[cfg.ConceptoCuotaPatronalCCSS]
@@ -199,7 +206,7 @@ func partidasEmpleado(d DetallePlanilla, porConcepto map[int64]map[int64][]Mapeo
 		}
 	}
 
-	if neto := d.Calculo.NetoPagado; neto.IsNegative() {
+	if neto := d.Calculo.NetoPagado.Round(dosDecimales); d.Calculo.NetoPagado.IsNegative() {
 		return nil, fmt.Errorf("%w: neto negativo en empleado_id=%d", ErrMontoNegativoOInvalido, emp)
 	} else if neto.IsPositive() {
 		id, ok := idPorCodigo[cfg.ConceptoAnclaNeto]
@@ -281,12 +288,10 @@ func ValidarPartidaDoble(asientos []AsientoContable) error {
 // Orquestación
 // ============================================================================
 
-// Estados de periodos_planilla desde los que se puede contabilizar el
-// devengo. ASUNCIÓN a confirmar con Contabilidad: aprobada o pagada.
-const (
-	estadoPeriodoAprobada = "aprobada"
-	estadoPeriodoPagada   = "pagada"
-)
+// estadoContabilizable es el ÚNICO estado desde el que se puede contabilizar
+// (D4): la planilla debe estar pagada. Tras contabilizar queda `contabilizada`.
+// Un período `aprobada` todavía no se pagó y no se contabiliza.
+const estadoContabilizable = planilla.EstadoPagada
 
 type PeriodoContable struct {
 	ID       int64
@@ -294,15 +299,17 @@ type PeriodoContable struct {
 	Estado   string
 }
 
-// Repositorio abre una transacción y entrega el acceso transaccional.
+// Repositorio abre una transacción AUDITADA y entrega el acceso transaccional.
+//
+// La implementación real DEBE usar db.WithAuditContext (internal/db/audit.go):
+// fija @auditoria_usuario_id para los triggers y garantiza que la variable de
+// sesión se limpie antes de devolver la conexión al pool. usuarioID debe ser > 0.
 type Repositorio interface {
-	EjecutarEnTx(ctx context.Context, fn func(tx RepositorioTx) error) error
+	EjecutarEnTx(ctx context.Context, usuarioID int64, fn func(tx RepositorioTx) error) error
 }
 
 // RepositorioTx: todo lo que ocurre dentro de la transacción de contabilización.
 type RepositorioTx interface {
-	// FijarUsuarioAuditoria fija @auditoria_usuario_id que leen los triggers de auditoría.
-	FijarUsuarioAuditoria(ctx context.Context, usuarioID int64) error
 	// ObtenerPeriodoParaContabilizar lee el período bloqueándolo (FOR UPDATE).
 	ObtenerPeriodoParaContabilizar(ctx context.Context, periodoID int64) (PeriodoContable, error)
 	ContarAsientosDelPeriodo(ctx context.Context, periodoID int64) (int64, error)
@@ -326,8 +333,9 @@ func NewService(repo Repositorio, cfg ConfigGeneracion) (*Service, error) {
 	return &Service{repo: repo, cfg: cfg, ahora: time.Now}, nil
 }
 
-// ContabilizarPeriodo genera y persiste, en UNA transacción, los asientos del
-// período y lo marca 'contabilizada'. Si algo falla (mapeo faltante,
+// ContabilizarPeriodo genera y persiste, en UNA transacción auditada
+// (db.WithAuditContext), los asientos del período en estado `pagada` y lo marca
+// `contabilizada`. Si algo falla (mapeo faltante,
 // descuadre, período en mal estado, asientos ya existentes) se hace rollback
 // y no queda nada insertado.
 //
@@ -336,16 +344,13 @@ func NewService(repo Repositorio, cfg ConfigGeneracion) (*Service, error) {
 func (s *Service) ContabilizarPeriodo(ctx context.Context, periodoID, usuarioID int64, detalles []DetallePlanilla) ([]AsientoContable, error) {
 	var generados []AsientoContable
 
-	err := s.repo.EjecutarEnTx(ctx, func(tx RepositorioTx) error {
-		if err := tx.FijarUsuarioAuditoria(ctx, usuarioID); err != nil {
-			return fmt.Errorf("contabilidad: fijando usuario de auditoría: %w", err)
-		}
+	err := s.repo.EjecutarEnTx(ctx, usuarioID, func(tx RepositorioTx) error {
 		periodo, err := tx.ObtenerPeriodoParaContabilizar(ctx, periodoID)
 		if err != nil {
 			return fmt.Errorf("contabilidad: leyendo periodo_id=%d: %w", periodoID, err)
 		}
-		if periodo.Estado != estadoPeriodoAprobada && periodo.Estado != estadoPeriodoPagada {
-			return fmt.Errorf("%w: periodo_id=%d está %q (se requiere %q o %q)", ErrPeriodoEstadoInvalido, periodoID, periodo.Estado, estadoPeriodoAprobada, estadoPeriodoPagada)
+		if planilla.EstadoPeriodo(periodo.Estado) != estadoContabilizable {
+			return fmt.Errorf("%w: periodo_id=%d está %q (se requiere %q)", ErrPeriodoEstadoInvalido, periodoID, periodo.Estado, estadoContabilizable)
 		}
 		n, err := tx.ContarAsientosDelPeriodo(ctx, periodoID)
 		if err != nil {

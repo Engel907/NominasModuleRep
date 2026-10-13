@@ -20,8 +20,9 @@ import (
 	"planillas-ccdr/internal/asistencia"
 	"planillas-ccdr/internal/auth"
 	"planillas-ccdr/internal/config"
-	appdb "planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/planilla"
+	"planillas-ccdr/internal/planilla/infra"
 	"planillas-ccdr/internal/prestamos"
 	"planillas-ccdr/internal/security"
 	"planillas-ccdr/internal/services"
@@ -54,7 +55,10 @@ func main() {
 		log.Fatalf("security: %v", err)
 	}
 
-	deps := buildDeps(cfg, sqlDB, tokenMaker)
+	deps, err := buildDeps(cfg, sqlDB, tokenMaker)
+	if err != nil {
+		log.Fatalf("deps: %v", err)
+	}
 
 	router := newRouter(cfg, sqlDB, tokenMaker, deps)
 
@@ -113,18 +117,25 @@ func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) {
 // Pendiente de verificar (VERIFICAR:): asistencia y préstamos, cuyo código
 // no he visto. Export de planilla NO tiene implementación concreta de
 // ExportRepository en el repo; ver el comentario en PlanillaExport.
-func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) handlers.Deps {
+func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (handlers.Deps, error) {
 	// Verificado contra internal/db/dto/db.go: New(DBTX) *Queries.
 	queries := dto.New(sqlDB)
 
+	asistenciaSvc, err := asistencia.NewService(sqlDB, queries, asistencia.Opciones{
+		ToleranciaTardanzaMin: cfg.Asistencia.ToleranciaTardanzaMin,
+	})
+	if err != nil {
+		return handlers.Deps{}, fmt.Errorf("asistencia: %w", err)
+	}
+
 	return handlers.Deps{
 		// auth.Store son métodos de *dto.Queries (ver auth/service.go).
-		Auth: auth.NuevoServicio(queries, tokenMaker, politicaAuth(cfg.Auth)),
+		Auth: auth.NuevoServicio(queries, sqlDB, tokenMaker, politicaAuth(cfg.Auth)),
 
 		// VERIFICAR: firma de asistencia.NewService y que appdb.WithAuditContext
 		// tenga la forma que asistencia espera (ver nota sobre las dos
 		// firmas distintas de WithAuditContext en el resumen).
-		Asistencia: asistencia.NewService(queries, appdb.WithAuditContext),
+		Asistencia: asistenciaSvc,
 
 		// VERIFICAR: que *dto.Queries satisfaga prestamos.Querier.
 		Prestamos: prestamos.NewService(sqlDB, queries),
@@ -134,7 +145,11 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 
 		// Firma tomada de liquidacion_service.go. Requiere que *dto.Queries
 		// implemente services.LiquidacionRepository.
-		Liquidacion: services.NewLiquidacionService(sqlDB, queries),
+		Liquidacion: services.NewLiquidacionService(sqlDB, queries, infra.NewMotorRepository(queries)),
+
+		PlanillaExport: planilla.NewExportService(infra.NewExportRepository(queries), infra.NewExportUnitOfWork(sqlDB)),
+
+		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
 
 		// PlanillaExport: sin asignar a propósito. planilla.ExportRepository
 		// devuelve tipos propios de planilla (FilaDispersionBancaria,
@@ -142,7 +157,7 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 		// no lo satisface directo y hace falta un adaptador (como
 		// services.NewDashboardRepository) que no existe todavía. RegisterRoutes
 		// omite estas dos rutas mientras el campo sea nil.
-	}
+	}, nil
 }
 
 // politicaAuth aplica la configuración a auth.Politica. Los campos salen de

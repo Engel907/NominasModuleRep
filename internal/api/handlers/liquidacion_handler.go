@@ -9,7 +9,6 @@ package handlers
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -42,9 +41,9 @@ type liquidacionRequestBody struct {
 }
 
 func (h *LiquidacionHandler) parseSolicitud(c *gin.Context) (services.ProyectarSolicitud, bool) {
-	empleadoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || empleadoID <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "id de empleado inválido"})
+	empleadoID, err := middleware.ParseIDParam(c, "id")
+	if err != nil {
+		_ = c.Error(err) // ErrorHandler lo traduce a 400
 		return services.ProyectarSolicitud{}, false
 	}
 
@@ -61,10 +60,10 @@ func (h *LiquidacionHandler) parseSolicitud(c *gin.Context) (services.ProyectarS
 	}
 
 	return services.ProyectarSolicitud{
-		EmpleadoID:                     empleadoID,
-		FechaSalida:                    fechaSalida,
-		MotivoSalida:                   body.MotivoSalida,
-		AplicaResponsabilidadPatronal:  *body.AplicaResponsabilidadPatronal,
+		EmpleadoID:                    empleadoID,
+		FechaSalida:                   fechaSalida,
+		MotivoSalida:                  body.MotivoSalida,
+		AplicaResponsabilidadPatronal: *body.AplicaResponsabilidadPatronal,
 	}, true
 }
 
@@ -98,21 +97,20 @@ func (h *LiquidacionHandler) Proyectar(c *gin.Context) {
 // vigentes y desactiva el expediente del empleado — todo dentro de una
 // única transacción auditada (WithAuditContext). Requiere el usuario
 // autenticado en el contexto de Gin (ver middleware.AuthPASETO /
-// middleware.UsuarioIDDesdeContexto) para la trazabilidad de
-// auditoria_cambios.
+// middleware.UsuarioID, int64) para la trazabilidad de auditoria_cambios.
 func (h *LiquidacionHandler) Procesar(c *gin.Context) {
 	sol, ok := h.parseSolicitud(c)
 	if !ok {
 		return
 	}
 
-	usuarioID, ok := middleware.UsuarioIDDesdeContexto(c)
-	if !ok {
+	usuarioID := middleware.UsuarioID(c)
+	if usuarioID <= 0 {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "No se pudo determinar el usuario autenticado para auditoría", nil)
 		return
 	}
 
-	resultado, liquidacionID, err := h.service.ProcesarLiquidacion(c.Request.Context(), sol, int64(usuarioID))
+	resultado, liquidacionID, err := h.service.ProcesarLiquidacion(c.Request.Context(), sol, usuarioID)
 	if err != nil {
 		h.responderError(c, err)
 		return
@@ -127,27 +125,9 @@ func (h *LiquidacionHandler) Procesar(c *gin.Context) {
 }
 
 func (h *LiquidacionHandler) responderError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, services.ErrSinDatosLaborales):
+	if errors.Is(err, services.ErrSinDatosLaborales) {
 		middleware.Fail(c, http.StatusUnprocessableEntity, "sin_datos_laborales", err.Error(), nil)
-	default:
-		// No se distingue más finamente sin conocer el resto de la capa de
-		// errores del proyecto (ej. si hay un paquete apperrors con
-		// códigos); se deja como 422 genérico de negocio en vez de 500,
-		// porque las fuentes de error de CalcularLiquidacion son todas de
-		// validación/datos faltantes, no de infraestructura — TODO:
-		// revisar contra la convención real de manejo de errores del
-		// proyecto (fuera del material fuente entregado).
-		middleware.Fail(c, http.StatusUnprocessableEntity, "unprocessable_entity", err.Error(), nil)
+		return
 	}
-}
-
-// RegisterRoutes registra los endpoints de este handler en el grupo de
-// rutas de empleados. Ejemplo de uso en el wiring de cmd/api:
-//
-//	empleados := router.Group("/empleados")
-//	liqHandler.RegisterRoutes(empleados)
-func (h *LiquidacionHandler) RegisterRoutes(empleados *gin.RouterGroup) {
-	empleados.POST("/:id/liquidaciones/proyectar", h.Proyectar)
-	empleados.POST("/:id/liquidaciones/procesar", h.Procesar)
+	middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
 }

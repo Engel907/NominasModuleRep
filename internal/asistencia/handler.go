@@ -66,7 +66,7 @@ func responderError(c *gin.Context, err error) {
 	case errors.Is(err, db.ErrNilUserID):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "usuario no autenticado"})
 	default:
-		middleware.FailFromError(c, err)
+		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
 	}
 }
 

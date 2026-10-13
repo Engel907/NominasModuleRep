@@ -1,17 +1,19 @@
-// Fase 6c — Endpoints de exportación bancaria y boleta de pago.
+// Fase 6c / F09 — Endpoints de exportación bancaria y boleta de pago.
 //
-// AUDITORÍA DE PRODUCCIÓN: este handler asumía un paquete
-// "planillas-ccdr/internal/api" con una función RespondWithError(c, status,
-// err) de 3 argumentos que nunca existió en ningún paquete `api` real del
-// proyecto (era una referencia colgante entre fases, como el propio
-// comentario original ya admitía). El punto de entrada real y único para
-// esto ya existe en middleware.RespondWithError(c, err) — ver
-// internal/api/middleware/respond.go, que además ya lo documenta.
+// Las rutas NO se registran aquí: routes.go las monta con el middleware de
+// permisos (planilla.exportar_bancario y planilla.ver_boleta):
+//
+//	GET /planillas/:id/exportar/bancario   -> ExportarDispersionBancaria
+//	GET /planillas/:id/boleta/:empleado_id -> ObtenerBoletaPago
 package handlers
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
+	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -19,9 +21,8 @@ import (
 	"planillas-ccdr/internal/planilla"
 )
 
-// PlanillaExportHandler agrupa los endpoints de comprobantes/exportación
-// de la Fase 6c. No conoce sqlc ni el detalle de acceso a datos: delega
-// todo en planilla.ExportService (ver internal/planilla/export_service.go).
+// PlanillaExportHandler agrupa los endpoints de comprobantes/exportación.
+// Delega todo en planilla.ExportService.
 type PlanillaExportHandler struct {
 	exportSvc *planilla.ExportService
 }
@@ -30,84 +31,91 @@ func NewPlanillaExportHandler(exportSvc *planilla.ExportService) *PlanillaExport
 	return &PlanillaExportHandler{exportSvc: exportSvc}
 }
 
-// RegisterRoutes registra los endpoints de esta fase bajo el grupo de
-// rutas ya autenticado (AuthPASETO) del router principal.
-//
-// Permisos esperados (a resolver por middleware.RequirePermission, según
-// el modelo de autorización de ADR-000 §3 — código de permiso, no rol):
-//   - GET /planillas/:id/exportar/bancario -> "planilla.exportar_bancario"
-//   - GET /planillas/:id/boleta/:empleado_id -> "planilla.ver_boleta"
-//
-// No se enforcan aquí adentro del handler: el middleware de la ruta debe
-// aplicarlos antes de llegar a estas funciones, igual que el resto del
-// sistema. Ver cmd/api/main.go para el wiring real de permisos por ruta.
-func (h *PlanillaExportHandler) RegisterRoutes(router gin.IRouter) {
-	router.GET("/planillas/:id/exportar/bancario", h.ExportarDispersionBancaria)
-	router.GET("/planillas/:id/boleta/:empleado_id", h.ObtenerBoletaPago)
+// nombreArchivoSeguro deja solo [A-Za-z0-9._-]; cualquier otro carácter
+// (comillas, CR/LF, separadores de ruta, espacios, no ASCII) pasa a '_'.
+func nombreArchivoSeguro(nombre string) string {
+	var b strings.Builder
+	for _, r := range nombre {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	s := strings.TrimLeft(b.String(), ".") // sin archivos ocultos ni ".."
+	if s == "" {
+		return "exportacion.txt"
+	}
+	return s
 }
 
-// ExportarDispersionBancaria maneja
-// GET /planillas/:id/exportar/bancario
-//
-// Genera y entrega como descarga el archivo plano de dispersión bancaria
-// del período (planilla) indicado: una línea por empleado con
-// "IBAN,Cédula,Nombre,Monto". Solo incluye empleados de períodos
-// 'calculado'/'cerrado' (ver ExportService.GenerarArchivoDispersionBancaria).
+// ExportarDispersionBancaria maneja GET /planillas/:id/exportar/bancario.
+// Genera y entrega como descarga el TXT de dispersión (aprobada|pagada) y
+// deja registro en exportaciones_generadas.
 func (h *PlanillaExportHandler) ExportarDispersionBancaria(c *gin.Context) {
-	periodoID, err := middleware.ParseUintParam(c, "id")
-	if err != nil {
-		// ParseUintParam ya respondió 400 y abortó el contexto.
-		return
+	periodoID, ok := parseIDParam(c, "id")
+	if !ok {
+		return // ParseIDParam ya respondió 400
 	}
-
-	payload := middleware.PayloadDesdeContexto(c)
-	if payload == nil {
+	usuarioID, ok := usuarioIDDesdeContexto(c)
+	if !ok {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "Token de autenticación requerido", nil)
 		return
 	}
 
-	contenido, nombreArchivo, err := h.exportSvc.GenerarArchivoDispersionBancaria(c.Request.Context(), int64(periodoID))
+	contenido, nombreArchivo, err := h.exportSvc.GenerarArchivoDispersionBancaria(c.Request.Context(), periodoID, usuarioID)
 	if err != nil {
-		if errors.Is(err, planilla.ErrPlanillaSinFilasParaDispersion) {
-			middleware.Fail(c, http.StatusUnprocessableEntity, "no_dispersion_rows", err.Error(), nil)
-			return
+		var filaErr *planilla.FilaDispersionError
+		switch {
+		case errors.Is(err, planilla.ErrPlanillaSinFilasParaDispersion):
+			middleware.Fail(c, http.StatusUnprocessableEntity, "no_dispersion_rows",
+				"El período no tiene filas para dispersar (debe estar aprobado o pagado y con cuenta bancaria vigente)", nil)
+		case errors.As(err, &filaErr):
+			// EmpleadoID y Motivo son valores controlados, no texto de error interno.
+			middleware.Fail(c, http.StatusUnprocessableEntity, "invalid_dispersion_row",
+				fmt.Sprintf("No se puede generar el archivo: empleado %d: %s", filaErr.EmpleadoID, filaErr.Motivo), nil)
+		default:
+			middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
 		}
-		middleware.RespondWithError(c, err)
 		return
 	}
 
-	c.Header("Content-Disposition", "attachment; filename=\""+nombreArchivo+"\"")
+	disposicion := mime.FormatMediaType("attachment", map[string]string{"filename": nombreArchivoSeguro(nombreArchivo)})
+	c.Header("Content-Disposition", disposicion)
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "no-store")
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", contenido)
 }
 
-// ObtenerBoletaPago maneja
-// GET /planillas/:id/boleta/:empleado_id
-//
-// Devuelve la boleta individual de pago (encabezado + ingresos +
-// deducciones + embargos aplicados) como JSON, para que el frontend la
-// renderice o el propio cliente la convierta a PDF si lo necesita (fuera
-// de alcance de esta fase).
+// ObtenerBoletaPago maneja GET /planillas/:id/boleta/:empleado_id.
+// Devuelve la boleta individual como JSON (aprobada|pagada|contabilizada).
 func (h *PlanillaExportHandler) ObtenerBoletaPago(c *gin.Context) {
-	periodoID, err := middleware.ParseUintParam(c, "id")
-	if err != nil {
+	periodoID, ok := parseIDParam(c, "id")
+	if !ok {
 		return
 	}
-	empleadoID, err := middleware.ParseUintParam(c, "empleado_id")
-	if err != nil {
+	empleadoID, ok := parseIDParam(c, "empleado_id")
+	if !ok {
 		return
 	}
-
-	payload := middleware.PayloadDesdeContexto(c)
-	if payload == nil {
+	if _, ok := usuarioIDDesdeContexto(c); !ok {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "Token de autenticación requerido", nil)
 		return
 	}
 
-	boleta, err := h.exportSvc.ObtenerBoletaPago(c.Request.Context(), int64(periodoID), int64(empleadoID))
+	boleta, err := h.exportSvc.ObtenerBoletaPago(c.Request.Context(), periodoID, empleadoID)
 	if err != nil {
-		middleware.RespondWithError(c, err)
+		if errors.Is(err, sql.ErrNoRows) {
+			middleware.Fail(c, http.StatusNotFound, "not_found",
+				"No existe boleta para ese empleado en el período, o el período aún no está aprobado", nil)
+			return
+		}
+		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
 		return
 	}
 
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, boleta)
 }

@@ -5,8 +5,8 @@
 // completo de esquema, patrón de vigencia y modelo de autorización.
 //
 // Principio de diseño: separar la ORQUESTACIÓN (acceso a BD, locking,
-// transacciones — ver service.go) del CÁLCULO PURO (domain.go + la función
-// CalcularEmpleado en service.go), que opera solo sobre datos ya
+// transacciones — orquestador, F20) del CÁLCULO PURO (domain.go + la función
+// CalcularEmpleado), que opera solo sobre datos ya
 // hidratados en memoria. Esto permite testear el motor con tablas de casos
 // (table-driven tests) sin necesidad de una BD real.
 package planilla
@@ -73,7 +73,7 @@ type IncapacidadInput struct {
 // ConceptoDevengoManualInput inyecta un monto ya decidido para un
 // concepto_salarial puntual (ej. bono discrecional) sin pasar por
 // concepto_salarial_formula. El motor lo trata como un concepto más dentro
-// del flujo de orden_calculo_concepto (ver service.go, evaluarConcepto),
+// del flujo de orden_calculo_concepto (ver evaluarConcepto),
 // pero sin recalcular su fórmula.
 type ConceptoDevengoManualInput struct {
 	ConceptoSalarialID int64
@@ -117,7 +117,7 @@ type ResultadoEmpleadoOutput struct {
 	PeriodoID  int64
 
 	// Bases gravables acumuladas a lo largo del flujo de conceptos
-	// (ver evaluarConcepto / afecta_base_* en service.go).
+	// (ver evaluarConcepto / afecta_base_*).
 	BaseCCSS       decimal.Decimal
 	BaseRenta      decimal.Decimal
 	BaseAguinaldo  decimal.Decimal
@@ -170,7 +170,7 @@ type ConceptoCalculadoOutput struct {
 
 // ResultadoPeriodoOutput agrega los resultados de todos los empleados de un
 // período, más metadatos de la corrida (auditoría y estado de
-// periodos_planilla — ver service.go, estrategia de bloqueo).
+// periodos_planilla — estrategia de bloqueo, F20).
 type ResultadoPeriodoOutput struct {
 	PeriodoID             int64
 	EjecutadoPorUsuarioID int64
@@ -247,8 +247,8 @@ type ParametroHoraExtra struct {
 
 // PeriodoPlanillaEstado modela el subconjunto de columnas de
 // periodos_planilla relevante para la estrategia de bloqueo (ver
-// PayrollEngine.CalcularPeriodo en service.go).
+// PayrollEngine.CalcularPeriodo, F20).
 type PeriodoPlanillaEstado struct {
 	PeriodoID int64
-	Estado    string // 'abierto' | 'calculando' | 'calculado' | 'error' | 'cerrado' — enum real a confirmar contra el .sql fuente
+	Estado    string // valor de EstadoPeriodo (ver estados.go); coincide con el ENUM de periodos_planilla.estado
 }

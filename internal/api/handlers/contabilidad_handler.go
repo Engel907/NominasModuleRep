@@ -5,9 +5,10 @@
 // Endpoints (montados en routes.go, grupo `protegido`):
 //
 //   - POST /planillas/:id/contabilizar   → asientos_contables.generar
-//     Genera y persiste los asientos del período (uno por tipo_asiento) y lo
-//     marca 'contabilizada'. Todo ocurre en UNA transacción dentro de
-//     contabilidad.Service.ContabilizarPeriodo.
+//     Genera y persiste los asientos de un período en estado 'pagada' (uno por
+//     tipo_asiento) y lo marca 'contabilizada'. Todo ocurre en UNA transacción
+//     auditada (db.WithAuditContext) dentro de
+//     contabilidad.Service.ContabilizarPeriodo; cualquier otro estado → 409.
 //   - GET  /asientos-contables?periodo_id=&tipo=   → asientos_contables.ver
 //     Consulta asientos ya generados, filtrando por período y/o por código de
 //     tipo de asiento (al menos un filtro es obligatorio).
@@ -22,6 +23,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -222,6 +224,10 @@ func contabResponderError(c *gin.Context, err error) {
 				"total_debe":  desc.TotalDebe.StringFixed(2),
 				"total_haber": desc.TotalHaber.StringFixed(2),
 			})
+	case errors.Is(err, contabilidad.ErrPeriodoNoExiste):
+		contabResponder(c, http.StatusNotFound, "periodo_no_existe", err.Error(), nil)
+	case errors.Is(err, contabilidad.ErrDetalleInconsistente):
+		contabResponder(c, http.StatusUnprocessableEntity, "detalle_inconsistente", err.Error(), nil)
 	case errors.Is(err, contabilidad.ErrMapeoFaltante):
 		contabResponder(c, http.StatusUnprocessableEntity, "mapeo_faltante", err.Error(), nil)
 	case errors.Is(err, contabilidad.ErrMontoNegativoOInvalido):
@@ -234,6 +240,8 @@ func contabResponderError(c *gin.Context, err error) {
 		contabResponder(c, http.StatusConflict, "asientos_ya_generados", err.Error(), nil)
 	default:
 		// ErrConfigInvalida y cualquier error de infraestructura caen aquí.
+		// El detalle va al log (el cliente solo recibe el mensaje genérico).
+		slog.Error("contabilidad: error no mapeado", slog.String("error", err.Error()))
 		contabResponder(c, http.StatusInternalServerError, "error_interno", "error interno al procesar la contabilización", nil)
 	}
 }

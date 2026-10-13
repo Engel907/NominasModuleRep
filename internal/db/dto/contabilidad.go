@@ -3,8 +3,12 @@ package dto
 // Fase 10 — Consultas de contabilización (sin sqlc, SQL escrito a mano con
 // placeholders `?` siempre; nunca se concatenan valores en el SQL).
 //
-// Se usa un tipo propio (ContabilidadQueries) en vez de extender Queries para
-// no asumir los campos internos de éste.
+// Se usa un tipo propio (ContabilidadQueries) en vez de extender Queries; se
+// obtiene con (*Queries).Contabilidad() dentro de db.WithAuditContext.
+//
+// TODA escritura de este archivo (asientos_contables, asientos_contables_detalle,
+// periodos_planilla) dispara triggers trg_aud_* que leen @auditoria_usuario_id:
+// solo debe invocarse desde una transacción abierta por db.WithAuditContext.
 
 import (
 	"context"
@@ -28,36 +32,25 @@ func NewContabilidadQueries(db ContabilidadDB) *ContabilidadQueries {
 	return &ContabilidadQueries{db: db}
 }
 
-// ContabilidadStore abre transacciones. Uso típico:
+// Contabilidad devuelve las consultas de contabilización ligadas a la MISMA
+// conexión/transacción que q. Es la forma de usarlas dentro de
+// db.WithAuditContext (internal/db/audit.go), que entrega un *Queries ya
+// ligado a la transacción auditada:
 //
-//	dto.NewContabilidadStore(sqlDB)
-type ContabilidadStore struct{ sqlDB *sql.DB }
-
-func NewContabilidadStore(sqlDB *sql.DB) *ContabilidadStore { return &ContabilidadStore{sqlDB: sqlDB} }
-
-// EnTx ejecuta fn dentro de una transacción; commit si fn devuelve nil,
-// rollback en cualquier otro caso.
-func (s *ContabilidadStore) EnTx(ctx context.Context, fn func(q *ContabilidadQueries) error) error {
-	tx, err := s.sqlDB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if err := fn(NewContabilidadQueries(tx)); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
-}
+//	db.WithAuditContext(ctx, sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
+//	    cq := q.Contabilidad()
+//	    ...
+//	})
+//
+// Este paquete ya NO abre transacciones ni fija @auditoria_usuario_id por su
+// cuenta: eso sería saltarse el wrapper obligatorio (la variable de sesión
+// sobrevive al COMMIT y quedaría pegada a una conexión del pool).
+//
+// Requiere que el campo db de Queries cumpla ContabilidadDB (sqlc.DBTX lo
+// cumple: ExecContext, QueryContext y QueryRowContext).
+func (q *Queries) Contabilidad() *ContabilidadQueries { return NewContabilidadQueries(q.db) }
 
 // ---------------------------------------------------------------------------
-
-// FijarUsuarioAuditoria: los triggers trg_aud_* leen @auditoria_usuario_id.
-// Es una variable de sesión, por eso debe ejecutarse en la misma conexión
-// (la transacción) que las escrituras.
-func (q *ContabilidadQueries) FijarUsuarioAuditoria(ctx context.Context, usuarioID int64) error {
-	_, err := q.db.ExecContext(ctx, `SET @auditoria_usuario_id = ?`, usuarioID)
-	return err
-}
 
 type PeriodoParaContabilizarRow struct {
 	ID       int64
@@ -161,8 +154,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 	return err
 }
 
-// MarcarPeriodoContabilizado exige que el estado siga siendo estadoActual
-// (optimista); si no se afectó exactamente 1 fila retorna error.
+// MarcarPeriodoContabilizado pasa el período a 'contabilizada' (valor del ENUM
+// periodos_planilla.estado = planilla.EstadoContabilizada; dto no puede
+// importar planilla, ver dashboard.go). Exige que el estado siga siendo
+// estadoActual (control optimista); si no se afectó exactamente 1 fila
+// retorna error.
 func (q *ContabilidadQueries) MarcarPeriodoContabilizado(ctx context.Context, periodoID int64, estadoActual string) error {
 	res, err := q.db.ExecContext(ctx,
 		`UPDATE periodos_planilla SET estado = 'contabilizada' WHERE id = ? AND estado = ?`, periodoID, estadoActual)

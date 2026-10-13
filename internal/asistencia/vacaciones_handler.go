@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,9 +11,9 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 )
 
-// VacacionesHandler expone el flujo de vacaciones (fase 12B). Igual que
-// Handler: solo parsea input, valida forma y traduce errores a códigos HTTP;
-// toda la lógica y las reglas de negocio viven en VacacionesService.
+// VacacionesHandler expone el flujo de vacaciones. Solo parsea input, valida
+// forma y traduce errores a códigos HTTP; las reglas de negocio viven en
+// VacacionesService.
 type VacacionesHandler struct {
 	service *VacacionesService
 }
@@ -25,6 +24,7 @@ func NewVacacionesHandler(service *VacacionesService) *VacacionesHandler {
 
 // RegisterRoutes cablea las rutas bajo el grupo /api/v1 ya existente. Cada
 // ruta lleva su RequirePermission; nunca se autoriza por nombre de rol.
+// Los códigos de permiso NO se tocan aquí (F12).
 //
 //	POST /vacaciones/solicitudes              vacaciones.solicitar
 //	POST /vacaciones/solicitudes/:id/aprobar  vacaciones.aprobar
@@ -77,8 +77,9 @@ func (h *VacacionesHandler) solicitar(c *gin.Context) {
 // --- Aprobar / rechazar --------------------------------------------------
 
 func (h *VacacionesHandler) aprobar(c *gin.Context) {
-	id, ok := vacIDParam(c, "id", "id de solicitud inválido")
-	if !ok {
+	id, err := middleware.ParseIDParam(c, "id")
+	if err != nil {
+		_ = c.Error(err)
 		return
 	}
 	solicitud, err := h.service.ResolverSolicitud(c.Request.Context(), ResolverSolicitudInput{
@@ -98,8 +99,9 @@ type rechazarVacacionesRequest struct {
 }
 
 func (h *VacacionesHandler) rechazar(c *gin.Context) {
-	id, ok := vacIDParam(c, "id", "id de solicitud inválido")
-	if !ok {
+	id, err := middleware.ParseIDParam(c, "id")
+	if err != nil {
+		_ = c.Error(err)
 		return
 	}
 	var req rechazarVacacionesRequest
@@ -127,8 +129,9 @@ type registrarDisfruteRequest struct {
 }
 
 func (h *VacacionesHandler) registrarDisfrute(c *gin.Context) {
-	id, ok := vacIDParam(c, "id", "id de solicitud inválido")
-	if !ok {
+	id, err := middleware.ParseIDParam(c, "id")
+	if err != nil {
+		_ = c.Error(err)
 		return
 	}
 
@@ -163,8 +166,9 @@ func (h *VacacionesHandler) registrarDisfrute(c *gin.Context) {
 // --- Saldo ---------------------------------------------------------------
 
 func (h *VacacionesHandler) consultarSaldo(c *gin.Context) {
-	empleadoID, ok := vacIDParam(c, "empleado_id", "empleado_id inválido")
-	if !ok {
+	empleadoID, err := middleware.ParseIDParam(c, "empleado_id")
+	if err != nil {
+		_ = c.Error(err)
 		return
 	}
 	// ?fecha=YYYY-MM-DD es opcional; por defecto hoy. Solo afecta la
@@ -189,20 +193,23 @@ func (h *VacacionesHandler) consultarSaldo(c *gin.Context) {
 
 // --- Helpers -------------------------------------------------------------
 
-func vacIDParam(c *gin.Context, nombre, mensaje string) (int64, bool) {
-	id, err := strconv.ParseInt(c.Param(nombre), 10, 64)
-	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": mensaje})
-		return 0, false
-	}
-	return id, true
-}
-
-// vacResponderError traduce los errores del servicio a HTTP. Los errores de
-// negocio (4xx) devuelven su mensaje, que ya está redactado para el usuario;
-// cualquier otro es un 500 con mensaje genérico para no filtrar detalles de BD.
+// vacResponderError traduce los errores del servicio a HTTP y escribe
+// EXACTAMENTE una respuesta. Los errores de negocio (4xx) devuelven su
+// mensaje, redactado para el usuario; cualquier otro es un 500 genérico para
+// no filtrar detalles de BD.
 func vacResponderError(c *gin.Context, err error, mensajeGenerico string) {
+	var calInc *ErrCalendarioIncompleto
 	switch {
+	case errors.As(err, &calInc):
+		fechas := make([]string, len(calInc.Fechas))
+		for i, f := range calInc.Fechas {
+			fechas[i] = f.Format("2006-01-02")
+		}
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":            calInc.Error(),
+			"fechas_faltantes": fechas,
+		})
+
 	case errors.Is(err, ErrVacEmpleadoNoEncontrado),
 		errors.Is(err, ErrVacSolicitudNoEncontrada):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -210,13 +217,12 @@ func vacResponderError(c *gin.Context, err error, mensajeGenerico string) {
 	case errors.Is(err, ErrVacSolicitudNoPendiente),
 		errors.Is(err, ErrVacSolicitudNoAprobada),
 		errors.Is(err, ErrVacDisfruteYaRegistrado),
-		errors.Is(err, ErrVacAcumulacionYaRegistrada),
+		errors.Is(err, ErrAcumulacionYaRegistrada),
 		errors.Is(err, ErrVacSolicitudTraslapada),
 		errors.Is(err, ErrVacSaldoInsuficiente):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 
 	case errors.Is(err, ErrVacRangoFechasInvalido),
-		errors.Is(err, ErrVacCalendarioIncompleto),
 		errors.Is(err, ErrVacSinDiasHabiles),
 		errors.Is(err, ErrVacEmpleadoInactivo),
 		errors.Is(err, ErrVacEscalaNoConfigurada),

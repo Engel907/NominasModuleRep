@@ -8,12 +8,15 @@
 //
 // NOTA DE MIGRACIÓN:
 //
-//   - Las columnas de aguinaldos, salarios_escolares, liquidaciones y
-//     parametros_salario_escolar salen de los INSERT del .sql (migración
-//     000004), NO de db/schema.sql (no disponible al escribir esto). Los SELECT
-//     de este archivo listan columnas explícitas en vez de `SELECT *`; si el
-//     schema real tiene columnas extra (created_at, updated_at, ...) o tipos
-//     distintos, ajustar structs + columnas* aquí.
+//   - F08: las consultas de este archivo se revisaron contra el DDL real
+//     (aguinaldos, salarios_escolares, liquidaciones, parametros_salario_escolar,
+//     vacaciones_acumulado, periodos_planilla, planilla_detalle_empleado). Los
+//     SELECT listan columnas explícitas en vez de `SELECT *`; si el schema
+//     cambia, ajustar structs + columnas* aquí.
+//   - F08: los periodos que cuentan para acumulados son los de
+//     planilla.EstadosParaAcumulados() (aprobada, pagada, contabilizada). El IN
+//     (...) se arma con planilla.ClausulaIN; no se escriben estados como string
+//     suelto en el SQL.
 //   - CORRECCIÓN respecto al .sql: GetSaldoVacacionesDisponibles hacía
 //     `WHERE empleado_id = ? LIMIT 1` asumiendo una fila por empleado.
 //     vacaciones_acumulado es una tabla de CORTES históricos (UNIQUE
@@ -34,11 +37,14 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"planillas-ccdr/internal/planilla"
 )
 
 // ============================================================================
 // SALARIOS BRUTOS DEVENGADOS (fuente compartida por aguinaldo, salario
-// escolar y liquidación). Solo periodos con estado = 'calculado'.
+// escolar y liquidación). Solo periodos en planilla.EstadosParaAcumulados()
+// (aprobada, pagada, contabilizada).
 // ============================================================================
 
 type SumarSalariosBrutosPeriodoRow struct {
@@ -46,21 +52,35 @@ type SumarSalariosBrutosPeriodoRow struct {
 	PeriodosIncluidos   int64
 }
 
+// estadosAcumuladosFiltro devuelve el fragmento "IN (?,?,?)" con los estados de
+// periodo que cuentan para acumulados y los argumentos de la consulta en el
+// orden en que aparecen los placeholders: empleadoID, estados..., resto...
+func estadosAcumuladosFiltro(empleadoID int64, resto ...interface{}) (string, []interface{}) {
+	in, estadoArgs := planilla.ClausulaIN(planilla.EstadosParaAcumulados())
+	args := make([]interface{}, 0, 1+len(estadoArgs)+len(resto))
+	args = append(args, empleadoID)
+	args = append(args, estadoArgs...)
+	args = append(args, resto...)
+	return in, args
+}
+
 // SumarSalariosBrutosPeriodo suma total_ingresos (bruto, no neto) de
 // planilla_detalle_empleado para un empleado, filtrando por la fecha de fin de
-// cada periodo entre fechaDesde y fechaHasta (ambas inclusivas).
+// cada periodo entre fechaDesde y fechaHasta (ambas inclusivas). Solo cuentan
+// periodos en planilla.EstadosParaAcumulados().
 func (q *Queries) SumarSalariosBrutosPeriodo(ctx context.Context, empleadoID int64, fechaDesde, fechaHasta time.Time) (SumarSalariosBrutosPeriodoRow, error) {
+	in, args := estadosAcumuladosFiltro(empleadoID, fechaDesde, fechaHasta)
 	var r SumarSalariosBrutosPeriodoRow
 	err := q.db.QueryRowContext(ctx, `
 SELECT
     COALESCE(SUM(pde.total_ingresos), 0),
     COUNT(*)
 FROM planilla_detalle_empleado pde
-JOIN periodos_planilla pp ON pp.id = pde.periodo_id
+JOIN periodos_planilla pp ON pp.id = pde.periodo_planilla_id
 WHERE pde.empleado_id = ?
-  AND pp.estado = 'calculado'
-  AND pp.fecha_fin_periodo >= ?
-  AND pp.fecha_fin_periodo <= ?`, empleadoID, fechaDesde, fechaHasta).
+  AND pp.estado `+in+`
+  AND pp.fecha_fin >= ?
+  AND pp.fecha_fin <= ?`, args...).
 		Scan(&r.TotalSalariosBrutos, &r.PeriodosIncluidos)
 	return r, err
 }
@@ -73,20 +93,22 @@ type SalarioBrutoPeriodo struct {
 }
 
 // ListSalariosBrutosUltimosPeriodos devuelve el detalle por periodo de los
-// últimos `limit` periodos calculados hasta fechaCorte, más reciente primero.
+// últimos `limit` periodos (en planilla.EstadosParaAcumulados()) hasta
+// fechaCorte, más reciente primero.
 // Se trae el detalle (no solo el agregado) para que el llamador decida si
 // excluye periodos con salario cero/incompleto; esta query no toma esa
 // decisión de negocio.
 func (q *Queries) ListSalariosBrutosUltimosPeriodos(ctx context.Context, empleadoID int64, fechaCorte time.Time, limit int32) ([]SalarioBrutoPeriodo, error) {
+	in, args := estadosAcumuladosFiltro(empleadoID, fechaCorte, limit)
 	rows, err := q.db.QueryContext(ctx, `
-SELECT pp.id, pp.fecha_inicio_periodo, pp.fecha_fin_periodo, pde.total_ingresos
+SELECT pp.id, pp.fecha_inicio, pp.fecha_fin, pde.total_ingresos
 FROM planilla_detalle_empleado pde
-JOIN periodos_planilla pp ON pp.id = pde.periodo_id
+JOIN periodos_planilla pp ON pp.id = pde.periodo_planilla_id
 WHERE pde.empleado_id = ?
-  AND pp.estado = 'calculado'
-  AND pp.fecha_fin_periodo <= ?
-ORDER BY pp.fecha_fin_periodo DESC
-LIMIT ?`, empleadoID, fechaCorte, limit)
+  AND pp.estado `+in+`
+  AND pp.fecha_fin <= ?
+ORDER BY pp.fecha_fin DESC
+LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}

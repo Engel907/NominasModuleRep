@@ -3,6 +3,7 @@
 package handlers
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -32,6 +33,9 @@ func NewDashboardHandler(service *services.DashboardService) *DashboardHandler {
 func (h *DashboardHandler) GetMetricas(c *gin.Context) {
 	dto, err := h.service.ObtenerMetricasGenerales(c.Request.Context(), time.Now())
 	if err != nil {
+		// El detalle va al log, no al cliente: antes el error se descartaba
+		// y una falla de SQL era imposible de diagnosticar.
+		slog.Error("dashboard: error obteniendo métricas", slog.String("error", err.Error()))
 		middleware.Fail(c, http.StatusInternalServerError, "dashboard_metrics_error",
 			"No se pudieron obtener las métricas del dashboard", nil)
 		return

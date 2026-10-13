@@ -11,6 +11,14 @@
 //     planilla_detalle_empleado copió del expediente al calcular.
 //   - Partida doble: si el juego de asientos no cuadra, se retorna error
 //     explícito y NO se inserta nada. Nunca se "ajusta" un descuadre.
+//   - Solo se contabiliza un período en estado `pagada` (D4); la transición a
+//     `contabilizada` ocurre en la MISMA transacción que los asientos.
+//   - Montos: todo importe se redondea a 2 decimales (decimal.Round) al armar
+//     cada partida, igual que las columnas DECIMAL(14,2); así lo que se valida
+//     es exactamente lo que se persiste.
+//   - Porcentajes (D3): el dominio trabaja con FRACCIONES (0.2683). La BD
+//     guarda puntos porcentuales (26.8300); la conversión vive en
+//     sql_adapters.go y la centralizará F18.
 package contabilidad
 
 import (
@@ -139,6 +147,11 @@ var (
 	ErrAsientosYaGenerados    = errors.New("contabilidad: el período ya tiene asientos generados")
 	ErrSinDetalles            = errors.New("contabilidad: no hay detalles de planilla para contabilizar")
 	ErrMontoNegativoOInvalido = errors.New("contabilidad: monto inválido para línea de asiento")
+	ErrPeriodoNoExiste        = errors.New("contabilidad: el período no existe")
+	// ErrDetalleInconsistente: lo persistido no permite reconstruir la corrida
+	// con certeza (p. ej. la cuota obrera recalculada no coincide con la
+	// guardada). Se aborta en vez de contabilizar a ciegas.
+	ErrDetalleInconsistente = errors.New("contabilidad: el detalle persistido de la planilla es inconsistente")
 )
 
 // DescuadreError detalla dónde falló la partida doble.

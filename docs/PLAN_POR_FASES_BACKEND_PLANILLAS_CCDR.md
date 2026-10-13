@@ -595,8 +595,8 @@ CRITERIOS DE ACEPTACIÓN
 
 **Migraciones que puede crear:** `000107_vacaciones_acumulacion_unica`.
 
----
-
+--- 
+awawawwawawawaWA
 ## FASE 08 — Liquidaciones y acumulados (tipos y SQL)
 
 **Contexto.** `liquidacion_service.go` usa 7 tipos que no existen en `dto` (`SumarSalariosBrutosPeriodoParams`, `ListSalariosBrutosUltimosPeriodosParams`, `ListSalariosBrutosUltimosPeriodosRow`, `ParametrosSalarioEscolar` [el real es `ParametroSalarioEscolar`], `CerrarContratoVigenteParams`, `CerrarDatosLaboralesVigenteParams`, `SetEmpleadoActivoParams`), llama a 5 funciones con estilo de struct `Params` cuando `dto` las define posicionales (líneas 557, 605, 690, 697, 704), y su interfaz `LiquidacionRepository` exige `ListarEscalaCesantiaEnFecha` y `ListarEscalaPreavisoEnFecha`, que no existen (las tablas y datos sí). Además el SQL de `dto/acumulados_liquidaciones.go` usa columnas inexistentes (`pde.periodo_id`, `pp.fecha_fin_periodo`, `pp.fecha_inicio_periodo`) y estados inexistentes (`'calculado'`). **Esta fase arregla compilación y SQL; las reglas de negocio de la liquidación son F26.**
@@ -652,7 +652,7 @@ CRITERIOS DE ACEPTACIÓN
 **Archivos que crea:** `internal/db/dto/liquidacion_cierre.go`.
 
 ---
-
+va la de abajoooooo
 ## FASE 09 — Paquete `planilla` y exportación
 
 **Contexto.** `internal/planilla/service.go` y `export_service.go` declaran **las mismas 16 identidades** (no compila), `periodo.go` tiene 0 bytes (sin `package`: error de sintaxis), y las consultas de exportación (`dto/planilla_export.go`) usan `pde.periodo_id`, `pdc.orden_calculo` (no existe en `planilla_detalle_concepto`), columnas inexistentes en `planilla_detalle_embargo` y estados `('calculado','cerrado')` que no existen, así que la dispersión bancaria nunca devolvería filas. La ruta de exportación no se monta y no deja registro (la tabla `exportaciones_generadas` existe sin uso).
@@ -712,6 +712,7 @@ CRITERIOS DE ACEPTACIÓN
 > No hace falta pasar `motor_calculo.go`, `calculator.go` ni `acumulados_periodicos.go`: se validan en F11 con la salida del compilador.
 
 ---
+abajajajaaaaa
 
 ## FASE 10 — Dashboard y contabilidad
 
@@ -762,6 +763,7 @@ CRITERIOS DE ACEPTACIÓN
 - DDL: `periodos_planilla`, `planilla_detalle_*` (944–1035), `cuentas_contables`, `tipos_asiento`, `plantillas_asiento_linea`, `mapeo_concepto_cuenta`, `asientos_contables`, `asientos_contables_detalle` (1153–1243), `programas_presupuestarios` (277–286).
 
 ---
+abajooooo
 
 ## FASE 11 — Integración: `main.go`, `go mod tidy` y bucle de compilación
 

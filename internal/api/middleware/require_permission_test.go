@@ -42,6 +42,7 @@ func init() {
 // dejaría en el contexto tras verificar el token.
 func construirRouter(permisoRequerido string, payload *security.Payload) *gin.Engine {
 	router := gin.New()
+	router.Use(ErrorHandler())
 	router.GET("/protegido",
 		func(c *gin.Context) {
 			if payload != nil {

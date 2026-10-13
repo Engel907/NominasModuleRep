@@ -42,6 +42,17 @@ import (
 //     el de CCSS_OBR, guardados como puntos porcentuales (26.8300 = 26.83 %),
 //     por lo que se dividen entre 100 (el motor trabaja con fracciones).
 //
+// D3 — escala de porcentajes: el DOMINIO trabaja con fracciones (0.2683); la
+// base de datos guarda puntos porcentuales (parametros_cargas_sociales.
+// porcentaje_* DECIMAL(6,4), seed 26.8300 / 10.8300). La división entre 100
+// vive SOLO en porcentajeVigente (único punto de conversión de este archivo).
+// TODO(F18): mover la conversión a un helper compartido de parámetros.
+//
+// Solo se reconstruyen períodos en estado `pagada` (D4); la verificación
+// definitiva (con bloqueo FOR UPDATE) la hace Service.ContabilizarPeriodo
+// dentro de la transacción. Aquí se comprueba antes para devolver el error
+// correcto (409) en vez de uno derivado ("sin detalles").
+//
 // Salvaguarda: con el mismo método se recalcula la cuota OBRERA y se compara con
 // la línea CCSS_OBR persistida de cada empleado. Si no coincide, algún supuesto
 // no se cumple y se aborta. Aun así, la solución de fondo es persistir la cuota
@@ -91,18 +102,21 @@ func (r *DetallesSQL) porcentajeVigente(ctx context.Context, periodoID int64, co
 		return decimal.Zero, decimal.Zero, err
 	}
 	if n != 1 {
-		return decimal.Zero, decimal.Zero, fmt.Errorf("contabilidad: se esperaba 1 parametros_cargas_sociales vigente para %q a la fecha fin del periodo_id=%d y hay %d", codigo, periodoID, n)
+		return decimal.Zero, decimal.Zero, fmt.Errorf("%w: se esperaba 1 parametros_cargas_sociales vigente para %q a la fecha fin del periodo_id=%d y hay %d", ErrConfigInvalida, codigo, periodoID, n)
 	}
 	return pat.Div(cien), obr.Div(cien), nil
 }
 
 func (r *DetallesSQL) DetallesParaContabilizar(ctx context.Context, periodoID int64) ([]DetallePlanilla, error) {
-	var existe int
-	if err := r.db.QueryRowContext(ctx, `SELECT 1 FROM periodos_planilla WHERE id = ?`, periodoID).Scan(&existe); err != nil {
+	var estado string
+	if err := r.db.QueryRowContext(ctx, `SELECT estado FROM periodos_planilla WHERE id = ?`, periodoID).Scan(&estado); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("contabilidad: el periodo_id=%d no existe", periodoID)
+			return nil, fmt.Errorf("%w: periodo_id=%d", ErrPeriodoNoExiste, periodoID)
 		}
 		return nil, fmt.Errorf("contabilidad: leyendo periodo_id=%d: %w", periodoID, err)
+	}
+	if planilla.EstadoPeriodo(estado) != estadoContabilizable {
+		return nil, fmt.Errorf("%w: periodo_id=%d está %q (se requiere %q)", ErrPeriodoEstadoInvalido, periodoID, estado, estadoContabilizable)
 	}
 
 	pctPat, _, err := r.porcentajeVigente(ctx, periodoID, r.codigoPatronal)
@@ -173,6 +187,11 @@ func (r *DetallesSQL) DetallesParaContabilizar(ctx context.Context, periodoID in
 		if cantidad.Valid {
 			linea.Cantidad = cantidad.Decimal
 		}
+		if linea.Codigo == r.codigoPatronal {
+			// La cuota patronal se DERIVA más abajo; si además viniera
+			// persistida como línea se contaría dos veces.
+			return nil, fmt.Errorf("%w: empleado_id=%d trae persistida una línea %q; la cuota patronal se deriva y no debe existir como concepto", ErrDetalleInconsistente, empID, r.codigoPatronal)
+		}
 		res := &e.det.Calculo.ResultadoEmpleadoOutput
 		res.DesglosePorConcepto = append(res.DesglosePorConcepto, linea)
 		if naturaleza.String == "ingreso" && linea.AfectaBaseCCSS {
@@ -194,8 +213,8 @@ func (r *DetallesSQL) DetallesParaContabilizar(ctx context.Context, periodoID in
 		base := e.baseCCSS.Round(dosDecimales)
 		obreroEsperado := base.Mul(pctObr).Round(dosDecimales)
 		if !obreroEsperado.Equal(e.obreroSaved) {
-			return nil, fmt.Errorf("contabilidad: empleado_id=%d: la cuota obrera recalculada (%s) no coincide con la persistida (%s); no se puede derivar la cuota patronal con certeza",
-				e.det.Calculo.EmpleadoID, obreroEsperado.StringFixed(dosDecimales), e.obreroSaved.StringFixed(dosDecimales))
+			return nil, fmt.Errorf("%w: empleado_id=%d: la cuota obrera recalculada (%s) no coincide con la persistida (%s); no se puede derivar la cuota patronal con certeza",
+				ErrDetalleInconsistente, e.det.Calculo.EmpleadoID, obreroEsperado.StringFixed(dosDecimales), e.obreroSaved.StringFixed(dosDecimales))
 		}
 		res := &e.det.Calculo.ResultadoEmpleadoOutput
 		res.BaseCCSS = base

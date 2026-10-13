@@ -22,6 +22,7 @@ import (
 	// Alias dbdto: en este archivo varias funciones usan `dto` como nombre de
 	// variable local (el DTO de salida), lo que sombrearía el paquete.
 	dbdto "planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/planilla"
 )
 
 // ============================================================================
@@ -60,6 +61,9 @@ type SystemHealthDTO struct {
 // tests) no dependan del paquete dto. El adaptador de más abajo
 // (dashboardRepo) implementa DashboardRepository llamando a
 // (*dbdto.Queries).ObtenerMetricasDashboard y convirtiendo su Row a este tipo.
+//
+// "Último período cerrado" usa planilla.EstadosCerrados() (pagada |
+// contabilizada, D4): ya no existe el estado 'cerrado' en el ENUM.
 type MetricasDashboardRow struct {
 	TotalEmpleadosActivos           int64
 	UltimoPeriodoCerradoID          sql.NullInt64
@@ -89,7 +93,14 @@ func NewDashboardRepository(q *dbdto.Queries) DashboardRepository {
 }
 
 func (r *dashboardRepo) ObtenerMetricasDashboard(ctx context.Context, fechaReferencia time.Time) (MetricasDashboardRow, error) {
-	fila, err := r.q.ObtenerMetricasDashboard(ctx, fechaReferencia)
+	// El paquete dto no puede importar planilla (ciclo), así que la lista de
+	// estados se traduce aquí, una sola vez por llamada.
+	cerrados := planilla.EstadosCerrados()
+	estados := make([]string, len(cerrados))
+	for i, e := range cerrados {
+		estados[i] = string(e)
+	}
+	fila, err := r.q.ObtenerMetricasDashboard(ctx, fechaReferencia, estados)
 	if err != nil {
 		return MetricasDashboardRow{}, err
 	}

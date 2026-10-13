@@ -1,7 +1,8 @@
 package asistencia
 
-// Flujo de negocio de vacaciones (Fase 4). Solo orquesta las funciones de
-// internal/db/dto (vacaciones.go y vacaciones_extra.go); no contiene SQL.
+// Flujo de negocio de vacaciones (Fase 4, endurecido en F07). Solo orquesta las
+// funciones de internal/db/dto (vacaciones.go y vacaciones_extra.go); no
+// contiene SQL.
 //
 // Modelo de datos (ver dto/vacaciones.go):
 //   - vacaciones_acumulado: cortes por (empleado_id, fecha_corte); el saldo
@@ -14,9 +15,10 @@ package asistencia
 // SolicitarVacaciones (pendiente) -> ResolverSolicitud (aprobada/rechazada) ->
 // RegistrarDisfrute (mueve días de disponibles a disfrutados).
 //
-// Toda escritura corre en una Tx vía withAuditCtx y arranca bloqueando la fila
-// del empleado (BloquearEmpleado), así dos operaciones concurrentes sobre el
-// mismo empleado se serializan. Orden de locks constante: solicitud -> empleado.
+// Toda escritura corre en una Tx vía db.WithAuditContext (D7) y arranca
+// bloqueando la fila del empleado (BloquearEmpleado), así dos operaciones
+// concurrentes sobre el mismo empleado se serializan. Orden de locks
+// constante: solicitud -> empleado.
 
 import (
 	"context"
@@ -29,6 +31,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
 )
 
@@ -41,15 +44,38 @@ var (
 	ErrVacRangoFechasInvalido      = errors.New("rango de fechas de vacaciones inválido")
 	ErrVacSolicitudTraslapada      = errors.New("las fechas se traslapan con otra solicitud pendiente o aprobada")
 	ErrVacSaldoInsuficiente        = errors.New("saldo de vacaciones insuficiente")
-	ErrVacCalendarioIncompleto     = errors.New("el calendario laboral no está generado para todo el rango solicitado")
 	ErrVacSinDiasHabiles           = errors.New("el rango solicitado no contiene días hábiles")
 	ErrVacEscalaNoConfigurada      = errors.New("no hay escala de vacaciones vigente para la antigüedad del empleado")
 	ErrVacDisfruteYaRegistrado     = errors.New("el disfrute de esta solicitud ya fue registrado")
-	ErrVacAcumulacionYaRegistrada  = errors.New("la acumulación de este período ya fue registrada")
+	ErrAcumulacionYaRegistrada     = errors.New("la acumulación de este período ya fue registrada")
 	ErrVacMotivoRechazoRequerido   = errors.New("el motivo de rechazo es obligatorio")
 	ErrVacMotivoRechazoMuyLargo    = errors.New("el motivo de rechazo excede 255 caracteres")
 	ErrVacPeriodoReferenciaInvalid = errors.New("periodo_referencia es obligatorio y no puede exceder 20 caracteres")
 )
+
+// ErrCalendarioIncompleto indica que calendario_laboral_dia no tiene todas las
+// fechas del rango pedido. Lista exactamente cuáles faltan para que RR. HH.
+// sepa qué días generar/cargar. Nunca se asume un día hábil por defecto (D8).
+type ErrCalendarioIncompleto struct {
+	Fechas []time.Time
+}
+
+func (e *ErrCalendarioIncompleto) Error() string {
+	const muestra = 5
+	partes := make([]string, 0, muestra)
+	for i, f := range e.Fechas {
+		if i == muestra {
+			break
+		}
+		partes = append(partes, f.Format("2006-01-02"))
+	}
+	resto := ""
+	if len(e.Fechas) > muestra {
+		resto = fmt.Sprintf(" (y %d más)", len(e.Fechas)-muestra)
+	}
+	return fmt.Sprintf("el calendario laboral no está generado para %d día(s) del rango solicitado: %s%s",
+		len(e.Fechas), strings.Join(partes, ", "), resto)
+}
 
 const (
 	vacEstadoAprobada  = "aprobada"
@@ -60,22 +86,51 @@ const (
 )
 
 // VacacionesQueries es el subconjunto de *dto.Queries que el servicio usa
-// FUERA de una transacción (lecturas). Las escrituras y las lecturas con lock
-// usan el *dto.Queries que entrega withAuditCtx.
+// FUERA de una transacción (lecturas).
 type VacacionesQueries interface {
-	GetEmpleadoByID(ctx context.Context, id uint64) (dto.Empleado, error)
+	GetEmpleadoByID(ctx context.Context, id int64) (dto.Empleado, error)
 	ObtenerEscalaVacacionesVigentePorAntiguedad(ctx context.Context, aniosServicio decimal.Decimal) (dto.ParametrosVacacionesEscala, error)
 	ObtenerSaldoVacacionesEmpleado(ctx context.Context, empleadoID int64) (dto.VacacionesAcumulado, error)
 	ListarCalendarioPorRango(ctx context.Context, desde, hasta time.Time) ([]dto.ListarCalendarioPorRangoRow, error)
 }
 
-type VacacionesService struct {
-	queries      VacacionesQueries
-	withAuditCtx func(ctx context.Context, userID int64, fn func(*dto.Queries) error) error
+// vacTx es el subconjunto de *dto.Queries que el servicio usa DENTRO de la
+// transacción auditada. *dto.Queries lo satisface; existe para poder probar
+// las reglas de negocio sin base de datos.
+type vacTx interface {
+	BloquearEmpleado(ctx context.Context, empleadoID int64) error
+	ExisteMovimientoAcumulacionVacaciones(ctx context.Context, empleadoID int64, periodoReferencia string) (bool, error)
+	ExisteMovimientoVacacionesPorSolicitud(ctx context.Context, solicitudID int64, tipoMovimiento string) (bool, error)
+	ObtenerSaldoVacacionesEmpleado(ctx context.Context, empleadoID int64) (dto.VacacionesAcumulado, error)
+	ObtenerSaldoVacacionesEmpleadoForUpdate(ctx context.Context, empleadoID int64) (dto.VacacionesAcumulado, error)
+	UpsertSaldoVacacionesEmpleado(ctx context.Context, empleadoID int64, fechaCorte time.Time, diasAcumulados, diasDisfrutados, diasDisponibles decimal.Decimal, registradoPor sql.NullInt64) error
+	InsertarMovimientoVacaciones(ctx context.Context, empleadoID int64, tipoMovimiento string, dias decimal.Decimal, fechaEfectiva time.Time, periodoReferencia sql.NullString, solicitudID sql.NullInt64, observaciones sql.NullString, creadoPor int64) (dto.VacacionesMovimiento, error)
+	ContarSolicitudesVacacionesTraslapadas(ctx context.Context, empleadoID int64, fechaInicio, fechaFin time.Time, excluirSolicitudID int64) (int64, error)
+	ContarSolicitudesVacacionesAprobadasTraslapadas(ctx context.Context, empleadoID int64, fechaInicio, fechaFin time.Time, excluirSolicitudID int64) (int64, error)
+	SumarDiasVacacionesAprobadasSinDisfrutar(ctx context.Context, empleadoID int64, excluirSolicitudID int64) (decimal.Decimal, error)
+	CrearSolicitudVacaciones(ctx context.Context, empleadoID int64, fechaInicio, fechaFin time.Time, diasSolicitados decimal.Decimal, creadoPor int64) (dto.VacacionesSolicitud, error)
+	ObtenerSolicitudVacacionesForUpdate(ctx context.Context, id int64) (dto.VacacionesSolicitud, error)
+	ResolverSolicitudVacaciones(ctx context.Context, id int64, estado string, aprobadoPor int64, motivoRechazo sql.NullString) (dto.VacacionesSolicitud, error)
 }
 
-func NewVacacionesService(queries VacacionesQueries, withAuditCtx func(context.Context, int64, func(*dto.Queries) error) error) *VacacionesService {
-	return &VacacionesService{queries: queries, withAuditCtx: withAuditCtx}
+var _ vacTx = (*dto.Queries)(nil)
+
+type VacacionesService struct {
+	queries VacacionesQueries
+	// runTx ejecuta fn en una transacción auditada. En producción es
+	// db.WithAuditContext; los tests lo reemplazan.
+	runTx func(ctx context.Context, usuarioID int64, fn func(context.Context, vacTx) error) error
+}
+
+func NewVacacionesService(sqlDB *sql.DB, queries VacacionesQueries) *VacacionesService {
+	return &VacacionesService{
+		queries: queries,
+		runTx: func(ctx context.Context, usuarioID int64, fn func(context.Context, vacTx) error) error {
+			return db.WithAuditContext(ctx, sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
+				return fn(ctx, q)
+			})
+		},
+	}
 }
 
 // --- Consulta de saldo -------------------------------------------------------
@@ -138,8 +193,12 @@ type AcumularVacacionesInput struct {
 
 // AcumularVacaciones suma al saldo los días que la escala vigente otorga por
 // período según la antigüedad del empleado a FechaEfectiva. El número de días
-// sale SIEMPRE de parametros_vacaciones_escala. Registrar dos veces el mismo
-// (empleado, período) devuelve ErrVacAcumulacionYaRegistrada.
+// sale SIEMPRE de parametros_vacaciones_escala.
+//
+// Es idempotente por (empleado, período): bajo el lock del empleado, si ya
+// existe el movimiento de acumulación de ese período devuelve
+// ErrAcumulacionYaRegistrada sin escribir nada. La migración 000107 agrega un
+// índice único como red de seguridad a nivel de base de datos.
 func (s *VacacionesService) AcumularVacaciones(ctx context.Context, in AcumularVacacionesInput) (dto.VacacionesAcumulado, error) {
 	periodo := strings.TrimSpace(in.PeriodoReferencia)
 	if periodo == "" || utf8.RuneCountInString(periodo) > 20 {
@@ -162,7 +221,7 @@ func (s *VacacionesService) AcumularVacaciones(ctx context.Context, in AcumularV
 	dias := escala.DiasVacaciones
 
 	var resultado dto.VacacionesAcumulado
-	err = s.withAuditCtx(ctx, in.CreadoPor, func(q *dto.Queries) error {
+	err = s.runTx(ctx, in.CreadoPor, func(ctx context.Context, q vacTx) error {
 		if err := vacBloquearEmpleado(ctx, q, in.EmpleadoID); err != nil {
 			return err
 		}
@@ -171,7 +230,7 @@ func (s *VacacionesService) AcumularVacaciones(ctx context.Context, in AcumularV
 			return fmt.Errorf("verificando acumulación del período: %w", err)
 		}
 		if existe {
-			return ErrVacAcumulacionYaRegistrada
+			return ErrAcumulacionYaRegistrada
 		}
 
 		previo, err := vacLeerSaldoParaActualizar(ctx, q, in.EmpleadoID)
@@ -202,7 +261,10 @@ type SolicitarVacacionesInput struct {
 
 // SolicitarVacaciones crea una solicitud 'pendiente'. Los días solicitados se
 // calculan contra el calendario laboral (solo días hábiles). Valida traslape y
-// que el saldo disponible alcance.
+// que el saldo disponible, menos los días ya comprometidos por solicitudes
+// aprobadas sin disfrutar, alcance. Las solicitudes pendientes no se
+// descuentan (aún no están aprobadas); la verificación definitiva ocurre al
+// aprobar y al registrar el disfrute, ambas bajo lock.
 func (s *VacacionesService) SolicitarVacaciones(ctx context.Context, in SolicitarVacacionesInput) (dto.VacacionesSolicitud, error) {
 	inicio, fin := vacSoloFecha(in.FechaInicio), vacSoloFecha(in.FechaFin)
 	if fin.Before(inicio) {
@@ -221,7 +283,7 @@ func (s *VacacionesService) SolicitarVacaciones(ctx context.Context, in Solicita
 	}
 
 	var creada dto.VacacionesSolicitud
-	err = s.withAuditCtx(ctx, in.CreadoPor, func(q *dto.Queries) error {
+	err = s.runTx(ctx, in.CreadoPor, func(ctx context.Context, q vacTx) error {
 		if err := vacBloquearEmpleado(ctx, q, in.EmpleadoID); err != nil {
 			return err
 		}
@@ -232,15 +294,18 @@ func (s *VacacionesService) SolicitarVacaciones(ctx context.Context, in Solicita
 		if traslapes > 0 {
 			return ErrVacSolicitudTraslapada
 		}
-		// Solo compara contra el saldo actual; no descuenta otras solicitudes
-		// pendientes/aprobadas aún sin disfrutar. La verificación definitiva
-		// es la de RegistrarDisfrute, bajo lock.
 		saldo, err := vacLeerSaldoParaActualizar(ctx, q, in.EmpleadoID)
 		if err != nil {
 			return err
 		}
-		if dias.GreaterThan(saldo.Saldo) {
-			return fmt.Errorf("%w: solicita %s, disponible %s", ErrVacSaldoInsuficiente, dias, saldo.Saldo)
+		comprometidos, err := q.SumarDiasVacacionesAprobadasSinDisfrutar(ctx, in.EmpleadoID, 0)
+		if err != nil {
+			return fmt.Errorf("sumando días comprometidos: %w", err)
+		}
+		libres := saldo.Saldo.Sub(comprometidos)
+		if dias.GreaterThan(libres) {
+			return fmt.Errorf("%w: solicita %s, disponible %s (saldo %s, ya comprometidos %s)",
+				ErrVacSaldoInsuficiente, dias, libres, saldo.Saldo, comprometidos)
 		}
 		creada, err = q.CrearSolicitudVacaciones(ctx, in.EmpleadoID, inicio, fin, dias, in.CreadoPor)
 		if err != nil {
@@ -263,7 +328,12 @@ type ResolverSolicitudInput struct {
 // lock del empleado, se valida (1) que las fechas no se traslapen con otra
 // solicitud ya aprobada y (2) que el saldo disponible, menos los días ya
 // comprometidos por solicitudes aprobadas sin disfrutar, cubra los días
-// solicitados.
+// solicitados. Aprobar dos veces la misma solicitud devuelve
+// ErrVacSolicitudNoPendiente (se lee con FOR UPDATE).
+//
+// TODO F17: impedir que un usuario apruebe su propia solicitud (requiere
+// autorización a nivel de fila: comparar usuarios.empleado_id con
+// sol.EmpleadoID). No se implementa aquí.
 func (s *VacacionesService) ResolverSolicitud(ctx context.Context, in ResolverSolicitudInput) (dto.VacacionesSolicitud, error) {
 	motivo := strings.TrimSpace(in.MotivoRechazo)
 	if !in.Aprobar {
@@ -276,7 +346,7 @@ func (s *VacacionesService) ResolverSolicitud(ctx context.Context, in ResolverSo
 	}
 
 	var resuelta dto.VacacionesSolicitud
-	err := s.withAuditCtx(ctx, in.AprobadoPor, func(q *dto.Queries) error {
+	err := s.runTx(ctx, in.AprobadoPor, func(ctx context.Context, q vacTx) error {
 		sol, err := q.ObtenerSolicitudVacacionesForUpdate(ctx, in.SolicitudID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrVacSolicitudNoEncontrada
@@ -345,7 +415,7 @@ type RegistrarDisfruteInput struct {
 // disfrutados en vacaciones_acumulado. Es idempotente por solicitud.
 func (s *VacacionesService) RegistrarDisfrute(ctx context.Context, in RegistrarDisfruteInput) (dto.VacacionesAcumulado, error) {
 	var resultado dto.VacacionesAcumulado
-	err := s.withAuditCtx(ctx, in.RegistradoPor, func(q *dto.Queries) error {
+	err := s.runTx(ctx, in.RegistradoPor, func(ctx context.Context, q vacTx) error {
 		sol, err := q.ObtenerSolicitudVacacionesForUpdate(ctx, in.SolicitudID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrVacSolicitudNoEncontrada
@@ -398,7 +468,7 @@ func (s *VacacionesService) obtenerEmpleado(ctx context.Context, empleadoID int6
 	if empleadoID <= 0 {
 		return dto.Empleado{}, ErrVacEmpleadoNoEncontrado
 	}
-	emp, err := s.queries.GetEmpleadoByID(ctx, uint64(empleadoID))
+	emp, err := s.queries.GetEmpleadoByID(ctx, empleadoID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.Empleado{}, ErrVacEmpleadoNoEncontrado
 	}
@@ -409,22 +479,33 @@ func (s *VacacionesService) obtenerEmpleado(ctx context.Context, empleadoID int6
 }
 
 // contarDiasHabiles cuenta los días con es_habil = 1 en calendario_laboral_dia
-// para [desde, hasta]. Si el calendario no cubre todo el rango falla en vez de
+// para [desde, hasta]. Si el calendario no cubre todo el rango devuelve
+// *ErrCalendarioIncompleto con las fechas exactas que faltan, en vez de
 // adivinar. Único punto a cambiar si la política pasa a días naturales.
 func (s *VacacionesService) contarDiasHabiles(ctx context.Context, desde, hasta time.Time) (decimal.Decimal, error) {
-	dias, err := s.queries.ListarCalendarioPorRango(ctx, desde, hasta)
+	filas, err := s.queries.ListarCalendarioPorRango(ctx, desde, hasta)
 	if err != nil {
 		return decimal.Zero, fmt.Errorf("consultando calendario laboral: %w", err)
 	}
-	esperados := int(hasta.Sub(desde).Hours()/24) + 1
-	if len(dias) != esperados {
-		return decimal.Zero, fmt.Errorf("%w: hay %d de %d días", ErrVacCalendarioIncompleto, len(dias), esperados)
+	porFecha := make(map[string]bool, len(filas))
+	for _, d := range filas {
+		porFecha[d.Fecha.Format("2006-01-02")] = d.EsHabil
 	}
+
+	var faltantes []time.Time
 	habiles := 0
-	for _, d := range dias {
-		if d.EsHabil {
+	for d := desde; !d.After(hasta); d = d.AddDate(0, 0, 1) {
+		esHabil, ok := porFecha[d.Format("2006-01-02")]
+		if !ok {
+			faltantes = append(faltantes, d)
+			continue
+		}
+		if esHabil {
 			habiles++
 		}
+	}
+	if len(faltantes) > 0 {
+		return decimal.Zero, &ErrCalendarioIncompleto{Fechas: faltantes}
 	}
 	if habiles == 0 {
 		return decimal.Zero, ErrVacSinDiasHabiles
@@ -432,7 +513,7 @@ func (s *VacacionesService) contarDiasHabiles(ctx context.Context, desde, hasta 
 	return decimal.NewFromInt(int64(habiles)), nil
 }
 
-func vacBloquearEmpleado(ctx context.Context, q *dto.Queries, empleadoID int64) error {
+func vacBloquearEmpleado(ctx context.Context, q vacTx, empleadoID int64) error {
 	err := q.BloquearEmpleado(ctx, empleadoID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrVacEmpleadoNoEncontrado
@@ -445,7 +526,7 @@ func vacBloquearEmpleado(ctx context.Context, q *dto.Queries, empleadoID int64) 
 
 // vacLeerSaldoParaActualizar lee (con lock) el corte más reciente; sin cortes
 // devuelve el valor cero, no error.
-func vacLeerSaldoParaActualizar(ctx context.Context, q *dto.Queries, empleadoID int64) (dto.VacacionesAcumulado, error) {
+func vacLeerSaldoParaActualizar(ctx context.Context, q vacTx, empleadoID int64) (dto.VacacionesAcumulado, error) {
 	saldo, err := q.ObtenerSaldoVacacionesEmpleadoForUpdate(ctx, empleadoID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.VacacionesAcumulado{}, nil
@@ -459,8 +540,9 @@ func vacLeerSaldoParaActualizar(ctx context.Context, q *dto.Queries, empleadoID 
 // vacGuardarSaldo aplica deltas sobre el corte previo y hace upsert. Se parte
 // de `Saldo` (no de acumulados - disfrutados) porque los cortes de
 // migracion_inicial pueden traer saldo digitado a mano sin historial que lo
-// respalde. El corte nunca queda con fecha anterior al último existente.
-func vacGuardarSaldo(ctx context.Context, q *dto.Queries, empleadoID int64, previo dto.VacacionesAcumulado, fecha time.Time, deltaAcumulado, deltaDisfrutado decimal.Decimal, usuarioID int64) error {
+// respalde. El corte nunca queda con fecha anterior al último existente. Un
+// saldo negativo se rechaza antes de escribir.
+func vacGuardarSaldo(ctx context.Context, q vacTx, empleadoID int64, previo dto.VacacionesAcumulado, fecha time.Time, deltaAcumulado, deltaDisfrutado decimal.Decimal, usuarioID int64) error {
 	corte := fecha
 	if corte.Before(previo.FechaCorte) {
 		corte = vacSoloFecha(previo.FechaCorte)
