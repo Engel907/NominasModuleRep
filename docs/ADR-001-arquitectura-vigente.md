@@ -2,7 +2,7 @@
 
 **Proyecto:** Planillas CCDR Liberia (backend de planillas del sector público de Costa Rica).
 **Estado:** vigente. Reemplaza a `ADR-000_decisiones_arquitectura.md`, `ORGANIZACION.md` y `CICD.md`.
-**Stack:** Go 1.23, Gin, MySQL 8, `shopspring/decimal`, argon2id, PASETO v2.local. Módulo `planillas-ccdr`.
+**Stack:** Go 1.25.11, Gin, MySQL 8, `shopspring/decimal`, argon2id, PASETO v4.local (`aidanwoods.dev/go-paseto`). Módulo `planillas-ccdr`.
 
 > Un error de cálculo o de seguridad en este sistema tiene consecuencias legales. Las decisiones de
 > la sección 2 son vinculantes: se aplican, no se discuten caso por caso.
@@ -89,10 +89,9 @@ vigencia pero **no** usa `es_vigente`; su estado vigente lo controla la columna 
 - El middleware `RequirePermission` autoriza contra el conjunto de `permisos.codigo` vigentes del
   usuario (`usuarios` → `usuario_roles` vigentes → `roles` activos → `rol_permisos` → `permisos`),
   nunca contra `roles.codigo`.
-- Si los permisos viajan dentro del token, una revocación no surte efecto hasta que expire el access
-  token. `refresh_tokens` sí permite revocar la sesión completa de inmediato. Si el negocio no tolera
-  esa ventana, los permisos se resuelven contra la BD en cada petición. Esa decisión debe quedar
-  escrita en el informe de la fase que toque autenticación.
+- Los permisos viajan dentro del access token. La revocación efectiva se implementa con la versión
+  `pv` del usuario: `AuthPASETO` compara el valor firmado con el de la BD mediante una caché corta.
+  El detalle está en la decisión F15 de la sección 3.7.
 
 ### 3.3 Dinero y cantidades
 Toda columna `DECIMAL` se mapea a `decimal.Decimal`, nunca a `float64` ni a `string` suelto. Incluye
@@ -109,11 +108,43 @@ Los handlers responden errores mediante `internal/api/middleware` (`ErrorRespons
 define su propio formato de error (`gin.H{"error": ...}` ad hoc).
 
 ### 3.6 Seguridad
-- Contraseñas con argon2id. Tokens PASETO v2.local con clave de 32 bytes en hex (64 caracteres).
+- Contraseñas con argon2id. Tokens PASETO v4.local con claves aleatorias de 32 bytes en hex
+  (64 caracteres), cargadas desde `PASETO_LOCAL_KEYS_HEX` y `PASETO_ACTIVE_KID`. Se acepta
+  `PASETO_LOCAL_KEY_HEX` como configuración legada de una sola clave (kid `k1`).
 - Sesiones persistidas y revocables (`refresh_tokens`), bloqueo por intentos fallidos y reset de
   contraseña de un solo uso. La política (umbral y minutos de bloqueo) va en configuración.
 - `config.LoadConfig` rechaza claves ausentes, mal formadas o de ejemplo, y en producción exige
   `DB_PASSWORD`.
+
+### 3.7 Tokens PASETO y revocación efectiva (F15)
+
+- **Formato y biblioteca:** PASETO v4.local mediante `aidanwoods.dev/go-paseto`. Se reemplazó
+  `o1egl/paseto` v2.local; la aplicación ya no depende de `github.com/aead/chacha20poly1305`.
+- **Claims obligatorios:** `iss` (emisor), `aud` (audiencia), `iat`, `nbf`, `exp`, `jti`, `tipo`,
+  `uid`, `usr`, `rcp` y `pv`; `perm` se incluye solo en access tokens. Todos se validan al leer
+  el token. El footer contiene `{"kid":"..."}` para identificar la clave. Se toleran 5 segundos
+  de diferencia de reloj para `iat` y `nbf`.
+- **Rotación de claves:** `PASETO_LOCAL_KEYS_HEX="kid1:hex,kid2:hex"` contiene el llavero y
+  `PASETO_ACTIVE_KID` el identificador usado al firmar. Cada clave debe generarse con
+  `openssl rand -hex 32`. Para rotar: agregar `k2` junto a `k1` y desplegar; activar `k2`;
+  retirar `k1` tras la vigencia máxima de refresh tokens (7 días por defecto). La variable
+  legada `PASETO_LOCAL_KEY_HEX` equivale a una sola clave `k1`.
+- **Invalidación de sesiones:** `usuarios.permisos_version` (migración `000115`) aumenta dentro
+  de la misma transacción que asigna/revoca roles, cambia o restablece contraseñas, cambia el
+  estado de usuario o modifica/desactiva un rol. Desactivar una cuenta también revoca sus refresh
+  tokens. Los cambios de `rol_permisos` y de estado de rol incrementan `pv` para sus usuarios.
+- **Administración de accesos:** `PATCH /usuarios/:id/estado` requiere `usuarios.actualizar`;
+  `PATCH /roles/:id/estado` y `PUT /roles/:id/permisos` requieren el permiso separado
+  `roles.administrar` (migración `000116`). El último reemplaza el conjunto completo y recibe
+  `{"codigos":["empleados.leer"]}`; una lista vacía explícita elimina todos los permisos.
+- **Verificación en cada sesión:** `AuthPASETO` consulta si el usuario sigue activo y su `pv`
+  mediante `SesionVerificador`, con caché por instancia controlada por `AUTH_CACHE_TTL` (5 s por
+  defecto) y singleflight. Usuario inactivo o `pv` diferente responde `401` con código
+  `sesion_invalida`; el cliente debe llamar `/auth/refresh` y reintentar la solicitud una vez.
+  Si no se puede verificar contra la BD, se responde `503 sesion_no_verificable` (falla cerrado).
+- **Consecuencia del despliegue:** tokens v2 anteriores (access y refresh) dejan de ser válidos;
+  todos los usuarios deberán iniciar sesión nuevamente. Los refresh tokens nuevos se emiten con
+  permisos y `pv` leídos de la BD.
 
 ---
 
@@ -122,9 +153,9 @@ define su propio formato de error (`gin.H{"error": ...}` ad hoc).
 - Las migraciones de `db/migrations/` (`NNNNNN_nombre.up.sql` y `.down.sql`, con punto y no guion
   bajo) son la **única fuente de verdad** del esquema. `db/schema.sql` no lo es y está pendiente de
   retiro.
-- Migraciones base existentes: `000000` a `000006` (esquema base, seguridad reforzada, semillas de
-  catálogos, calendario y asistencia, acumulados y liquidaciones, semillas paramétricas, rol admin y
-  permisos base). Las nuevas usan el número reservado `0001NN` de su fase (D10).
+- Migraciones existentes: `000000` a `000006` y `000107`, `000109`, `000112`, `000114`, `000115`
+  y `000116`. La `000115` agrega `usuarios.permisos_version`; la `000116` siembra el permiso
+  `roles.administrar`. Las nuevas usan el número reservado `0001NN` de su fase (D10).
 - Toda migración lleva su `.down.sql`. Advertencia heredada: el reverso de `usuario_roles` colapsa el
   histórico a las filas vigentes, así que no debe usarse en producción con historial real que conservar.
 - Antes de cualquier cambio de esquema en producción: respaldo de la BD y reversión ensayada en
@@ -134,7 +165,8 @@ define su propio formato de error (`gin.H{"error": ...}` ad hoc).
 
 ## 5. Verificación y CI
 
-Un solo comando, desde la raíz: `./run_full_test_suite.sh`. Exige Go 1.23 y corre, en orden,
+Un solo comando, desde la raíz: `./run_full_test_suite.sh`. Usa la versión de Go declarada en
+`go.mod` y corre, en orden,
 `gofmt -l` (falla si lista archivos), `go vet ./...`, `go build ./...` y `go test ./... -count=1`.
 Las pruebas de integración se activan con `RUN_INTEGRATION=1` cuando exista `test/integration/`.
 
@@ -172,7 +204,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.25.11"
       - name: Instalar golang-migrate
         run: go install -tags 'mysql' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
       - name: Aplicar migraciones
@@ -188,9 +220,14 @@ jobs:
 ## 6. Checklist antes de producción
 
 - [ ] `./run_full_test_suite.sh` pasa en verde.
-- [ ] Migraciones aplicadas y verificadas en staging con datos representativos, no solo en una BD vacía.
+- [ ] Migraciones aplicadas y verificadas en staging con datos representativos, incluida `000115`
+      (`usuarios.permisos_version`), no solo en una BD vacía.
 - [ ] Variables de producción presentes y validadas por `config.LoadConfig`. En particular
-      `PASETO_LOCAL_KEY_HEX` (64 hex, **distinta** a la de staging y CI) y las `DB_*`.
+      `PASETO_LOCAL_KEYS_HEX` + `PASETO_ACTIVE_KID` (claves de 64 hex, distintas a las de staging
+      y CI; o la variable legada `PASETO_LOCAL_KEY_HEX`) y las `DB_*`.
+- [ ] Comunicado el cierre de sesión: tras el despliegue de v4.local todos deberán iniciar sesión
+      nuevamente. El frontend debe tratar `401 sesion_invalida` intentando `/auth/refresh` y
+      reintentando la solicitud, no enviando inmediatamente al usuario al login.
 - [ ] `GET /health` responde 200 contra la BD de producción antes de registrar la instancia en el
       balanceador.
 - [ ] Permiso `dashboard.ver` sembrado en `permisos` y `rol_permisos` para los roles gerenciales; sin
@@ -207,6 +244,5 @@ jobs:
 ## 7. Pendientes conocidos de arquitectura
 
 - `internal/asistencia` e `internal/prestamos` aún no usan el contrato único de error (3.5).
-- No existe `go.sum`: hace falta `go mod tidy` con acceso real a la red.
 - `db/schema.sql` y `scripts/split_schema_a_migraciones.sh` son restos de la migración al esquema
   dividido; decidir su retiro.

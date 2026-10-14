@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"planillas-ccdr/internal/api/middleware"
+	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/pagination"
 	"planillas-ccdr/internal/services"
 
@@ -46,34 +47,34 @@ func NewOrganizacionHandler(
 func (h *OrganizacionHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	clasificaciones := rg.Group("/clasificaciones-puesto")
 	{
-		clasificaciones.POST("", middleware.RequirePermission("organizacion.crear"), h.CrearClasificacionPuesto)
-		clasificaciones.GET("", middleware.RequirePermission("organizacion.leer"), h.ListarClasificacionesPuesto)
-		clasificaciones.GET("/:id", middleware.RequirePermission("organizacion.leer"), h.GetClasificacionPuesto)
-		clasificaciones.PUT("/:id", middleware.RequirePermission("organizacion.actualizar"), h.ActualizarClasificacionPuesto)
+		clasificaciones.POST("", middleware.RequirePermission(authz.PermOrganizacionCrear), h.CrearClasificacionPuesto)
+		clasificaciones.GET("", middleware.RequirePermission(authz.PermOrganizacionLeer), h.ListarClasificacionesPuesto)
+		clasificaciones.GET("/:id", middleware.RequirePermission(authz.PermOrganizacionLeer), h.GetClasificacionPuesto)
+		clasificaciones.PUT("/:id", middleware.RequirePermission(authz.PermOrganizacionActualizar), h.ActualizarClasificacionPuesto)
 	}
 
 	programas := rg.Group("/programas-presupuestarios")
 	{
-		programas.POST("", middleware.RequirePermission("organizacion.crear"), h.CrearProgramaPresupuestario)
-		programas.GET("", middleware.RequirePermission("organizacion.leer"), h.ListarProgramasPresupuestarios)
-		programas.GET("/:id", middleware.RequirePermission("organizacion.leer"), h.GetProgramaPresupuestario)
-		programas.PUT("/:id", middleware.RequirePermission("organizacion.actualizar"), h.ActualizarProgramaPresupuestario)
+		programas.POST("", middleware.RequirePermission(authz.PermOrganizacionCrear), h.CrearProgramaPresupuestario)
+		programas.GET("", middleware.RequirePermission(authz.PermOrganizacionLeer), h.ListarProgramasPresupuestarios)
+		programas.GET("/:id", middleware.RequirePermission(authz.PermOrganizacionLeer), h.GetProgramaPresupuestario)
+		programas.PUT("/:id", middleware.RequirePermission(authz.PermOrganizacionActualizar), h.ActualizarProgramaPresupuestario)
 	}
 
 	unidades := rg.Group("/unidades-organizativas")
 	{
-		unidades.POST("", middleware.RequirePermission("organizacion.crear"), h.CrearUnidadOrganizativa)
-		unidades.GET("", middleware.RequirePermission("organizacion.leer"), h.ListarUnidadesOrganizativas)
-		unidades.GET("/:id", middleware.RequirePermission("organizacion.leer"), h.GetUnidadOrganizativa)
-		unidades.PUT("/:id", middleware.RequirePermission("organizacion.actualizar"), h.ActualizarUnidadOrganizativa)
+		unidades.POST("", middleware.RequirePermission(authz.PermOrganizacionCrear), h.CrearUnidadOrganizativa)
+		unidades.GET("", middleware.RequirePermission(authz.PermOrganizacionLeer), h.ListarUnidadesOrganizativas)
+		unidades.GET("/:id", middleware.RequirePermission(authz.PermOrganizacionLeer), h.GetUnidadOrganizativa)
+		unidades.PUT("/:id", middleware.RequirePermission(authz.PermOrganizacionActualizar), h.ActualizarUnidadOrganizativa)
 	}
 
 	puestos := rg.Group("/puestos")
 	{
-		puestos.POST("", middleware.RequirePermission("organizacion.crear"), h.CrearPuesto)
-		puestos.GET("", middleware.RequirePermission("organizacion.leer"), h.ListarPuestos)
-		puestos.GET("/:id", middleware.RequirePermission("organizacion.leer"), h.GetPuesto)
-		puestos.PUT("/:id", middleware.RequirePermission("organizacion.actualizar"), h.ActualizarPuesto)
+		puestos.POST("", middleware.RequirePermission(authz.PermOrganizacionCrear), h.CrearPuesto)
+		puestos.GET("", middleware.RequirePermission(authz.PermOrganizacionLeer), h.ListarPuestos)
+		puestos.GET("/:id", middleware.RequirePermission(authz.PermOrganizacionLeer), h.GetPuesto)
+		puestos.PUT("/:id", middleware.RequirePermission(authz.PermOrganizacionActualizar), h.ActualizarPuesto)
 	}
 }
 

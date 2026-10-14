@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,20 +13,8 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"planillas-ccdr/internal/api/handlers"
-	"planillas-ccdr/internal/api/middleware"
-	"planillas-ccdr/internal/asistencia"
-	"planillas-ccdr/internal/auth"
+	"planillas-ccdr/internal/app"
 	"planillas-ccdr/internal/config"
-	"planillas-ccdr/internal/contabilidad"
-	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/planilla"
-	"planillas-ccdr/internal/planilla/infra"
-	"planillas-ccdr/internal/prestamos"
-	"planillas-ccdr/internal/security"
-	"planillas-ccdr/internal/services"
-
-	"github.com/gin-gonic/gin"
 )
 
 func main() {
@@ -47,21 +33,17 @@ func main() {
 		}
 	}()
 
-	// Falla rápido en el arranque, no en el primer request: una clave
-	// PASETO mal configurada o un servicio mal armado son errores de
-	// despliegue, no algo que deba descubrirse en producción con el primer
-	// login.
-	tokenMaker, err := newTokenMaker(cfg.Auth)
+	// Falla rápido en el arranque: una clave PASETO mal configurada o un
+	// servicio mal armado son errores de despliegue, no del primer login.
+	tokenMaker, err := app.NewTokenMaker(cfg.Auth)
 	if err != nil {
 		log.Fatalf("security: %v", err)
 	}
 
-	deps, err := buildDeps(cfg, sqlDB, tokenMaker)
+	router, err := app.New(cfg, sqlDB, tokenMaker)
 	if err != nil {
-		log.Fatalf("deps: %v", err)
+		log.Fatalf("app: %v", err)
 	}
-
-	router := newRouter(cfg, sqlDB, tokenMaker, deps)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Server.Port,
@@ -81,11 +63,8 @@ func main() {
 	waitForShutdown(srv, cfg.Server.ShutdownTimeout)
 }
 
-// connectDB abre el pool de conexiones a MySQL con timeouts explícitos:
-// tanto el timeout de conexión (en el propio DSN, ver DatabaseConfig.DSN)
-// como un PingContext acotado para no colgar el arranque si la BD no
-// responde, y los límites de pool recomendados para no agotar
-// max_connections del lado del servidor.
+// connectDB abre el pool de conexiones a MySQL con timeouts explícitos y un
+// PingContext acotado para no colgar el arranque si la BD no responde.
 func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) {
 	sqlDB, err := sql.Open("mysql", dbCfg.DSN())
 	if err != nil {
@@ -108,137 +87,8 @@ func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) {
 	return sqlDB, nil
 }
 
-// buildDeps construye los servicios de los módulos que dependen de la capa
-// de datos (internal/db/dto) y los agrupa en handlers.Deps. Es el único
-// lugar donde se conecta la capa de datos con los servicios: routes.go solo
-// monta rutas. Los servicios de empleados, contratos y organización se arman dentro de
-// handlers.RegisterRoutes porque reciben *sql.DB directo.
-func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (handlers.Deps, error) {
-	// Verificado contra internal/db/dto/db.go: New(DBTX) *Queries.
-	queries := dto.New(sqlDB)
-
-	asistenciaSvc, err := asistencia.NewService(sqlDB, queries, asistencia.Opciones{
-		ToleranciaTardanzaMin: cfg.Asistencia.ToleranciaTardanzaMin,
-	})
-	if err != nil {
-		return handlers.Deps{}, fmt.Errorf("asistencia: %w", err)
-	}
-
-	cfgConta := contabilidad.ConfigGeneracion{
-		ConceptoAnclaNeto:         "SAL_BASE",
-		ConceptoCuotaPatronalCCSS: "CCSS_PAT",
-	}
-	contaSvc, err := contabilidad.NewService(contabilidad.NewRepositorio(sqlDB), cfgConta)
-	if err != nil {
-		return handlers.Deps{}, fmt.Errorf("contabilidad: %w", err)
-	}
-	contaDetalles, err := contabilidad.NewDetallesSQL(sqlDB, cfgConta, "CCSS_OBR")
-	if err != nil {
-		return handlers.Deps{}, fmt.Errorf("contabilidad: %w", err)
-	}
-
-	return handlers.Deps{
-		// auth.Store son métodos de *dto.Queries (ver auth/service.go).
-		Auth: auth.NuevoServicio(queries, sqlDB, tokenMaker, politicaAuth(cfg.Auth)),
-
-		Asistencia: asistenciaSvc,
-
-		Prestamos: prestamos.NewService(sqlDB, queries),
-
-		// Dashboard gerencial.
-		Dashboard: services.NewDashboardService(services.NewDashboardRepository(queries), sqlDB, 3*time.Second),
-
-		// Liquidaciones: *dto.Queries debe
-		// implementar services.LiquidacionRepository.
-		Liquidacion: services.NewLiquidacionService(sqlDB, queries, infra.NewMotorRepository(queries)),
-
-		PlanillaExport: planilla.NewExportService(infra.NewExportRepository(queries), infra.NewExportUnitOfWork(sqlDB)),
-
-		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
-
-		// Construidos, sin rutas todavía: se usan desde F20/F24.
-		MotorEmpleado: planilla.NewMotorEmpleado(infra.NewMotorRepository(queries)),
-		Acumulados:    planilla.NewAcumuladosService(infra.NewAcumuladosRepository(queries)),
-
-		Contabilidad: &handlers.ContabilidadDeps{
-			Servicio: contaSvc,
-			Detalles: contaDetalles,
-			Lector:   contabilidad.NewLectorSQL(sqlDB),
-			UsuarioID: func(c *gin.Context) (int64, bool) {
-				id := middleware.UsuarioID(c)
-				return id, id > 0
-			},
-		},
-	}, nil
-}
-
-// politicaAuth aplica la configuración a auth.Politica. Los campos salen de
-// auth/service.go. Ojo: PASETO_ISSUER y PASETO_AUDIENCE de la config siguen
-// sin consumirse (NuevoPasetoMaker solo recibe la clave).
-func politicaAuth(a config.AuthConfig) auth.Politica {
-	return auth.Politica{
-		MaxIntentosFallidos:  a.MaxFailedLogins,
-		MinutosBloqueo:       a.LockoutDuration,
-		DuracionAccessToken:  a.AccessTokenDuration,
-		DuracionRefreshToken: a.RefreshTokenDuration,
-		DuracionTokenReset:   a.PasswordResetTokenDuration,
-	}
-}
-
-// newRouter arma el engine de Gin con el middleware de manejo centralizado
-// de errores ya montado globalmente (ver /api/middleware) y delega el
-// montaje de todas las rutas de negocio en handlers.RegisterRoutes.
-func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker, deps handlers.Deps) *gin.Engine {
-	if cfg.App.IsProduction() {
-		gin.SetMode(gin.ReleaseMode)
-	}
-
-	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
-	router.Use(middleware.ErrorHandler())
-
-	// /healthz se mantiene tal cual (compatibilidad con probes ya
-	// configurados en el orquestador).
-	router.GET("/healthz", func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-		defer cancel()
-
-		if err := sqlDB.PingContext(ctx); err != nil {
-			middleware.Fail(c, http.StatusServiceUnavailable, "db_unavailable", "No se pudo conectar a la base de datos", nil)
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-
-	// /health: público, sin auth, con latencia y timestamp. Coexiste
-	// con /healthz; ver la nota de integración en dashboard_handler.go.
-	router.GET("/health", handlers.NewDashboardHandler(deps.Dashboard).GetHealth)
-
-	api := router.Group("/api/v1")
-	handlers.RegisterRoutes(api, sqlDB, tokenMaker, deps)
-
-	return router
-}
-
-// newTokenMaker decodifica PASETO_LOCAL_KEY_HEX (64 caracteres hex = 32
-// bytes) y construye el PasetoMaker real. config.Validate() ya garantiza
-// el largo del string hex, pero el hex-decode y el chequeo de 32 bytes
-// resultantes se hacen igual acá por si esta función se llama fuera de
-// ese flujo (tests, por ejemplo).
-func newTokenMaker(authCfg config.AuthConfig) (security.TokenMaker, error) {
-	claveBytes, err := hex.DecodeString(authCfg.PasetoLocalKeyHex)
-	if err != nil {
-		return nil, fmt.Errorf("security: PASETO_LOCAL_KEY_HEX no es hex válido: %w", err)
-	}
-	maker, err := security.NuevoPasetoMaker(string(claveBytes))
-	if err != nil {
-		return nil, err
-	}
-	return maker, nil
-}
-
-// waitForShutdown bloquea hasta recibir SIGINT/SIGTERM y entonces intenta
-// un apagado ordenado del servidor HTTP dentro del timeout configurado.
+// waitForShutdown bloquea hasta recibir SIGINT/SIGTERM y entonces intenta un
+// apagado ordenado del servidor HTTP dentro del timeout configurado.
 func waitForShutdown(srv *http.Server, timeout time.Duration) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

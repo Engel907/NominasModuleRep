@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"planillas-ccdr/internal/api/middleware"
+	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/pagination"
 )
@@ -25,27 +26,27 @@ func NewHandler(service *Service) *Handler {
 }
 
 // RegisterRoutes cablea las rutas bajo el grupo /api/v1 ya existente en
-// cmd/api. La autorización usa RequirePermission con los códigos sembrados en
-// la migración 000003 (asistencia.*, calendario.administrar,
-// incapacidades.gestionar). Los códigos de permiso NO se tocan en esta fase (F12).
+// cmd/api. La autorización usa RequirePermission con las constantes de
+// internal/authz (asistencia, calendario e incapacidades); los códigos los
+// siembran las migraciones 000003 y 000112.
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	turnos := rg.Group("/turnos")
-	turnos.POST("", middleware.RequirePermission("calendario.administrar"), h.crearTurno)
-	turnos.GET("", middleware.RequirePermission("asistencia.ver"), h.listarTurnos)
-	turnos.PUT("/:id", middleware.RequirePermission("calendario.administrar"), h.actualizarTurno)
-	turnos.POST("/asignar", middleware.RequirePermission("calendario.administrar"), h.asignarTurno)
+	turnos.POST("", middleware.RequirePermission(authz.PermCalendarioAdministrar), h.crearTurno)
+	turnos.GET("", middleware.RequirePermission(authz.PermAsistenciaVer), h.listarTurnos)
+	turnos.PUT("/:id", middleware.RequirePermission(authz.PermCalendarioAdministrar), h.actualizarTurno)
+	turnos.POST("/asignar", middleware.RequirePermission(authz.PermCalendarioAdministrar), h.asignarTurno)
 
 	calendario := rg.Group("/calendario")
-	calendario.POST("/generar/:anio", middleware.RequirePermission("calendario.administrar"), h.generarCalendario)
-	calendario.GET("", middleware.RequirePermission("asistencia.ver"), h.listarCalendario)
+	calendario.POST("/generar/:anio", middleware.RequirePermission(authz.PermCalendarioAdministrar), h.generarCalendario)
+	calendario.GET("", middleware.RequirePermission(authz.PermAsistenciaVer), h.listarCalendario)
 
 	asistenciaGrp := rg.Group("/asistencia")
-	asistenciaGrp.POST("", middleware.RequirePermission("asistencia.crear"), h.registrarAsistencia)
-	asistenciaGrp.GET("/empleado/:empleado_id", middleware.RequirePermission("asistencia.ver"), h.listarAsistenciaEmpleado)
+	asistenciaGrp.POST("", middleware.RequirePermission(authz.PermAsistenciaCrear), h.registrarAsistencia)
+	asistenciaGrp.GET("/empleado/:empleado_id", middleware.RequirePermission(authz.PermAsistenciaVer), h.listarAsistenciaEmpleado)
 
 	incapacidades := rg.Group("/incapacidades")
-	incapacidades.POST("", middleware.RequirePermission("incapacidades.gestionar"), h.registrarIncapacidad)
-	incapacidades.GET("/empleado/:empleado_id", middleware.RequirePermission("incapacidades.gestionar"), h.listarIncapacidadesEmpleado)
+	incapacidades.POST("", middleware.RequirePermission(authz.PermIncapacidadesGestionar), h.registrarIncapacidad)
+	incapacidades.GET("/empleado/:empleado_id", middleware.RequirePermission(authz.PermIncapacidadesGestionar), h.listarIncapacidadesEmpleado)
 }
 
 // responderError traduce un error de Service a respuesta HTTP. Los errores de

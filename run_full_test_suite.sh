@@ -6,19 +6,21 @@
 #
 # Uso (desde la raíz del proyecto):
 #   ./run_full_test_suite.sh
-#   RUN_INTEGRATION=1 ./run_full_test_suite.sh   # activa integración (ver abajo)
+#   RUN_INTEGRATION=1 ./run_full_test_suite.sh
 #
-# Requiere: Go 1.23 o superior.
-# Las pruebas de integración necesitarán además MySQL accesible con las
-# variables de internal/config (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD,
-# DB_NAME) cuando exista la carpeta test/integration/.
+# Integración (F13): con RUN_INTEGRATION=1 corre `go test -tags=integration`.
+#   - Si TEST_DATABASE_URL ya está definida, la usa tal cual (MySQL 8 con un
+#     usuario que pueda CREATE/DROP DATABASE y crear triggers).
+#   - Si no, levanta el servicio mysql_test de docker-compose.yml (puerto 3307,
+#     datos en tmpfs) y exporta TEST_DATABASE_URL apuntando a él.
+#
+# Requiere: Go 1.23 o superior (y Docker para la integración sin URL propia).
 
 set -euo pipefail
 
 # Se ejecuta siempre desde la raíz del proyecto, sin importar desde dónde se llame.
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# Poner en 1 (o exportar RUN_INTEGRATION=1) cuando exista test/integration/.
 RUN_INTEGRATION="${RUN_INTEGRATION:-0}"
 
 echo "==> [0/5] verificando versión de Go (se exige 1.23+)"
@@ -43,29 +45,30 @@ if [[ -n "$UNFORMATTED" ]]; then
   exit 1
 fi
 
-echo "==> [2/5] go vet ./..."
+echo "==> [2/5] go vet ./... (y con -tags=integration, para compilar esas pruebas)"
 go vet ./...
+go vet -tags=integration ./...
 
 echo "==> [3/5] go build ./..."
 go build ./...
 
-echo "==> [4/5] go test ./... -count=1"
+echo "==> [4/5] go test ./... -count=1  (las de integración se saltan sin el tag)"
 go test ./... -count=1
 
-echo "==> [5/5] pruebas de integración"
+echo "==> [5/5] pruebas de integración (MySQL real)"
 if [[ "$RUN_INTEGRATION" == "1" ]]; then
-  if [[ -d test/integration ]]; then
-    go test ./test/integration/... -count=1 -tags=integration -timeout=5m
+  if [[ -z "${TEST_DATABASE_URL:-}" ]]; then
+    command -v docker >/dev/null 2>&1 || { echo "Error: se necesita docker (o define TEST_DATABASE_URL)." >&2; exit 1; }
+    docker compose --profile test up -d --wait mysql_test
+    export TEST_DATABASE_URL="root:${DB_ROOT_PASSWORD:-root_dev}@tcp(127.0.0.1:${TEST_DB_PORT:-3307})/"
+    echo "    TEST_DATABASE_URL apunta al servicio mysql_test de docker-compose"
   else
-    echo "Error: RUN_INTEGRATION=1 pero test/integration/ no existe." >&2
-    exit 1
+    echo "    usando TEST_DATABASE_URL del entorno"
   fi
+  go test -tags=integration ./... -count=1 -timeout=10m
 else
-  echo "    omitidas (la carpeta test/integration/ aún no existe; use RUN_INTEGRATION=1 cuando exista)"
+  echo "    omitidas (usa RUN_INTEGRATION=1; ver docs/pruebas.md)"
 fi
-# Bloque para activar cuando exista test/integration/ (reemplaza el bloque de arriba):
-#
-#   go test ./test/integration/... -count=1 -tags=integration -timeout=5m
 
 echo ""
 echo "Suite completa OK."

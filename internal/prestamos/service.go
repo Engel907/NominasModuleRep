@@ -247,7 +247,7 @@ func (s *Service) AplicarAbono(ctx context.Context, userID, prestamoID int64, mo
 		if err != nil {
 			return err
 		}
-		if p.Estado != "activo" {
+		if p.Estado != EstadoPrestamoActivo {
 			return ErrPrestamoNoActivo
 		}
 		if montoAbono.GreaterThan(p.SaldoPendiente) {
@@ -275,7 +275,7 @@ func (s *Service) CancelarPrestamo(ctx context.Context, userID, prestamoID int64
 		if err != nil {
 			return err
 		}
-		if p.Estado == "cancelado" {
+		if p.Estado == EstadoPrestamoCancelado {
 			return ErrPrestamoYaCancelado
 		}
 		return qtx.CancelarPrestamoManual(ctx, prestamoID)
@@ -291,9 +291,9 @@ func (s *Service) CancelarPrestamo(ctx context.Context, userID, prestamoID int64
 // el patrón de vigencia de 2 pasos; el ciclo de vida es puramente por
 // `estado`.
 var transicionesEmbargoPermitidas = map[string]map[string]bool{
-	"activo":     {"suspendido": true, "finalizado": true},
-	"suspendido": {"activo": true, "finalizado": true},
-	"finalizado": {}, // estado terminal
+	EstadoEmbargoActivo:     {EstadoEmbargoSuspendido: true, EstadoEmbargoFinalizado: true},
+	EstadoEmbargoSuspendido: {EstadoEmbargoActivo: true, EstadoEmbargoFinalizado: true},
+	EstadoEmbargoFinalizado: {}, // estado terminal
 }
 
 type CrearEmbargoInput struct {
@@ -415,7 +415,7 @@ func (s *Service) CambiarEstadoEmbargo(ctx context.Context, userID, embargoID in
 			return ErrTransicionInvalida
 		}
 
-		if nuevoEstado == "finalizado" {
+		if nuevoEstado == EstadoEmbargoFinalizado {
 			if fechaFin == nil {
 				return ErrFechaFinRequerida
 			}

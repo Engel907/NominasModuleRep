@@ -825,7 +825,7 @@ CRITERIOS DE ACEPTACIÓN
 **Al terminar esta fase, el backend compila.** Guarda el commit: es el punto de retorno.
 
 ---
-
+linsoooooo
 # ETAPA 2 — QUE CORRA
 
 ## FASE 12 — Permisos, roles, admin inicial y test de coherencia
@@ -914,6 +914,8 @@ CRITERIOS DE ACEPTACIÓN
 - `internal/api/handlers/routes.go`, `auth_handler.go`, `contrato_handler.go`, `dashboard_handler.go`, `empleado_handler.go`, `organizacion_handler.go`
 - `internal/asistencia/handler.go`, `vacaciones_handler.go`, `internal/prestamos/routes.go`
 - `internal/api/middleware/require_permission.go` (83), `require_permission_test.go` (122), `auth.go`
+
+
 - `db/migrations/000006_rol_admin_y_permisos_base.up.sql` (141 líneas) y `000001_seguridad_reforzada.up.sql` (solo el DDL de `usuarios`, `roles`, `usuario_roles`)
 - `internal/security/hash.go`, `internal/config/config.go`, `internal/db/audit.go`
 - DDL de `usuarios`, `roles`, `permisos`, `rol_permisos`, `usuario_roles` (schema.sql 1312–1351 y 3110–3125).
@@ -921,6 +923,7 @@ CRITERIOS DE ACEPTACIÓN
 **Archivos que crea:** `internal/authz/permisos.go`, `cmd/seedadmin/main.go`, tests, `db/migrations/000112_permisos_y_roles.{up,down}.sql`.
 
 ---
+ahoraaa
 
 ## FASE 13 — Pruebas de integración con MySQL y test de contrato SQL
 
@@ -985,6 +988,8 @@ CRITERIOS DE ACEPTACIÓN
 > Después de esta fase, si el test de contrato lista consultas rotas que ninguna fase asumió, ábrelas como **hallazgos** y arréglalas antes de seguir (pásale cada una a una IA con su archivo y el DDL de sus tablas).
 
 ---
+ahoraaaaaaaaaaaaaaaa
+
 
 # ETAPA 3 — SEGURIDAD
 
@@ -1061,7 +1066,7 @@ CRITERIOS DE ACEPTACIÓN
 **Migraciones que crea:** `000114_refresh_familia_y_login`.
 
 ---
-
+lindooooeoeoeoeoeoeoeoeoeoeoeoeoeoeeoeoeoeoeoeeoeoeoeoeoeoe
 ## FASE 15 — Tokens PASETO (S7, S17)
 
 **Contexto.** Los permisos viajan dentro del access token (20 min): desactivar a un usuario o quitarle un rol **no surte efecto hasta que expire**. Además `PASETO_ISSUER`/`PASETO_AUDIENCE` se leen y no se usan (los tokens no llevan `iss`/`aud`/`nbf`), no hay rotación de claves (`kid`), la librería `o1egl/paseto` lleva años sin mantenimiento (su versión `v1.1.1` **[VERIFICAR]** que exista) y `aead/chacha20poly1305` se importa solo por la constante `KeySize`.
@@ -1114,7 +1119,7 @@ CRITERIOS DE ACEPTACIÓN
 **Migraciones que crea:** `000115_permisos_version`.
 
 ---
-
+uwuwuwuwuw
 ## FASE 16 — Endurecimiento HTTP, errores y logging (S8, S9, S15, S16, C3)
 
 **Contexto.** No hay rate limiting, CORS, cabeceras de seguridad, límite de tamaño de cuerpo ni `SetTrustedProxies`; `gin.Logger()` registra la URL completa; el DSN de MySQL no fuerza TLS; `isBindingError` es un stub que siempre devuelve `false` (todo JSON inválido responde 500); `ParseUintParam` escribe la respuesta 400 y luego se intenta escribir otra; y `respond.go` devuelve `err.Error()` al cliente.

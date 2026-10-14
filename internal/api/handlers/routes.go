@@ -19,9 +19,12 @@
 //     tienen sesión: /auth/login, /auth/refresh, /auth/logout y el reset de
 //     contraseña. Todo lo demás va en `protegido`.
 //   - `protegido` → middleware.AuthPASETO (valida el access token y deja el
-//     *security.Payload en el contexto).
-//   - Cada ruta agrega además middleware.RequirePermission("<codigo>").
-//     Nunca se autoriza por nombre de rol.
+//     *security.Payload en el contexto) y middleware.ExigirCambioPassword
+//     (bloquea todo salvo cambiar contraseña / logout / me mientras rcp=true).
+//   - Cada ruta agrega además middleware.RequirePermission(authz.PermXxx).
+//     Los códigos viven SOLO en internal/authz. Nunca se autoriza por nombre
+//     de rol. El test permisos_coherencia_test.go falla si una ruta protegida
+//     queda sin RequirePermission o exige un código que no está en authz.
 //
 // IMPORTANTE (main.go): middleware.ErrorHandler() debe estar montado
 // globalmente (después de gin.Recovery()), porque Fail/FailFromError solo
@@ -34,6 +37,7 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/asistencia"
 	"planillas-ccdr/internal/auth"
+	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/planilla"
 	"planillas-ccdr/internal/prestamos"
 	"planillas-ccdr/internal/security"
@@ -63,13 +67,18 @@ type Deps struct {
 }
 
 // RegisterRoutes monta todos los endpoints de la API.
-func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.TokenMaker, deps Deps) {
+func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.TokenMaker, sesiones middleware.SesionVerificador, deps Deps) {
 	// Grupo sin autenticación (solo endpoints públicos de auth).
 	publico := rg.Group("")
 
 	// Grupo con sesión obligatoria.
 	protegido := rg.Group("")
-	protegido.Use(middleware.AuthPASETO(tokenMaker))
+	protegido.Use(middleware.AuthPASETO(tokenMaker, sesiones))
+	// F14: mientras el token lleve rcp=true (contraseña temporal sin cambiar),
+	// toda ruta protegida responde 403 "cambio_password_requerido" salvo
+	// /auth/password/cambiar, /auth/logout y /auth/me. Va DESPUÉS de AuthPASETO
+	// (necesita el payload) y ANTES de cualquier ruta.
+	protegido.Use(middleware.ExigirCambioPassword())
 
 	// --- Auth ------------------------------------------------------------
 	NuevoAuthHandler(deps.Auth).RegistrarRutas(publico, protegido)
@@ -83,8 +92,8 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	puestoService := services.NewPuestoService(sqlDB)
 
 	NewEmpleadoHandler(empleadoService).RegisterRoutes(protegido)
-	// Contratos: cada ruta ya lleva RequirePermission("contratos.*") dentro
-	// de ContratoHandler.RegisterRoutes (crear/leer/actualizar).
+	// Contratos: cada ruta ya lleva su RequirePermission (authz.PermContratos*)
+	// dentro de ContratoHandler.RegisterRoutes (crear/leer/actualizar).
 	NewContratoHandler(contratoService).RegisterRoutes(protegido)
 	NewOrganizacionHandler(clasificacionService, programaService, unidadService, puestoService).RegisterRoutes(protegido)
 
@@ -98,8 +107,8 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	// Rutas: /vacaciones/solicitudes (POST), /vacaciones/solicitudes/:id/
 	// {aprobar,rechazar,disfrute} (POST) y /vacaciones/empleados/:empleado_id/
 	// saldo (GET). Cada ruta aplica su RequirePermission dentro de
-	// VacacionesHandler.RegisterRoutes (vacaciones.solicitar / .aprobar /
-	// .registrar_disfrute / .ver).
+	// VacacionesHandler.RegisterRoutes (authz.PermVacacionesSolicitar / Aprobar /
+	// RegistrarDisfrute / Ver).
 	asistencia.NewVacacionesHandler(deps.Vacaciones).RegisterRoutes(protegido)
 
 	// --- Préstamos / embargos / terceros ---------------------------------
@@ -115,9 +124,9 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	liquidaciones := protegido.Group("/empleados")
 	{
 		liquidaciones.POST("/:id/liquidaciones/proyectar",
-			middleware.RequirePermission("liquidaciones.proyectar"), liquidacionHandler.Proyectar)
+			middleware.RequirePermission(authz.PermLiquidacionesProyectar), liquidacionHandler.Proyectar)
 		liquidaciones.POST("/:id/liquidaciones/procesar",
-			middleware.RequirePermission("liquidaciones.procesar"), liquidacionHandler.Procesar)
+			middleware.RequirePermission(authz.PermLiquidacionesProcesar), liquidacionHandler.Procesar)
 	}
 
 	// --- Export bancario y boleta ----------------------------------------
@@ -127,9 +136,9 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	planillas := protegido.Group("/planillas")
 	{
 		planillas.GET("/:id/exportar/bancario",
-			middleware.RequirePermission("planilla.exportar_bancario"), exportHandler.ExportarDispersionBancaria)
+			middleware.RequirePermission(authz.PermPlanillaExportarBancario), exportHandler.ExportarDispersionBancaria)
 		planillas.GET("/:id/boleta/:empleado_id",
-			middleware.RequirePermission("planilla.ver_boleta"), exportHandler.ObtenerBoletaPago)
+			middleware.RequirePermission(authz.PermPlanillaVerBoleta), exportHandler.ObtenerBoletaPago)
 	}
 
 	// --- Contabilidad ----------------------------------------------------
@@ -137,14 +146,14 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	// lectura) llevan permisos distintos por segregación de funciones.
 	contabilidadHandler := NewContabilidadHandler(*deps.Contabilidad)
 	protegido.POST("/planillas/:id/contabilizar",
-		middleware.RequirePermission("asientos_contables.generar"), contabilidadHandler.Generar)
+		middleware.RequirePermission(authz.PermAsientosContablesGenerar), contabilidadHandler.Generar)
 	protegido.GET("/asientos-contables",
-		middleware.RequirePermission("asientos_contables.ver"), contabilidadHandler.Listar)
+		middleware.RequirePermission(authz.PermAsientosContablesVer), contabilidadHandler.Listar)
 
 	// --- Dashboard -------------------------------------------------------
 	// GET /health (público) se monta en main.go a nivel raíz, fuera de
 	// /api/v1, para que los probes no pasen por AuthPASETO.
 	dashboardHandler := NewDashboardHandler(deps.Dashboard)
 	protegido.GET("/dashboard/metricas",
-		middleware.RequirePermission("dashboard.ver"), dashboardHandler.GetMetricas)
+		middleware.RequirePermission(authz.PermDashboardVer), dashboardHandler.GetMetricas)
 }

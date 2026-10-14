@@ -62,6 +62,12 @@ func RespondWithError(c *gin.Context, err error) {
 	case errors.Is(err, auth.ErrRolYaVigente):
 		Fail(c, http.StatusConflict, "role_already_assigned", "El usuario ya tiene ese rol vigente.", nil)
 		return
+	case errors.Is(err, auth.ErrPermisoInvalido):
+		Fail(c, http.StatusBadRequest, "invalid_permission", "La lista contiene un código de permiso no válido.", nil)
+		return
+	case errors.Is(err, auth.ErrPermisoDuplicado):
+		Fail(c, http.StatusBadRequest, "duplicate_permission", "La lista no puede repetir códigos de permiso.", nil)
+		return
 
 	// --- security ---
 	case errors.Is(err, security.ErrPasswordInvalida):

@@ -43,7 +43,16 @@ import (
 // Debe montarse en todo grupo de rutas que requiera sesión — todo excepto
 // /healthz, /health y los endpoints públicos de internal/auth (login,
 // refresh, logout, reset de contraseña).
-func AuthPASETO(tokenMaker security.TokenMaker) gin.HandlerFunc {
+//
+// F15 (S7): tras verificar el token consulta al SesionVerificador (caché de TTL
+// corto): si el usuario está inactivo o su permisos_version difiere del "pv" del
+// token responde 401 "sesion_invalida" y el cliente debe refrescar el token (el
+// refresh re-resuelve los permisos desde la BD). Si no se puede verificar (BD
+// caída) falla CERRADO con 503: nunca se acepta un token sin comprobar su vigencia.
+func AuthPASETO(tokenMaker security.TokenMaker, sesiones SesionVerificador) gin.HandlerFunc {
+	if sesiones == nil {
+		panic("middleware: AuthPASETO requiere un SesionVerificador")
+	}
 	return func(c *gin.Context) {
 		rawToken, err := extractBearerToken(c.GetHeader("Authorization"))
 		if err != nil {
@@ -54,6 +63,16 @@ func AuthPASETO(tokenMaker security.TokenMaker) gin.HandlerFunc {
 		payload, err := tokenMaker.VerificarToken(rawToken, security.TipoTokenAcceso)
 		if err != nil {
 			FailFromError(c, http.StatusUnauthorized, "invalid_token", "El token es inválido o expiró", err)
+			return
+		}
+
+		activo, pv, err := sesiones.EstadoSesion(c.Request.Context(), payload.UsuarioID)
+		if err != nil {
+			FailFromError(c, http.StatusServiceUnavailable, "sesion_no_verificable", "No se pudo verificar la sesión", err)
+			return
+		}
+		if !activo || pv != payload.PermisosVersion {
+			Fail(c, http.StatusUnauthorized, "sesion_invalida", "La sesión ya no es válida; vuelva a autenticarse o refresque el token", nil)
 			return
 		}
 

@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"planillas-ccdr/internal/api/middleware"
+	"planillas-ccdr/internal/authz"
 )
 
 // VacacionesHandler expone el flujo de vacaciones. Solo parsea input, valida
@@ -23,21 +24,21 @@ func NewVacacionesHandler(service *VacacionesService) *VacacionesHandler {
 }
 
 // RegisterRoutes cablea las rutas bajo el grupo /api/v1 ya existente. Cada
-// ruta lleva su RequirePermission; nunca se autoriza por nombre de rol.
-// Los códigos de permiso NO se tocan aquí (F12).
+// ruta lleva su RequirePermission; nunca se autoriza por nombre de rol. Los
+// códigos son las constantes de internal/authz:
 //
-//	POST /vacaciones/solicitudes              vacaciones.solicitar
-//	POST /vacaciones/solicitudes/:id/aprobar  vacaciones.aprobar
-//	POST /vacaciones/solicitudes/:id/rechazar vacaciones.aprobar
-//	POST /vacaciones/solicitudes/:id/disfrute vacaciones.registrar_disfrute
-//	GET  /vacaciones/empleados/:empleado_id/saldo  vacaciones.ver
+//	POST /vacaciones/solicitudes                    authz.PermVacacionesSolicitar
+//	POST /vacaciones/solicitudes/:id/aprobar        authz.PermVacacionesAprobar
+//	POST /vacaciones/solicitudes/:id/rechazar       authz.PermVacacionesAprobar
+//	POST /vacaciones/solicitudes/:id/disfrute       authz.PermVacacionesRegistrarDisfrute
+//	GET  /vacaciones/empleados/:empleado_id/saldo   authz.PermVacacionesVer
 func (h *VacacionesHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	vac := rg.Group("/vacaciones")
-	vac.POST("/solicitudes", middleware.RequirePermission("vacaciones.solicitar"), h.solicitar)
-	vac.POST("/solicitudes/:id/aprobar", middleware.RequirePermission("vacaciones.aprobar"), h.aprobar)
-	vac.POST("/solicitudes/:id/rechazar", middleware.RequirePermission("vacaciones.aprobar"), h.rechazar)
-	vac.POST("/solicitudes/:id/disfrute", middleware.RequirePermission("vacaciones.registrar_disfrute"), h.registrarDisfrute)
-	vac.GET("/empleados/:empleado_id/saldo", middleware.RequirePermission("vacaciones.ver"), h.consultarSaldo)
+	vac.POST("/solicitudes", middleware.RequirePermission(authz.PermVacacionesSolicitar), h.solicitar)
+	vac.POST("/solicitudes/:id/aprobar", middleware.RequirePermission(authz.PermVacacionesAprobar), h.aprobar)
+	vac.POST("/solicitudes/:id/rechazar", middleware.RequirePermission(authz.PermVacacionesAprobar), h.rechazar)
+	vac.POST("/solicitudes/:id/disfrute", middleware.RequirePermission(authz.PermVacacionesRegistrarDisfrute), h.registrarDisfrute)
+	vac.GET("/empleados/:empleado_id/saldo", middleware.RequirePermission(authz.PermVacacionesVer), h.consultarSaldo)
 }
 
 // --- Solicitar -----------------------------------------------------------

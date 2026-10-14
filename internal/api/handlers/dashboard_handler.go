@@ -26,7 +26,7 @@ func NewDashboardHandler(service *services.DashboardService) *DashboardHandler {
 
 // GetMetricas atiende GET /api/v1/dashboard/metricas.
 //
-// Protegido por middleware.RequirePermission("dashboard.ver") — el
+// Protegido por middleware.RequirePermission(authz.PermDashboardVer) — el
 // middleware se monta en el router al registrar la ruta (ver bloque de
 // wiring al final de este archivo), no dentro del handler, para mantener
 // el handler agnóstico de cómo se arma el grupo de rutas.
@@ -89,7 +89,7 @@ func (h *DashboardHandler) GetHealth(c *gin.Context) {
 //   v1.Use(middleware.AuthRequired(cfg.Auth))
 //   {
 //       v1.GET("/dashboard/metricas",
-//           middleware.RequirePermission("dashboard.ver"),
+//           middleware.RequirePermission(authz.PermDashboardVer),
 //           dashboardHandler.GetMetricas)
 //   }
 // ============================================================================

@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"planillas-ccdr/internal/api/middleware"
+	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/pagination"
 	"planillas-ccdr/internal/services"
 
@@ -53,17 +54,17 @@ func parseIDParam(c *gin.Context, nombre string) (int64, bool) {
 func (h *EmpleadoHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	empleados := rg.Group("/empleados")
 	{
-		empleados.POST("", middleware.RequirePermission("empleados.crear"), h.CrearExpediente)
-		empleados.GET("", middleware.RequirePermission("empleados.leer"), h.ListarEmpleados)
-		empleados.GET("/:id", middleware.RequirePermission("empleados.leer"), h.GetEmpleado)
+		empleados.POST("", middleware.RequirePermission(authz.PermEmpleadosCrear), h.CrearExpediente)
+		empleados.GET("", middleware.RequirePermission(authz.PermEmpleadosLeer), h.ListarEmpleados)
+		empleados.GET("/:id", middleware.RequirePermission(authz.PermEmpleadosLeer), h.GetEmpleado)
 
-		empleados.PUT("/:id/datos-personales", middleware.RequirePermission("empleados.actualizar"), h.ActualizarDatosPersonales)
-		empleados.PUT("/:id/datos-laborales", middleware.RequirePermission("empleados.actualizar"), h.ActualizarDatosLaborales)
-		empleados.PUT("/:id/datos-bancarios", middleware.RequirePermission("empleados.actualizar"), h.ActualizarDatosBancarios)
+		empleados.PUT("/:id/datos-personales", middleware.RequirePermission(authz.PermEmpleadosActualizar), h.ActualizarDatosPersonales)
+		empleados.PUT("/:id/datos-laborales", middleware.RequirePermission(authz.PermEmpleadosActualizar), h.ActualizarDatosLaborales)
+		empleados.PUT("/:id/datos-bancarios", middleware.RequirePermission(authz.PermEmpleadosActualizar), h.ActualizarDatosBancarios)
 
-		empleados.POST("/:id/familiares", middleware.RequirePermission("empleados.actualizar"), h.AgregarFamiliar)
-		empleados.PUT("/familiares/:familiar_id", middleware.RequirePermission("empleados.actualizar"), h.ActualizarFamiliar)
-		empleados.GET("/:id/familiares", middleware.RequirePermission("empleados.leer"), h.ListarFamiliaresVigentes)
+		empleados.POST("/:id/familiares", middleware.RequirePermission(authz.PermEmpleadosActualizar), h.AgregarFamiliar)
+		empleados.PUT("/familiares/:familiar_id", middleware.RequirePermission(authz.PermEmpleadosActualizar), h.ActualizarFamiliar)
+		empleados.GET("/:id/familiares", middleware.RequirePermission(authz.PermEmpleadosLeer), h.ListarFamiliaresVigentes)
 	}
 }
 

@@ -3,6 +3,7 @@ package dto
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -40,17 +41,19 @@ import (
 
 // Usuario refleja las columnas de `usuarios` que security.sql necesita para
 // login y control de fuerza bruta (no todas las columnas de la tabla, p.ej.
-// no incluye nombre_completo/correo/empleado_id porque ninguna query de
-// security.sql las pide).
+// no incluye nombre_completo/empleado_id). F14 agrega `correo`: lo necesitan
+// el envío del reset y la política de contraseñas (no contener el correo).
 type Usuario struct {
 	ID                        int64
 	NombreUsuario             string
+	Correo                    string
 	PasswordHash              string
 	Activo                    bool
 	IntentosFallidos          uint16
 	BloqueadoHasta            sql.NullTime
 	RequiereCambioPassword    bool
 	FechaUltimoCambioPassword sql.NullTime
+	PermisosVersion           uint32 // F15: sube con cada cambio que invalide tokens emitidos
 	CreatedAt                 time.Time
 	UpdatedAt                 time.Time
 }
@@ -58,17 +61,19 @@ type Usuario struct {
 func scanUsuario(row *sql.Row) (Usuario, error) {
 	var u Usuario
 	err := row.Scan(
-		&u.ID, &u.NombreUsuario, &u.PasswordHash, &u.Activo,
+		&u.ID, &u.NombreUsuario, &u.Correo, &u.PasswordHash, &u.Activo,
 		&u.IntentosFallidos, &u.BloqueadoHasta,
 		&u.RequiereCambioPassword, &u.FechaUltimoCambioPassword,
+		&u.PermisosVersion,
 		&u.CreatedAt, &u.UpdatedAt,
 	)
 	return u, err
 }
 
-const getUsuarioColumnas = `id, nombre_usuario, password_hash, activo,
+const getUsuarioColumnas = `id, nombre_usuario, correo, password_hash, activo,
        intentos_fallidos, bloqueado_hasta,
        requiere_cambio_password, fecha_ultimo_cambio_password,
+       permisos_version,
        created_at, updated_at`
 
 // GetUsuarioPorNombreUsuario busca la cuenta por login. Devuelve
@@ -92,7 +97,63 @@ LIMIT 1`, id)
 	return scanUsuario(row)
 }
 
+// EstadoIntentos es el estado de fuerza bruta de una cuenta tras registrar un fallo.
+type EstadoIntentos struct {
+	IntentosFallidos uint16
+	BloqueadoHasta   sql.NullTime
+}
+
+// RegistrarIntentoFallidoAtomico (F14 / S5) suma 1 al contador y, si el nuevo
+// valor alcanza maxIntentos, fija bloqueado_hasta — todo en UN solo UPDATE, de
+// modo que dos intentos concurrentes nunca se pisan ni se saltan el umbral.
+//
+// IMPORTANTE (orden de los SET): MySQL evalúa las asignaciones de un UPDATE de
+// una tabla de izquierda a derecha, así que `bloqueado_hasta` debe ir ANTES de
+// `intentos_fallidos`: si fuera después vería el contador ya incrementado y
+// bloquearía un intento antes de tiempo.
+//
+// bloqueadoHasta lo calcula Go (UTC) en vez de NOW() + INTERVAL: el resto del
+// servicio compara bloqueado_hasta con time.Now() usando loc=UTC, y NOW() usa
+// la zona horaria de la sesión de MySQL, que puede no ser UTC.
+// LEAST(.., 65535) evita el error de rango de la columna SMALLINT UNSIGNED.
+//
+// Tras el UPDATE lee el estado resultante (solo informativo: logs/métricas).
+func (q *Queries) RegistrarIntentoFallidoAtomico(ctx context.Context, id int64, maxIntentos int, bloqueadoHasta time.Time) (EstadoIntentos, error) {
+	if _, err := q.db.ExecContext(ctx, `
+UPDATE usuarios
+SET bloqueado_hasta   = IF(intentos_fallidos + 1 >= ?, ?, bloqueado_hasta),
+    intentos_fallidos = LEAST(intentos_fallidos + 1, 65535)
+WHERE id = ?`, maxIntentos, bloqueadoHasta.UTC(), id); err != nil {
+		return EstadoIntentos{}, err
+	}
+
+	var e EstadoIntentos
+	err := q.db.QueryRowContext(ctx, `
+SELECT intentos_fallidos, bloqueado_hasta
+FROM usuarios
+WHERE id = ?`, id).Scan(&e.IntentosFallidos, &e.BloqueadoHasta)
+	return e, err
+}
+
+// RehashPasswordHash es el re-hash perezoso bcrypt→argon2id tras un login
+// exitoso. A diferencia de ActualizarPasswordHash NO toca
+// requiere_cambio_password ni fecha_ultimo_cambio_password (un re-hash
+// transparente no es un cambio de contraseña del usuario), y solo escribe si
+// el hash en BD sigue siendo el que se verificó: si la contraseña cambió entre
+// la lectura y este UPDATE, no se pisa con el hash viejo.
+func (q *Queries) RehashPasswordHash(ctx context.Context, id int64, hashAnterior, hashNuevo string) error {
+	_, err := q.db.ExecContext(ctx, `
+UPDATE usuarios
+SET password_hash = ?
+WHERE id = ?
+  AND password_hash = ?`, hashNuevo, id, hashAnterior)
+	return err
+}
+
 // IncrementarIntentosFallidos suma 1 al contador tras un password incorrecto.
+//
+// Deprecated (F14): lee-calcula-escribe desde Go no es atómico. Usar
+// RegistrarIntentoFallidoAtomico.
 // El umbral (N) y los minutos de bloqueo son política de internal/auth
 // (ADR-000 punto c), no viven acá.
 func (q *Queries) IncrementarIntentosFallidos(ctx context.Context, id int64) error {
@@ -105,6 +166,8 @@ WHERE id = ?`, id)
 
 // BloquearUsuarioTemporalmente se invoca desde el servicio cuando
 // intentos_fallidos alcanza el umbral N.
+//
+// Deprecated (F14): lo reemplaza RegistrarIntentoFallidoAtomico.
 func (q *Queries) BloquearUsuarioTemporalmente(ctx context.Context, id int64, bloqueadoHasta time.Time) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE usuarios
@@ -123,10 +186,10 @@ WHERE id = ?`, id)
 	return err
 }
 
-// ActualizarPasswordHash se usa tanto para el re-hash perezoso bcrypt→argon2id
-// post-login como para confirmar un reset de contraseña.
-// requiere_cambio_password se limpia explícitamente porque un cambio de
-// password siempre lo satisface.
+// ActualizarPasswordHash fija una contraseña NUEVA elegida por el usuario
+// (cambio autenticado o confirmación de reset). requiere_cambio_password se
+// limpia porque un cambio de password siempre lo satisface.
+// NO usar para el re-hash perezoso post-login: ver RehashPasswordHash.
 func (q *Queries) ActualizarPasswordHash(ctx context.Context, id int64, passwordHash string) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE usuarios
@@ -157,6 +220,7 @@ WHERE id = ?`, id)
 type RefreshToken struct {
 	ID              int64
 	UsuarioID       int64
+	FamiliaID       sql.NullString // NULL en sesiones anteriores a la migración 000114
 	TokenHash       string
 	FechaEmision    time.Time
 	FechaExpiracion time.Time
@@ -177,18 +241,47 @@ VALUES (?, ?, ?, NOW())`, usuarioID, tokenHash, fechaExpiracion)
 	return res.LastInsertId()
 }
 
+// CrearRefreshTokenConFamilia (F14 / S6) inserta una sesión dentro de una
+// familia de rotación (UUID) y registra desde dónde se emitió. Un login abre
+// una familia nueva; cada rotación hereda la de la fila que reemplaza.
+// ip y userAgent vacíos se guardan como NULL; se truncan al tamaño de la columna.
+func (q *Queries) CrearRefreshTokenConFamilia(ctx context.Context, usuarioID int64, tokenHash string, fechaExpiracion time.Time, familiaID, ip, userAgent string) (int64, error) {
+	res, err := q.db.ExecContext(ctx, `
+INSERT INTO refresh_tokens (usuario_id, familia_id, token_hash, fecha_expiracion, fecha_emision, ip_origen, user_agent)
+VALUES (?, ?, ?, ?, NOW(), ?, ?)`,
+		usuarioID, familiaID, tokenHash, fechaExpiracion,
+		nullSiVacio(truncarRunas(ip, 45)), nullSiVacio(truncarRunas(userAgent, 255)))
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func nullSiVacio(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
+
+func truncarRunas(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
 // GetRefreshTokenPorHash busca la sesión por el hash del token presentado.
 // Devuelve sql.ErrNoRows si no existe.
 func (q *Queries) GetRefreshTokenPorHash(ctx context.Context, tokenHash string) (RefreshToken, error) {
 	row := q.db.QueryRowContext(ctx, `
-SELECT id, usuario_id, token_hash, fecha_emision, fecha_expiracion, revocado, fecha_revocacion
+SELECT id, usuario_id, familia_id, token_hash, fecha_emision, fecha_expiracion, revocado, fecha_revocacion
 FROM refresh_tokens
 WHERE token_hash = ?
 LIMIT 1`, tokenHash)
 
 	var rt RefreshToken
 	err := row.Scan(
-		&rt.ID, &rt.UsuarioID, &rt.TokenHash,
+		&rt.ID, &rt.UsuarioID, &rt.FamiliaID, &rt.TokenHash,
 		&rt.FechaEmision, &rt.FechaExpiracion,
 		&rt.Revocado, &rt.FechaRevocacion,
 	)
@@ -205,6 +298,39 @@ SET revocado = 1,
 WHERE token_hash = ?
   AND revocado = 0`, tokenHash)
 	return err
+}
+
+// RevocarRefreshTokenSiVigente revoca la fila por ID solo si sigue sin
+// revocar, y informa si fue ESTE llamador quien la revocó. Es el paso atómico
+// de la rotación: de dos refresh concurrentes con el mismo token, exactamente
+// uno obtiene true; el otro (false) es una reutilización.
+func (q *Queries) RevocarRefreshTokenSiVigente(ctx context.Context, id int64) (bool, error) {
+	res, err := q.db.ExecContext(ctx, `
+UPDATE refresh_tokens
+SET revocado = 1,
+    fecha_revocacion = NOW()
+WHERE id = ?
+  AND revocado = 0`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// RevocarFamiliaRefreshTokens revoca todas las sesiones aún vigentes de una
+// cadena de rotación (respuesta a una reutilización detectada).
+func (q *Queries) RevocarFamiliaRefreshTokens(ctx context.Context, familiaID string) (int64, error) {
+	res, err := q.db.ExecContext(ctx, `
+UPDATE refresh_tokens
+SET revocado = 1,
+    fecha_revocacion = NOW()
+WHERE familia_id = ?
+  AND revocado = 0`, familiaID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // RevocarTodosLosRefreshTokensDeUsuario se usa tras un reset de contraseña o
@@ -261,8 +387,29 @@ LIMIT 1`, tokenHash)
 	return t, err
 }
 
+// ConsumirTokenResetPassword (F14) marca el token como usado SOLO si todavía
+// está sin usar y sin expirar, y devuelve true únicamente al llamador que lo
+// consumió. Reemplaza el patrón leer→validar→marcar, que dejaba pasar a dos
+// confirmaciones concurrentes con el mismo token. `ahora` lo pone Go (UTC).
+func (q *Queries) ConsumirTokenResetPassword(ctx context.Context, id int64, ahora time.Time) (bool, error) {
+	res, err := q.db.ExecContext(ctx, `
+UPDATE tokens_reset_password
+SET usado = 1,
+    fecha_uso = ?
+WHERE id = ?
+  AND usado = 0
+  AND fecha_expiracion > ?`, ahora.UTC(), id, ahora.UTC())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 // MarcarTokenResetPasswordUsado marca el token como consumido; un token
 // usado nunca vuelve a aceptarse.
+//
+// Deprecated (F14): no es condicional. Usar ConsumirTokenResetPassword.
 func (q *Queries) MarcarTokenResetPasswordUsado(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE tokens_reset_password
@@ -370,6 +517,8 @@ type Rol struct {
 	Activo      bool
 }
 
+var ErrPermisoNoEncontrado = errors.New("dto: el permiso no existe")
+
 // GetRolPorID busca un rol por ID. Devuelve sql.ErrNoRows si no existe.
 func (q *Queries) GetRolPorID(ctx context.Context, id int64) (Rol, error) {
 	row := q.db.QueryRowContext(ctx, `
@@ -381,6 +530,86 @@ LIMIT 1`, id)
 	var r Rol
 	err := row.Scan(&r.ID, &r.Codigo, &r.Descripcion, &r.Activo)
 	return r, err
+}
+
+// SetUsuarioActivo cambia el estado de una cuenta dentro de la transacción
+// recibida. Devuelve false si no hubo cambio; sql.ErrNoRows si el usuario no existe.
+func (q *Queries) SetUsuarioActivo(ctx context.Context, usuarioID int64, activo bool) (bool, error) {
+	var actual bool
+	if err := q.db.QueryRowContext(ctx, `
+SELECT activo
+FROM usuarios
+WHERE id = ?
+FOR UPDATE`, usuarioID).Scan(&actual); err != nil {
+		return false, err
+	}
+	if actual == activo {
+		return false, nil
+	}
+	if _, err := q.db.ExecContext(ctx, `UPDATE usuarios SET activo = ? WHERE id = ?`, activo, usuarioID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SetRolActivo cambia el estado de un rol y bloquea su fila para serializar
+// cambios concurrentes con la edición de sus permisos.
+func (q *Queries) SetRolActivo(ctx context.Context, rolID int64, activo bool) (bool, error) {
+	var actual bool
+	if err := q.db.QueryRowContext(ctx, `
+SELECT activo
+FROM roles
+WHERE id = ?
+FOR UPDATE`, rolID).Scan(&actual); err != nil {
+		return false, err
+	}
+	if actual == activo {
+		return false, nil
+	}
+	if _, err := q.db.ExecContext(ctx, `UPDATE roles SET activo = ? WHERE id = ?`, activo, rolID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ReemplazarPermisosRol reemplaza el conjunto completo de permisos de un rol.
+// La fila del rol se bloquea para serializar actualizaciones concurrentes;
+// los permisos inexistentes abortan la transacción sin dejar cambios parciales.
+func (q *Queries) ReemplazarPermisosRol(ctx context.Context, rolID int64, codigos []string) error {
+	var existe int64
+	if err := q.db.QueryRowContext(ctx, `SELECT id FROM roles WHERE id = ? FOR UPDATE`, rolID).Scan(&existe); err != nil {
+		return err
+	}
+
+	ids := make([]int64, 0, len(codigos))
+	vistos := make(map[string]struct{}, len(codigos))
+	for _, codigo := range codigos {
+		if _, duplicado := vistos[codigo]; duplicado {
+			return errors.New("dto: código de permiso duplicado")
+		}
+		vistos[codigo] = struct{}{}
+		var permisoID int64
+		err := q.db.QueryRowContext(ctx, `SELECT id FROM permisos WHERE codigo = ?`, codigo).Scan(&permisoID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrPermisoNoEncontrado
+		}
+		if err != nil {
+			return err
+		}
+		ids = append(ids, permisoID)
+	}
+
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM rol_permisos WHERE rol_id = ?`, rolID); err != nil {
+		return err
+	}
+	for _, permisoID := range ids {
+		if _, err := q.db.ExecContext(ctx, `
+INSERT INTO rol_permisos (rol_id, permiso_id)
+VALUES (?, ?)`, rolID, permisoID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ============================================================================
@@ -418,4 +647,59 @@ WHERE u.id = ?
 		codigos = append(codigos, codigo)
 	}
 	return codigos, rows.Err()
+}
+
+// ============================================================================
+// F15 — REVOCACIÓN EFECTIVA DE ACCESS TOKENS (permisos_version)
+// ============================================================================
+
+// IncrementarPermisosVersion sube permisos_version del usuario y devuelve el
+// valor nuevo. Debe llamarse DENTRO de la misma Tx que el cambio que invalida
+// los tokens (asignar/revocar rol, activar/desactivar, cambio de contraseña).
+func (q *Queries) IncrementarPermisosVersion(ctx context.Context, usuarioID int64) (uint32, error) {
+	res, err := q.db.ExecContext(ctx, `
+UPDATE usuarios
+SET permisos_version = permisos_version + 1
+WHERE id = ?`, usuarioID)
+	if err != nil {
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if n == 0 {
+		return 0, sql.ErrNoRows
+	}
+	var v uint32
+	err = q.db.QueryRowContext(ctx, `SELECT permisos_version FROM usuarios WHERE id = ?`, usuarioID).Scan(&v)
+	return v, err
+}
+
+// IncrementarPermisosVersionPorRol sube la versión de todos los usuarios con
+// ese rol vigente. Usar al cambiar rol_permisos o desactivar un rol (afecta a
+// muchos usuarios a la vez).
+func (q *Queries) IncrementarPermisosVersionPorRol(ctx context.Context, rolID int64) error {
+	_, err := q.db.ExecContext(ctx, `
+UPDATE usuarios u
+JOIN usuario_roles ur ON ur.usuario_id = u.id AND ur.es_vigente = 1
+SET u.permisos_version = u.permisos_version + 1
+WHERE ur.rol_id = ?`, rolID)
+	return err
+}
+
+// EstadoSesion es lo mínimo que el middleware necesita por request.
+type EstadoSesion struct {
+	Activo          bool
+	PermisosVersion uint32
+}
+
+// GetEstadoSesion devuelve activo y permisos_version del usuario. Devuelve
+// sql.ErrNoRows si no existe.
+func (q *Queries) GetEstadoSesion(ctx context.Context, usuarioID int64) (EstadoSesion, error) {
+	var e EstadoSesion
+	err := q.db.QueryRowContext(ctx, `
+SELECT activo, permisos_version
+FROM usuarios
+WHERE id = ?
+LIMIT 1`, usuarioID).Scan(&e.Activo, &e.PermisosVersion)
+	return e, err
 }

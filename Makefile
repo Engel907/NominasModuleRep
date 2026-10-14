@@ -1,6 +1,6 @@
 # Solo para desarrollo / CI. Las migraciones en otros ambientes se ejecutan
 # de forma deliberada con: go run ./cmd/migrate up
-.PHONY: db-up migrate-up migrate-down migrate-version db-reset
+.PHONY: db-up migrate-up migrate-down migrate-version db-reset test-integration
 
 N ?= 1
 MIGRATE := go run ./cmd/migrate
@@ -25,3 +25,8 @@ db-reset:
 	docker compose down -v
 	docker compose up -d --wait mysql
 	$(MIGRATE) up
+
+# Pruebas de integración (F13): levanta mysql_test (puerto 3307, tmpfs) y corre
+# go test -tags=integration. Ver docs/pruebas.md.
+test-integration:
+	RUN_INTEGRATION=1 ./run_full_test_suite.sh

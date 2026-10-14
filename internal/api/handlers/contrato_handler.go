@@ -11,6 +11,7 @@ import (
 	"net/http"
 
 	"planillas-ccdr/internal/api/middleware"
+	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/pagination"
 	"planillas-ccdr/internal/services"
 
@@ -28,17 +29,17 @@ func NewContratoHandler(service services.ContratoService) *ContratoHandler {
 func (h *ContratoHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	contratos := rg.Group("/contratos")
 	{
-		contratos.POST("", middleware.RequirePermission("contratos.crear"), h.CrearContrato)
-		contratos.GET("", middleware.RequirePermission("contratos.leer"), h.ListarContratos)
+		contratos.POST("", middleware.RequirePermission(authz.PermContratosCrear), h.CrearContrato)
+		contratos.GET("", middleware.RequirePermission(authz.PermContratosLeer), h.ListarContratos)
 	}
 
 	// Anidados bajo empleados, por legibilidad de la URL (mismo grupo raíz
 	// que api/handlers/empleado_handler.go).
 	empleados := rg.Group("/empleados")
 	{
-		empleados.PUT("/:id/contrato", middleware.RequirePermission("contratos.actualizar"), h.ActualizarContrato)
-		empleados.GET("/:id/contrato", middleware.RequirePermission("contratos.leer"), h.GetContratoVigente)
-		empleados.GET("/:id/contratos/historico", middleware.RequirePermission("contratos.leer"), h.ListarHistoricoPorEmpleado)
+		empleados.PUT("/:id/contrato", middleware.RequirePermission(authz.PermContratosActualizar), h.ActualizarContrato)
+		empleados.GET("/:id/contrato", middleware.RequirePermission(authz.PermContratosLeer), h.GetContratoVigente)
+		empleados.GET("/:id/contratos/historico", middleware.RequirePermission(authz.PermContratosLeer), h.ListarHistoricoPorEmpleado)
 	}
 }
 

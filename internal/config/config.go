@@ -8,6 +8,8 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +24,7 @@ type Config struct {
 	Server     ServerConfig
 	Database   DatabaseConfig
 	Auth       AuthConfig
+	SMTP       SMTPConfig
 	Asistencia AsistenciaConfig
 }
 
@@ -69,16 +72,35 @@ func (d DatabaseConfig) DSN() string {
 	)
 }
 
+// SMTPConfig es el canal de correo del reset de contraseña (F14 / S2).
+// Con Host vacío no hay SMTP: solo se permite en APP_ENV=development, donde
+// auth.LogNotificador registra el token en el log.
+type SMTPConfig struct {
+	Host string
+	Port string // 465 = TLS implícito; cualquier otro = STARTTLS obligatorio
+	User string
+	Pass string
+	From string // p.ej. "Planillas CCDR <no-responder@ccdrliberia.go.cr>"
+	// URLBaseReset es la URL del frontend a la que se agrega ?token=...
+	URLBaseReset string
+}
+
 type AsistenciaConfig struct {
 	ToleranciaTardanzaMin int
 }
 
 type AuthConfig struct {
-	// PasetoLocalKeyHex es la clave simétrica v2.local en hex (32 bytes / 64
-	// caracteres hex). Ver internal/security.NuevoPasetoMaker
-	// (github.com/o1egl/paseto) y cmd/api/main.go:newTokenMaker, que hace
-	// el hex-decode antes de pasarla.
-	PasetoLocalKeyHex   string
+	// PasetoLocalKeyHex (LEGADO, F15): una sola clave v4.local en hex (64
+	// caracteres). Se acepta solo si PasetoLocalKeysHex está vacío; equivale a
+	// una clave con kid "k1". Preferir PasetoLocalKeysHex.
+	PasetoLocalKeyHex string
+	// PasetoLocalKeysHex (F15): llavero "kid1:hex,kid2:hex". Se firma con
+	// PasetoActiveKID y se valida con cualquiera de la lista (rotación).
+	PasetoLocalKeysHex string
+	PasetoActiveKID    string
+	// CacheTTL (F15): vigencia de la caché del verificador de sesión. Es la
+	// cota superior de latencia de una revocación (0 = sin caché).
+	CacheTTL            time.Duration
 	AccessTokenDuration time.Duration
 	Issuer              string
 	Audience            string
@@ -143,8 +165,19 @@ func LoadConfig() (*Config, error) {
 			PingTimeout:     v.GetDuration("DB_PING_TIMEOUT_SECONDS") * time.Second,
 		},
 		Asistencia: AsistenciaConfig{ToleranciaTardanzaMin: v.GetInt("ASISTENCIA_TOLERANCIA_TARDANZA_MIN")},
+		SMTP: SMTPConfig{
+			Host:         v.GetString("SMTP_HOST"),
+			Port:         v.GetString("SMTP_PORT"),
+			User:         v.GetString("SMTP_USER"),
+			Pass:         v.GetString("SMTP_PASS"),
+			From:         v.GetString("SMTP_FROM"),
+			URLBaseReset: v.GetString("URL_BASE_RESET"),
+		},
 		Auth: AuthConfig{
 			PasetoLocalKeyHex:   v.GetString("PASETO_LOCAL_KEY_HEX"),
+			PasetoLocalKeysHex:  v.GetString("PASETO_LOCAL_KEYS_HEX"),
+			PasetoActiveKID:     v.GetString("PASETO_ACTIVE_KID"),
+			CacheTTL:            v.GetDuration("AUTH_CACHE_TTL"),
 			AccessTokenDuration: v.GetDuration("PASETO_ACCESS_TOKEN_MINUTES") * time.Minute,
 			Issuer:              v.GetString("PASETO_ISSUER"),
 			Audience:            v.GetString("PASETO_AUDIENCE"),
@@ -184,6 +217,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("DB_PING_TIMEOUT_SECONDS", 5)
 
 	v.SetDefault("PASETO_ACCESS_TOKEN_MINUTES", 20)
+	v.SetDefault("AUTH_CACHE_TTL", "5s")
 	v.SetDefault("PASETO_ISSUER", "planillas-ccdr")
 	v.SetDefault("PASETO_AUDIENCE", "planillas-ccdr-api")
 
@@ -192,6 +226,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("AUTH_MAX_FAILED_LOGINS", 5)
 	v.SetDefault("AUTH_LOCKOUT_MINUTES", 15)
 	v.SetDefault("ASISTENCIA_TOLERANCIA_TARDANZA_MIN", 0)
+
+	v.SetDefault("SMTP_PORT", "587")
 }
 
 // validate atrapa temprano los casos de configuración incompleta que de
@@ -205,23 +241,59 @@ func (c *Config) validate() error {
 	if c.Database.Name == "" {
 		missing = append(missing, "DB_NAME")
 	}
-	if c.Auth.PasetoLocalKeyHex == "" {
-		missing = append(missing, "PASETO_LOCAL_KEY_HEX")
+	// F15: llavero PASETO (validado completo; falla en el arranque).
+	if c.Auth.PasetoLocalKeysHex == "" && c.Auth.PasetoLocalKeyHex == "" {
+		missing = append(missing, "PASETO_LOCAL_KEYS_HEX")
 	} else {
-		if len(c.Auth.PasetoLocalKeyHex) != 64 {
-			return fmt.Errorf("config: PASETO_LOCAL_KEY_HEX debe tener 64 caracteres hex (32 bytes), tiene %d", len(c.Auth.PasetoLocalKeyHex))
+		claves, _, err := c.Auth.ClavesPaseto()
+		if err != nil {
+			return err
 		}
-		if _, err := hex.DecodeString(c.Auth.PasetoLocalKeyHex); err != nil {
-			return fmt.Errorf("config: PASETO_LOCAL_KEY_HEX no es hex válido: %w", err)
+		if c.App.IsProduction() {
+			for kid, k := range claves {
+				if strings.Trim(hex.EncodeToString(k), "0") == "" {
+					return fmt.Errorf("config: la clave PASETO %q es la de ejemplo (todo ceros); no se permite con APP_ENV=production", kid)
+				}
+			}
 		}
-		// La clave del .env.example es todo ceros: en producción sería un
-		// despliegue con una clave pública y conocida.
-		if c.App.IsProduction() && strings.Trim(c.Auth.PasetoLocalKeyHex, "0") == "" {
-			return fmt.Errorf("config: PASETO_LOCAL_KEY_HEX es la clave de ejemplo (todo ceros); no se permite con APP_ENV=production")
-		}
+	}
+	if c.Auth.Issuer == "" {
+		missing = append(missing, "PASETO_ISSUER")
+	}
+	if c.Auth.Audience == "" {
+		missing = append(missing, "PASETO_AUDIENCE")
+	}
+	if c.Auth.CacheTTL < 0 || c.Auth.CacheTTL > time.Minute {
+		return fmt.Errorf("config: AUTH_CACHE_TTL debe estar entre 0 y 1m (es la latencia máxima de una revocación)")
 	}
 	if c.App.IsProduction() && c.Database.Password == "" {
 		missing = append(missing, "DB_PASSWORD")
+	}
+
+	// Reset de contraseña por correo (F14). En producción SMTP no es opcional:
+	// sin él el flujo de reset no entregaría el token a nadie. Fuera de
+	// producción, SMTP_HOST vacío se acepta solo en development (LogNotificador).
+	if c.App.IsProduction() {
+		if c.SMTP.Host == "" {
+			missing = append(missing, "SMTP_HOST")
+		}
+		if c.SMTP.From == "" {
+			missing = append(missing, "SMTP_FROM")
+		}
+		if c.SMTP.URLBaseReset == "" {
+			missing = append(missing, "URL_BASE_RESET")
+		} else if !strings.HasPrefix(c.SMTP.URLBaseReset, "https://") {
+			return fmt.Errorf("config: URL_BASE_RESET debe empezar con https:// en producción")
+		}
+	} else if c.SMTP.Host != "" {
+		if c.SMTP.From == "" {
+			missing = append(missing, "SMTP_FROM")
+		}
+		if c.SMTP.URLBaseReset == "" {
+			missing = append(missing, "URL_BASE_RESET")
+		}
+	} else if c.App.Env != "development" {
+		return fmt.Errorf("config: APP_ENV=%s requiere SMTP_HOST (el LogNotificador solo existe en development)", c.App.Env)
 	}
 
 	if c.Auth.AccessTokenDuration <= 0 {
@@ -245,4 +317,69 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+var kidValido = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
+// ClavesPaseto decodifica el llavero y devuelve (kid -> 32 bytes, kid activo).
+// PASETO_LOCAL_KEYS_HEX tiene precedencia; si falta se usa la clave legada
+// PASETO_LOCAL_KEY_HEX con kid "k1". Falla si hay kids repetidos o inválidos,
+// claves de largo != 32 bytes, o no hay kid activo determinable.
+func (a AuthConfig) ClavesPaseto() (map[string][]byte, string, error) {
+	claves := map[string][]byte{}
+	activo := strings.TrimSpace(a.PasetoActiveKID)
+
+	if strings.TrimSpace(a.PasetoLocalKeysHex) == "" {
+		k, err := decodificarClave("PASETO_LOCAL_KEY_HEX", a.PasetoLocalKeyHex)
+		if err != nil {
+			return nil, "", err
+		}
+		if activo != "" && activo != "k1" {
+			return nil, "", fmt.Errorf("config: PASETO_ACTIVE_KID=%q no existe; con PASETO_LOCAL_KEY_HEX el único kid es \"k1\"", activo)
+		}
+		return map[string][]byte{"k1": k}, "k1", nil
+	}
+
+	for _, par := range strings.Split(a.PasetoLocalKeysHex, ",") {
+		kid, h, ok := strings.Cut(strings.TrimSpace(par), ":")
+		if !ok || !kidValido.MatchString(kid) {
+			return nil, "", fmt.Errorf("config: PASETO_LOCAL_KEYS_HEX debe tener formato kid:hex,kid:hex (kid = letras, dígitos, _ o -, máx. 32)")
+		}
+		if _, dup := claves[kid]; dup {
+			return nil, "", fmt.Errorf("config: kid %q repetido en PASETO_LOCAL_KEYS_HEX", kid)
+		}
+		k, err := decodificarClave("PASETO_LOCAL_KEYS_HEX["+kid+"]", h)
+		if err != nil {
+			return nil, "", err
+		}
+		claves[kid] = k
+	}
+	if activo == "" {
+		if len(claves) != 1 {
+			return nil, "", fmt.Errorf("config: PASETO_ACTIVE_KID es obligatorio con más de una clave")
+		}
+		for kid := range claves {
+			activo = kid
+		}
+	}
+	if _, ok := claves[activo]; !ok {
+		kids := make([]string, 0, len(claves))
+		for k := range claves {
+			kids = append(kids, k)
+		}
+		sort.Strings(kids)
+		return nil, "", fmt.Errorf("config: PASETO_ACTIVE_KID=%q no está en PASETO_LOCAL_KEYS_HEX (kids: %v)", activo, kids)
+	}
+	return claves, activo, nil
+}
+
+func decodificarClave(nombre, h string) ([]byte, error) {
+	if len(h) != 64 {
+		return nil, fmt.Errorf("config: %s debe tener 64 caracteres hex (32 bytes), tiene %d", nombre, len(h))
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return nil, fmt.Errorf("config: %s no es hex válido: %w", nombre, err)
+	}
+	return b, nil
 }
