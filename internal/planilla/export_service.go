@@ -19,6 +19,8 @@ import (
 	"unicode"
 
 	"github.com/shopspring/decimal"
+
+	"planillas-ccdr/internal/authz"
 )
 
 // ============================================================================
@@ -165,6 +167,12 @@ var ErrPlanillaSinFilasParaDispersion = errors.New("planilla: no hay filas de di
 
 // ErrUsuarioExportRequerido: la exportación exige un usuario identificado.
 var ErrUsuarioExportRequerido = errors.New("planilla: usuarioID es requerido para exportar")
+
+var (
+	ErrBoletaSinPermiso           = errors.New("planilla: el usuario no tiene permiso para ver boletas")
+	ErrBoletaNoPropia             = errors.New("planilla: solo se permite consultar la boleta propia")
+	ErrBoletaSinEmpleadoVinculado = errors.New("planilla: el usuario no tiene empleado vinculado")
+)
 
 // Motivos (controlados) por los que una fila de dispersión se rechaza. Son
 // seguros de mostrar al operador: no contienen datos bancarios.
@@ -370,4 +378,31 @@ func (s *ExportService) ObtenerBoletaPago(ctx context.Context, periodoID int64, 
 		Embargos:    embargos,
 		GeneradaEn:  s.now(),
 	}, nil
+}
+
+// ObtenerBoletaPagoAutorizada aplica autorización por fila en el servicio,
+// independientemente de la ruta que haya invocado el handler.
+func (s *ExportService) ObtenerBoletaPagoAutorizada(ctx context.Context, periodoID, empleadoID, empleadoUsuarioID int64, permisos []string) (*BoletaPagoOutput, error) {
+	if tienePermisoBoleta(permisos, authz.PermPlanillaVerBoleta) {
+		return s.ObtenerBoletaPago(ctx, periodoID, empleadoID)
+	}
+	if !tienePermisoBoleta(permisos, authz.PermPlanillaVerBoletaPropia) {
+		return nil, ErrBoletaSinPermiso
+	}
+	if empleadoUsuarioID <= 0 {
+		return nil, ErrBoletaSinEmpleadoVinculado
+	}
+	if empleadoID != empleadoUsuarioID {
+		return nil, ErrBoletaNoPropia
+	}
+	return s.ObtenerBoletaPago(ctx, periodoID, empleadoID)
+}
+
+func tienePermisoBoleta(permisos []string, buscado string) bool {
+	for _, permiso := range permisos {
+		if permiso == buscado {
+			return true
+		}
+	}
+	return false
 }

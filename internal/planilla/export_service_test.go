@@ -17,6 +17,7 @@ func filaOK() FilaDispersionBancaria {
 		EmpleadoID: 7, Cedula: "1-0234-0567", NombreCompleto: "Ana Mora",
 		IBAN: "CR05015202001026284066", NetoPagado: dec("150000.00"),
 	}
+
 }
 
 func TestValidarFilaDispersion(t *testing.T) {
@@ -60,6 +61,23 @@ func TestValidarFilaDispersion(t *testing.T) {
 				t.Fatalf("motivo/empleado = %q/%d, quería %q/%d", fe.Motivo, fe.EmpleadoID, tc.motivo, f.EmpleadoID)
 			}
 		})
+	}
+}
+
+func TestObtenerBoletaPagoAutorizada_AplicaPermisoPropioEnServicio(t *testing.T) {
+	service, _ := nuevoSvc(&fakeTx{})
+	_, err := service.ObtenerBoletaPagoAutorizada(context.Background(), 4, 9, 7, []string{"planilla.ver_boleta_propia"})
+	if !errors.Is(err, ErrBoletaNoPropia) {
+		t.Fatalf("acceso a la boleta de otro empleado: error = %v", err)
+	}
+	if _, err := service.ObtenerBoletaPagoAutorizada(context.Background(), 4, 7, 7, []string{"planilla.ver_boleta_propia"}); err != nil {
+		t.Fatalf("acceso a la boleta propia: %v", err)
+	}
+	if _, err := service.ObtenerBoletaPagoAutorizada(context.Background(), 4, 9, 7, []string{"planilla.ver_boleta"}); err != nil {
+		t.Fatalf("permiso global de boletas no debe filtrar por empleado: %v", err)
+	}
+	if _, err := service.ObtenerBoletaPagoAutorizada(context.Background(), 4, 7, 7, nil); !errors.Is(err, ErrBoletaSinPermiso) {
+		t.Fatalf("sin permiso, error = %v", err)
 	}
 }
 
@@ -180,6 +198,7 @@ func TestGenerarArchivoDispersionBancaria(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if nombre != "dispersion_bancaria_periodo_42_20261013_083000.txt" {
 			t.Fatalf("nombre = %s", nombre)
 		}

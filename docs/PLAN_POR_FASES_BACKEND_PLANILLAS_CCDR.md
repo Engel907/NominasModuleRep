@@ -1173,6 +1173,8 @@ CRITERIOS DE ACEPTACIÓN
 
 ---
 
+LINDOLI
+
 ## FASE 17 — Usuarios/roles (API) y autorización a nivel de fila (S10)
 
 **Contexto.** Solo existe asignar/revocar un rol ya existente: no se pueden crear, listar ni desactivar usuarios, ni resetear contraseñas administrativamente, ni consultar la auditoría (`auditoria_cambios`). Además, `vacaciones.solicitar` recibe `empleado_id` en el body (cualquiera solicita por cualquiera) y `planilla.ver_boleta` permite ver la boleta de **cualquier** empleado.
@@ -1224,9 +1226,14 @@ CRITERIOS DE ACEPTACIÓN
 ```
 
 **Archivos a pasar**
-- `internal/auth/service.go`, `dto.go`, `errors.go`, `internal/api/handlers/auth_handler.go`, `internal/api/handlers/routes.go`
+- `internal/auth/service.go`, `dto.go`, `errors.go`, 
+ 
+ `internal/api/handlers/auth_handler.go`, `internal/api/handlers/routes.go` 
+
 - `internal/db/dto/security.go`, `internal/authz/permisos.go` (F12), `internal/auth/politica.go` (F14)
-- `internal/asistencia/vacaciones_service.go`, `vacaciones_handler.go`
+- `internal/asistencia/vacaciones_service.go`, 
+
+`vacaciones_handler.go`
 - `internal/planilla/export_service.go`, `internal/api/handlers/planilla_export_handler.go`
 - `internal/api/middleware/context.go`, `internal/pagination/pagination.go`
 - DDL: `usuarios`, `roles`, `permisos`, `rol_permisos`, `usuario_roles`, `auditoria_cambios` (schema.sql 1312–1366, 3110–3125).
@@ -1234,7 +1241,11 @@ CRITERIOS DE ACEPTACIÓN
 
 **Migraciones que crea:** `000117_rol_empleado`.
 
----
+---\
+
+
+ahoora sii
+
 
 # ETAPA 4 — MOTOR DE PLANILLA
 
@@ -1305,15 +1316,18 @@ CRITERIOS DE ACEPTACIÓN
 - `internal/db/dto/planilla_periodo.go` (501), `planilla_motor.go` (158)
 - `internal/contabilidad/sql_adapters.go` (296)
 - La salida de: `grep -rn "DivisorDiasMes\|mesesAguinaldo\|0\.125\|0\.25\|0\.5\|PrioridadPensionAlimentaria\|== 12\|> 6\|fechaUTC" internal --include=*.go` y los archivos `acumulados_periodicos.go` (296) y los fragmentos de `services/liquidacion_service.go` que salgan en ese listado.
-- DDL: tablas `parametros_*` (schema.sql 587–795), `parametros_salario_escolar` (3873–3883), `embargos` (1088–1135), `conceptos_salariales` y `concepto_salarial_formula` (514–545).
+- 
+DDL: tablas `parametros_*` (schema.sql 587–795), `parametros_salario_escolar` (3873–3883), `embargos` (1088–1135), `conceptos_salariales` y `concepto_salarial_formula` (514–545).
 - Solo los `INSERT` de `parametros_*` de las migraciones `000002` y `000005`.
 - `internal/config/config.go`, `.env.example`.
+
+
 
 **Archivos que crea:** `internal/shared/porcentaje/`, `internal/parametros/`, `internal/planilla/cargador_parametros.go`.
 **Migraciones que crea:** `000118_parametros_generales`.
 
 ---
-
+R OPERATIVOSS SSSSS
 ## FASE 19 — Ciclo de vida del período y segregación de funciones
 
 **Contexto.** No existe ningún endpoint para crear, listar, calcular, aprobar o pagar un período (`periodo.go` es un placeholder). La tabla `periodos_planilla` tiene `preparado_por_usuario_id`, `revisado_por_usuario_id` y `aprobado_por_usuario_id`, pero **nada impide que la misma persona prepare y apruebe** (S10): la segregación de funciones es el corazón del control interno. Ojo: `planilla_detalle_empleado.estado` tiene su **propio** ENUM (`calculado`, `aprobado`, `pagado`) que debe mantenerse en sincronía con el del período.

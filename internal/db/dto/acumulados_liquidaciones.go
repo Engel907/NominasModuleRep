@@ -13,10 +13,8 @@
 //     vacaciones_acumulado, periodos_planilla, planilla_detalle_empleado). Los
 //     SELECT listan columnas explícitas en vez de `SELECT *`; si el schema
 //     cambia, ajustar structs + columnas* aquí.
-//   - F08: los periodos que cuentan para acumulados son los de
-//     planilla.EstadosParaAcumulados() (aprobada, pagada, contabilizada). El IN
-//     (...) se arma con planilla.ClausulaIN; no se escriben estados como string
-//     suelto en el SQL.
+//   - F08: los periodos que cuentan para acumulados son aprobada, pagada y
+//     contabilizada, los valores persistidos del ENUM periodos_planilla.estado.
 //   - CORRECCIÓN respecto al .sql: GetSaldoVacacionesDisponibles hacía
 //     `WHERE empleado_id = ? LIMIT 1` asumiendo una fila por empleado.
 //     vacaciones_acumulado es una tabla de CORTES históricos (UNIQUE
@@ -37,14 +35,11 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
-
-	"planillas-ccdr/internal/planilla"
 )
 
 // ============================================================================
 // SALARIOS BRUTOS DEVENGADOS (fuente compartida por aguinaldo, salario
-// escolar y liquidación). Solo periodos en planilla.EstadosParaAcumulados()
-// (aprobada, pagada, contabilizada).
+// escolar y liquidación). Solo periodos aprobados, pagados o contabilizados.
 // ============================================================================
 
 type SumarSalariosBrutosPeriodoRow struct {
@@ -56,7 +51,8 @@ type SumarSalariosBrutosPeriodoRow struct {
 // periodo que cuentan para acumulados y los argumentos de la consulta en el
 // orden en que aparecen los placeholders: empleadoID, estados..., resto...
 func estadosAcumuladosFiltro(empleadoID int64, resto ...interface{}) (string, []interface{}) {
-	in, estadoArgs := planilla.ClausulaIN(planilla.EstadosParaAcumulados())
+	const in = "IN (?,?,?)"
+	estadoArgs := []interface{}{"aprobada", "pagada", "contabilizada"}
 	args := make([]interface{}, 0, 1+len(estadoArgs)+len(resto))
 	args = append(args, empleadoID)
 	args = append(args, estadoArgs...)
@@ -67,7 +63,7 @@ func estadosAcumuladosFiltro(empleadoID int64, resto ...interface{}) (string, []
 // SumarSalariosBrutosPeriodo suma total_ingresos (bruto, no neto) de
 // planilla_detalle_empleado para un empleado, filtrando por la fecha de fin de
 // cada periodo entre fechaDesde y fechaHasta (ambas inclusivas). Solo cuentan
-// periodos en planilla.EstadosParaAcumulados().
+// periodos aprobados, pagados o contabilizados.
 func (q *Queries) SumarSalariosBrutosPeriodo(ctx context.Context, empleadoID int64, fechaDesde, fechaHasta time.Time) (SumarSalariosBrutosPeriodoRow, error) {
 	in, args := estadosAcumuladosFiltro(empleadoID, fechaDesde, fechaHasta)
 	var r SumarSalariosBrutosPeriodoRow
@@ -93,7 +89,7 @@ type SalarioBrutoPeriodo struct {
 }
 
 // ListSalariosBrutosUltimosPeriodos devuelve el detalle por periodo de los
-// últimos `limit` periodos (en planilla.EstadosParaAcumulados()) hasta
+// últimos `limit` periodos aprobados, pagados o contabilizados hasta
 // fechaCorte, más reciente primero.
 // Se trae el detalle (no solo el agregado) para que el llamador decida si
 // excluye periodos con salario cero/incompleto; esta query no toma esa

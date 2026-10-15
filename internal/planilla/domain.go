@@ -225,8 +225,9 @@ type ParametroCargaSocial struct {
 type TramoRenta struct {
 	OrdenTramo int32
 	MontoDesde decimal.Decimal
-	MontoHasta decimal.Decimal // tramo abierto (último) a confirmar cómo se representa (nil vs. valor centinela)
+	MontoHasta decimal.Decimal
 	Porcentaje decimal.Decimal
+	Abierto    bool
 }
 
 type CreditoFiscalParametro struct {

@@ -140,8 +140,7 @@ type ResultadoImpuestoRenta struct {
 // créditos fiscales ya resueltos.
 //
 // tramos no necesita venir pre-ordenado — la función ordena por
-// OrdenTramo. El último tramo (abierto, sin techo) se identifica porque
-// TramoRenta.MontoHasta es cero — convención documentada en domain.go.
+// OrdenTramo. El techo solo se ignora cuando Abierto es true.
 func CalcularImpuestoRenta(baseRenta decimal.Decimal, tramos []TramoRenta, creditos []CreditoFiscalResuelto) (ResultadoImpuestoRenta, error) {
 	if len(tramos) == 0 {
 		return ResultadoImpuestoRenta{}, errors.New("planilla: no hay tramos de renta vigentes para la fecha efectiva")
@@ -152,14 +151,20 @@ func CalcularImpuestoRenta(baseRenta decimal.Decimal, tramos []TramoRenta, credi
 	sort.Slice(ordenados, func(i, j int) bool { return ordenados[i].OrdenTramo < ordenados[j].OrdenTramo })
 
 	impuestoBruto := decimal.Zero
-	for _, tramo := range ordenados {
+	for i, tramo := range ordenados {
+		if tramo.Abierto && i != len(ordenados)-1 {
+			return ResultadoImpuestoRenta{}, fmt.Errorf("planilla: tramo de renta abierto (%d) no es el último", tramo.OrdenTramo)
+		}
+		if !tramo.Abierto && !tramo.MontoHasta.GreaterThan(tramo.MontoDesde) {
+			return ResultadoImpuestoRenta{}, fmt.Errorf("planilla: tramo de renta %d tiene un límite superior inválido", tramo.OrdenTramo)
+		}
 		if baseRenta.LessThanOrEqual(tramo.MontoDesde) {
 			continue // la base no alcanza este tramo
 		}
 
 		var excedenteHasta decimal.Decimal
 		switch {
-		case tramo.MontoHasta.IsZero():
+		case tramo.Abierto:
 			// último tramo, abierto
 			excedenteHasta = baseRenta
 		case baseRenta.LessThan(tramo.MontoHasta):

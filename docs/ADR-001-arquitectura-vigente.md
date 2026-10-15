@@ -146,6 +146,35 @@ define su propio formato de error (`gin.H{"error": ...}` ad hoc).
   todos los usuarios deberán iniciar sesión nuevamente. Los refresh tokens nuevos se emiten con
   permisos y `pv` leídos de la BD.
 
+### 3.8 Endurecimiento HTTP, errores y observabilidad (F16)
+
+- **Contrato de error:** se conserva `{"error":{code,message,details,request_id}}`. La traducción
+  del error a status, código y mensaje se centraliza; los mensajes de binding usan nombres de
+  campos JSON y nunca reflejan valores recibidos. Los errores internos no exponen `err.Error()`.
+  `ParseIDParam` devuelve un error tipado sin escribir la respuesta; el handler lo propaga una sola
+  vez al manejador global.
+- **Rate limiting:** limitador en memoria por IP+ruta para endpoints públicos de autenticación y
+  por `usuario_id` para rutas protegidas. Se devuelve 429 con `Retry-After`. Las variables
+  `RATE_LIMIT_AUTH_PER_MIN`, `RATE_LIMIT_AUTH_BURST`, `RATE_LIMIT_USER_PER_MIN` y
+  `RATE_LIMIT_USER_BURST` son obligatorias y deben ser mayores que cero. La limitación es por
+  proceso; con varias réplicas se requiere un límite en el gateway/WAF o un almacén compartido.
+- **Proxy confiable:** `TRUSTED_PROXIES` define explícitamente los proxies confiables; vacío
+  significa ninguno. En producción se rechazan las redes abiertas `0.0.0.0/0` y `::/0`.
+- **Respuestas HTTP:** se envían cabeceras `nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `Cache-Control: no-store` y CSP `default-src 'none'`;
+  HSTS se habilita solo en producción. CORS usa la lista exacta `CORS_ALLOWED_ORIGINS`, rechaza
+  `*` y no habilita credenciales. `MAX_BODY_BYTES` limita el cuerpo de cada petición.
+- **Logging:** `log/slog` en JSON; el log de petición incluye `request_id`, método, plantilla de
+  ruta sin query string ni valores de parámetros, estado, latencia, bytes, IP y `usuario_id`.
+  No se registran cuerpos ni cabeceras; atributos que sugieran secretos se redactan. Un
+  `X-Request-ID` entrante se acepta solo si cumple `^[A-Za-z0-9._-]{8,64}$`.
+- **TLS MySQL:** `DB_TLS_MODE` acepta `disabled`, `required` o `verify-full`, con
+  `DB_TLS_CA_FILE` para la CA. `disabled` hace fallar el arranque en producción; `required`
+  cifra el tráfico pero no valida el certificado, por lo que se recomienda `verify-full`.
+- **Orden de middleware global:** `RequestID → SecurityHeaders → RequestLogger → Recovery →
+  ErrorHandler → CORS → LimitarCuerpo → rutas`. Los middlewares que usan `Fail` deben ir después
+  de `ErrorHandler`.
+
 ---
 
 ## 4. Base de datos y migraciones
@@ -225,6 +254,8 @@ jobs:
 - [ ] Variables de producción presentes y validadas por `config.LoadConfig`. En particular
       `PASETO_LOCAL_KEYS_HEX` + `PASETO_ACTIVE_KID` (claves de 64 hex, distintas a las de staging
       y CI; o la variable legada `PASETO_LOCAL_KEY_HEX`) y las `DB_*`.
+- [ ] Variables de F16 configuradas explícitamente: límites de rate, proxies confiables, orígenes
+      CORS, tamaño máximo del cuerpo y modo TLS de MySQL.
 - [ ] Comunicado el cierre de sesión: tras el despliegue de v4.local todos deberán iniciar sesión
       nuevamente. El frontend debe tratar `401 sesion_invalida` intentando `/auth/refresh` y
       reintentando la solicitud, no enviando inmediatamente al usuario al login.

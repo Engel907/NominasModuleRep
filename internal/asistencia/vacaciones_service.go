@@ -36,21 +36,23 @@ import (
 )
 
 var (
-	ErrVacEmpleadoNoEncontrado     = errors.New("empleado no encontrado")
-	ErrVacEmpleadoInactivo         = errors.New("el empleado está inactivo")
-	ErrVacSolicitudNoEncontrada    = errors.New("solicitud de vacaciones no encontrada")
-	ErrVacSolicitudNoPendiente     = errors.New("la solicitud de vacaciones ya no está pendiente")
-	ErrVacSolicitudNoAprobada      = errors.New("la solicitud de vacaciones no está aprobada")
-	ErrVacRangoFechasInvalido      = errors.New("rango de fechas de vacaciones inválido")
-	ErrVacSolicitudTraslapada      = errors.New("las fechas se traslapan con otra solicitud pendiente o aprobada")
-	ErrVacSaldoInsuficiente        = errors.New("saldo de vacaciones insuficiente")
-	ErrVacSinDiasHabiles           = errors.New("el rango solicitado no contiene días hábiles")
-	ErrVacEscalaNoConfigurada      = errors.New("no hay escala de vacaciones vigente para la antigüedad del empleado")
-	ErrVacDisfruteYaRegistrado     = errors.New("el disfrute de esta solicitud ya fue registrado")
-	ErrAcumulacionYaRegistrada     = errors.New("la acumulación de este período ya fue registrada")
-	ErrVacMotivoRechazoRequerido   = errors.New("el motivo de rechazo es obligatorio")
-	ErrVacMotivoRechazoMuyLargo    = errors.New("el motivo de rechazo excede 255 caracteres")
-	ErrVacPeriodoReferenciaInvalid = errors.New("periodo_referencia es obligatorio y no puede exceder 20 caracteres")
+	ErrVacEmpleadoNoEncontrado         = errors.New("empleado no encontrado")
+	ErrVacEmpleadoInactivo             = errors.New("el empleado está inactivo")
+	ErrVacSolicitudNoEncontrada        = errors.New("solicitud de vacaciones no encontrada")
+	ErrVacSolicitudNoPendiente         = errors.New("la solicitud de vacaciones ya no está pendiente")
+	ErrVacSolicitudNoAprobada          = errors.New("la solicitud de vacaciones no está aprobada")
+	ErrVacRangoFechasInvalido          = errors.New("rango de fechas de vacaciones inválido")
+	ErrVacSolicitudTraslapada          = errors.New("las fechas se traslapan con otra solicitud pendiente o aprobada")
+	ErrVacSaldoInsuficiente            = errors.New("saldo de vacaciones insuficiente")
+	ErrVacSinDiasHabiles               = errors.New("el rango solicitado no contiene días hábiles")
+	ErrVacEscalaNoConfigurada          = errors.New("no hay escala de vacaciones vigente para la antigüedad del empleado")
+	ErrVacDisfruteYaRegistrado         = errors.New("el disfrute de esta solicitud ya fue registrado")
+	ErrAcumulacionYaRegistrada         = errors.New("la acumulación de este período ya fue registrada")
+	ErrVacMotivoRechazoRequerido       = errors.New("el motivo de rechazo es obligatorio")
+	ErrVacMotivoRechazoMuyLargo        = errors.New("el motivo de rechazo excede 255 caracteres")
+	ErrVacPeriodoReferenciaInvalid     = errors.New("periodo_referencia es obligatorio y no puede exceder 20 caracteres")
+	ErrVacSolicitarTercerosNoPermitido = errors.New("no tiene permiso para solicitar vacaciones por otro empleado")
+	ErrVacSolicitudPropiaNoResoluble   = errors.New("no se puede aprobar o rechazar la solicitud propia")
 )
 
 // ErrCalendarioIncompleto indica que calendario_laboral_dia no tiene todas las
@@ -253,10 +255,12 @@ func (s *VacacionesService) AcumularVacaciones(ctx context.Context, in AcumularV
 // --- Solicitud ---------------------------------------------------------------
 
 type SolicitarVacacionesInput struct {
-	EmpleadoID  int64
-	FechaInicio time.Time
-	FechaFin    time.Time
-	CreadoPor   int64
+	EmpleadoID             int64
+	FechaInicio            time.Time
+	FechaFin               time.Time
+	CreadoPor              int64
+	EmpleadoIDUsuario      int64
+	PuedeSolicitarTerceros bool
 }
 
 // SolicitarVacaciones crea una solicitud 'pendiente'. Los días solicitados se
@@ -266,6 +270,18 @@ type SolicitarVacacionesInput struct {
 // descuentan (aún no están aprobadas); la verificación definitiva ocurre al
 // aprobar y al registrar el disfrute, ambas bajo lock.
 func (s *VacacionesService) SolicitarVacaciones(ctx context.Context, in SolicitarVacacionesInput) (dto.VacacionesSolicitud, error) {
+	if !in.PuedeSolicitarTerceros {
+		if in.EmpleadoIDUsuario <= 0 {
+			return dto.VacacionesSolicitud{}, ErrVacEmpleadoNoEncontrado
+		}
+		if in.EmpleadoID != 0 && in.EmpleadoID != in.EmpleadoIDUsuario {
+			return dto.VacacionesSolicitud{}, ErrVacSolicitarTercerosNoPermitido
+		}
+		in.EmpleadoID = in.EmpleadoIDUsuario
+	}
+	if in.EmpleadoID <= 0 {
+		return dto.VacacionesSolicitud{}, ErrVacEmpleadoNoEncontrado
+	}
 	inicio, fin := vacSoloFecha(in.FechaInicio), vacSoloFecha(in.FechaFin)
 	if fin.Before(inicio) {
 		return dto.VacacionesSolicitud{}, fmt.Errorf("%w: fecha_fin anterior a fecha_inicio", ErrVacRangoFechasInvalido)
@@ -317,10 +333,11 @@ func (s *VacacionesService) SolicitarVacaciones(ctx context.Context, in Solicita
 }
 
 type ResolverSolicitudInput struct {
-	SolicitudID   int64
-	Aprobar       bool
-	MotivoRechazo string // obligatorio si Aprobar == false
-	AprobadoPor   int64  // id de usuarios
+	SolicitudID         int64
+	Aprobar             bool
+	MotivoRechazo       string // obligatorio si Aprobar == false
+	AprobadoPor         int64  // id de usuarios
+	AprobadorEmpleadoID int64
 }
 
 // ResolverSolicitud aprueba o rechaza una solicitud pendiente. Aprobar NO
@@ -330,10 +347,6 @@ type ResolverSolicitudInput struct {
 // comprometidos por solicitudes aprobadas sin disfrutar, cubra los días
 // solicitados. Aprobar dos veces la misma solicitud devuelve
 // ErrVacSolicitudNoPendiente (se lee con FOR UPDATE).
-//
-// TODO F17: impedir que un usuario apruebe su propia solicitud (requiere
-// autorización a nivel de fila: comparar usuarios.empleado_id con
-// sol.EmpleadoID). No se implementa aquí.
 func (s *VacacionesService) ResolverSolicitud(ctx context.Context, in ResolverSolicitudInput) (dto.VacacionesSolicitud, error) {
 	motivo := strings.TrimSpace(in.MotivoRechazo)
 	if !in.Aprobar {
@@ -356,6 +369,10 @@ func (s *VacacionesService) ResolverSolicitud(ctx context.Context, in ResolverSo
 		}
 		if sol.Estado != "pendiente" {
 			return ErrVacSolicitudNoPendiente
+		}
+		if in.AprobadoPor == sol.CreadoPor ||
+			(in.AprobadorEmpleadoID > 0 && in.AprobadorEmpleadoID == sol.EmpleadoID) {
+			return ErrVacSolicitudPropiaNoResoluble
 		}
 
 		estado, motivoSQL := vacEstadoRechazada, sql.NullString{String: motivo, Valid: true}

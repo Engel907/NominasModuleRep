@@ -154,6 +154,7 @@ func TestSolicitarVacaciones_CalendarioIncompleto(t *testing.T) {
 	tx := &fakeVacTx{}
 	_, err := nuevoSvc(q, tx).SolicitarVacaciones(context.Background(), SolicitarVacacionesInput{
 		EmpleadoID: 1, FechaInicio: fecha(2026, 10, 5), FechaFin: fecha(2026, 10, 7), CreadoPor: 9,
+		PuedeSolicitarTerceros: true,
 	})
 	var inc *ErrCalendarioIncompleto
 	if !errors.As(err, &inc) {
@@ -195,6 +196,7 @@ func TestSolicitarVacaciones_Saldo(t *testing.T) {
 			}
 			_, err := nuevoSvc(q, tx).SolicitarVacaciones(context.Background(), SolicitarVacacionesInput{
 				EmpleadoID: 1, FechaInicio: fecha(2026, 10, 5), FechaFin: fecha(2026, 10, 7), CreadoPor: 9,
+				PuedeSolicitarTerceros: true,
 			})
 			if !errors.Is(err, c.wantErr) {
 				t.Fatalf("err = %v, quiero %v", err, c.wantErr)
@@ -215,6 +217,7 @@ func TestResolverSolicitud_Estados(t *testing.T) {
 		{"aprobar dos veces", "aprobada", true, "", ErrVacSolicitudNoPendiente},
 		{"rechazar sin motivo", "pendiente", false, "", ErrVacMotivoRechazoRequerido},
 	}
+
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
 			tx := &fakeVacTx{

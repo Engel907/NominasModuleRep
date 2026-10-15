@@ -1,8 +1,10 @@
 package middleware
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +20,35 @@ import (
 // no incluida en este contexto) ya usa otra clave, actualizarla acá — es
 // el único lugar que debería requerir cambio.
 const CtxKeyPayload = "auth_payload"
+
+var ErrEmpleadoIDNoVinculado = errors.New("middleware: el usuario autenticado no tiene empleado vinculado")
+
+type EmpleadoIDResolver interface {
+	EmpleadoIDDeUsuario(context.Context, int64) (int64, error)
+}
+
+// EmpleadoIDDelUsuario resuelve el vínculo actual del usuario autenticado
+// desde la BD, en lugar de confiar en una copia posiblemente obsoleta del token.
+func EmpleadoIDDelUsuario(c *gin.Context, resolver EmpleadoIDResolver) (int64, error) {
+	usuarioID, ok := UsuarioIDDesdeContexto(c)
+	if !ok {
+		return 0, errors.New("middleware: falta el payload de autenticación")
+	}
+	if resolver == nil {
+		return 0, errors.New("middleware: no se configuró el resolver de empleados")
+	}
+	empleadoID, err := resolver.EmpleadoIDDeUsuario(c.Request.Context(), usuarioID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrEmpleadoIDNoVinculado
+	}
+	if err != nil {
+		return 0, err
+	}
+	if empleadoID <= 0 {
+		return 0, ErrEmpleadoIDNoVinculado
+	}
+	return empleadoID, nil
+}
 
 // PayloadDesdeContexto extrae el payload PASETO seteado por AuthPASETO.
 // Devuelve nil si no hay payload (ruta sin AuthPASETO, o token ausente).
@@ -70,15 +101,17 @@ func UsuarioID(c *gin.Context) int64 {
 }
 
 // ErrParametroInvalido indica que un parámetro de ruta no es válido. Lo
-// devuelve ParseIDParam SIN escribir la respuesta HTTP; ErrorHandler lo
-// traduce a 400 detectándolo con errors.As:
+// devuelve ParseIDParam SIN escribir la respuesta HTTP; ErrorHandler (vía
+// traducirError) lo convierte en 400 "parametro_invalido" detectándolo con
+// errors.As:
 //
 //	var pe *ErrParametroInvalido
 //	if errors.As(err, &pe) { /* 400, pe.Nombre */ }
 type ErrParametroInvalido struct {
 	// Nombre del parámetro de ruta (p. ej. "id").
 	Nombre string
-	// Valor tal como llegó en la URL.
+	// Valor tal como llegó en la URL. Solo para diagnóstico interno: NO se
+	// devuelve al cliente.
 	Valor string
 }
 
@@ -87,9 +120,9 @@ func (e *ErrParametroInvalido) Error() string {
 }
 
 // ParseIDParam parsea un parámetro de ruta (:id) como ID int64 estrictamente
-// positivo. A diferencia de ParseUintParam NO responde ni aborta: devuelve
-// *ErrParametroInvalido para que el handler lo propague (c.Error(err) +
-// return) y ErrorHandler lo convierta en 400.
+// positivo. NO responde ni aborta: devuelve *ErrParametroInvalido para que el
+// handler lo propague (RespondWithError(c, err) o c.Error(err), y return) y
+// ErrorHandler lo convierta en 400.
 //
 // Uso: id, err := ParseIDParam(c, "id").
 func ParseIDParam(c *gin.Context, nombre string) (int64, error) {
@@ -101,18 +134,7 @@ func ParseIDParam(c *gin.Context, nombre string) (int64, error) {
 	return id, nil
 }
 
-// ParseUintParam parsea un parámetro de ruta (:id) como uint64, respondiendo
-// 400 automáticamente si no es válido. Uso: id, err := ParseUintParam(c, "id").
-//
-// Deprecated: usar ParseIDParam. Se conserva solo mientras los handlers de
-// otras fases migran uno por uno; la F16 la elimina.
-func ParseUintParam(c *gin.Context, nombre string) (uint64, error) {
-	valor, err := strconv.ParseUint(c.Param(nombre), 10, 64)
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
-			"error": "parámetro de ruta '" + nombre + "' inválido",
-		})
-		return 0, err
-	}
-	return valor, nil
-}
+// F16: ParseUintParam se ELIMINÓ. Escribía un 400 con c.AbortWithStatusJSON
+// y devolvía el error, con lo que el handler que lo propagaba a
+// RespondWithError terminaba escribiendo una SEGUNDA respuesta. Todo uso
+// restante debe migrar a ParseIDParam.

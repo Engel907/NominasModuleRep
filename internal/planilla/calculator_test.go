@@ -26,7 +26,7 @@ func tramosRenta2026() []TramoRenta {
 		{OrdenTramo: 2, MontoDesde: dec("918000"), MontoHasta: dec("1347000"), Porcentaje: dec("0.10")},
 		{OrdenTramo: 3, MontoDesde: dec("1347000"), MontoHasta: dec("2364000"), Porcentaje: dec("0.15")},
 		{OrdenTramo: 4, MontoDesde: dec("2364000"), MontoHasta: dec("4727000"), Porcentaje: dec("0.20")},
-		{OrdenTramo: 5, MontoDesde: dec("4727000"), MontoHasta: dec("0"), Porcentaje: dec("0.25")}, // tramo abierto
+		{OrdenTramo: 5, MontoDesde: dec("4727000"), Porcentaje: dec("0.25"), Abierto: true},
 	}
 }
 
@@ -124,6 +124,14 @@ func TestCalcularImpuestoRenta_SinTramosVigentesRetornaError(t *testing.T) {
 	_, err := CalcularImpuestoRenta(dec("1000000"), nil, nil)
 	if err == nil {
 		t.Fatal("se esperaba error explícito por falta de tramos vigentes, se obtuvo nil")
+	}
+}
+
+func TestCalcularImpuestoRenta_CeroNoImplicaTramoAbierto(t *testing.T) {
+	tramos := tramosRenta2026()
+	tramos[len(tramos)-1].Abierto = false
+	if _, err := CalcularImpuestoRenta(dec("5000000"), tramos, nil); err == nil {
+		t.Fatal("se esperaba error por límite superior inválido; MontoHasta cero no debe marcar tramo abierto")
 	}
 }
 

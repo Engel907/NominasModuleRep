@@ -139,6 +139,61 @@ ORDER BY orden_tramo ASC`, fecha, fecha)
 	return out, rows.Err()
 }
 
+type TramoEscalaEmbargoVigenteRow struct {
+	DesdeMultiplo    decimal.Decimal
+	HastaMultiplo    decimal.NullDecimal
+	PorcentajeMaximo decimal.Decimal // 0-100
+}
+
+func (q *Queries) ListarEscalaEmbargoEnFecha(ctx context.Context, fecha time.Time) ([]TramoEscalaEmbargoVigenteRow, error) {
+	rows, err := q.db.QueryContext(ctx, `
+SELECT desde_multiplo, hasta_multiplo, porcentaje_maximo
+FROM parametros_embargo_escala
+WHERE fecha_inicio_vigencia <= ?
+  AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
+ORDER BY desde_multiplo ASC`, fecha, fecha)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TramoEscalaEmbargoVigenteRow
+	for rows.Next() {
+		var r TramoEscalaEmbargoVigenteRow
+		if err := rows.Scan(&r.DesdeMultiplo, &r.HastaMultiplo, &r.PorcentajeMaximo); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+type BaseMinimaContributivaVigenteRow struct {
+	RegimenCCSSID int64
+	Monto         decimal.Decimal
+}
+
+func (q *Queries) ListarBaseMinimaContributivaEnFecha(ctx context.Context, fecha time.Time) ([]BaseMinimaContributivaVigenteRow, error) {
+	rows, err := q.db.QueryContext(ctx, `
+SELECT regimen_ccss_id, monto
+FROM parametros_base_minima_contributiva
+WHERE fecha_inicio_vigencia <= ?
+  AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
+ORDER BY regimen_ccss_id ASC`, fecha, fecha)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BaseMinimaContributivaVigenteRow
+	for rows.Next() {
+		var r BaseMinimaContributivaVigenteRow
+		if err := rows.Scan(&r.RegimenCCSSID, &r.Monto); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 type CreditoFiscalVigenteRow struct {
 	TipoCreditoFiscalID int64
 	TipoCodigo          string // CONYUGE | HIJO | ...

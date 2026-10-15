@@ -460,7 +460,13 @@ func (s *Servicio) Logout(ctx context.Context, req LogoutRequest) error {
 // F15: además de los refresh tokens sube permisos_version, de modo que los
 // access tokens vivos de ese usuario dejan de valer en <= AUTH_CACHE_TTL.
 func (s *Servicio) LogoutTodasLasSesiones(ctx context.Context, usuarioID int64) error {
-	return s.ejecutarTx(ctx, usuarioID, func(ctx context.Context, st Store) error {
+	return s.RevocarSesionesUsuario(ctx, usuarioID, usuarioID)
+}
+
+// RevocarSesionesUsuario permite a un operador autorizado invalidar las
+// sesiones de otro usuario; el actor de auditoría y el titular son distintos.
+func (s *Servicio) RevocarSesionesUsuario(ctx context.Context, usuarioID, actorID int64) error {
+	return s.ejecutarTx(ctx, actorID, func(ctx context.Context, st Store) error {
 		if err := st.RevocarTodosLosRefreshTokensDeUsuario(ctx, usuarioID); err != nil {
 			return err
 		}
@@ -554,6 +560,9 @@ func (s *Servicio) CambiarPassword(ctx context.Context, usuarioID int64, req Cam
 // CambiarEstadoUsuario cambia el estado de una cuenta e invalida los tokens
 // existentes dentro de la misma transacción auditada.
 func (s *Servicio) CambiarEstadoUsuario(ctx context.Context, usuarioID int64, activo bool, cambiadoPor int64) error {
+	if !activo && usuarioID == cambiadoPor {
+		return ErrAutoDesactivacion
+	}
 	return s.ejecutarTx(ctx, cambiadoPor, func(ctx context.Context, st Store) error {
 		cambio, err := st.SetUsuarioActivo(ctx, usuarioID, activo)
 		if err != nil || !cambio {
@@ -664,13 +673,7 @@ func (s *Servicio) AsignarRol(ctx context.Context, usuarioID int64, req AsignarR
 // RevocarRol cierra la fila vigente de (usuario, rol) sin abrir una nueva
 // (solo el paso 1 del patrón de 2 pasos).
 func (s *Servicio) RevocarRol(ctx context.Context, usuarioID int64, req RevocarRolRequest, revocadoPor int64) error {
-	return db.WithAuditContext(ctx, s.sqlDB, revocadoPor, func(ctx context.Context, q *dto.Queries) error {
-		if err := q.CerrarUsuarioRolVigente(ctx, usuarioID, req.RolID, time.Now()); err != nil {
-			return err
-		}
-		_, err := q.IncrementarPermisosVersion(ctx, usuarioID) // F15 (S7)
-		return err
-	})
+	return s.RevocarRolSeguro(ctx, usuarioID, req, revocadoPor)
 }
 
 // ============================================================

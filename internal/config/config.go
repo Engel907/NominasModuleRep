@@ -6,13 +6,20 @@
 package config
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/viper"
 )
 
@@ -26,6 +33,8 @@ type Config struct {
 	Auth       AuthConfig
 	SMTP       SMTPConfig
 	Asistencia AsistenciaConfig
+	RateLimit  RateLimitConfig
+	Parametros ParametrosConfig
 }
 
 type AppConfig struct {
@@ -37,12 +46,42 @@ func (a AppConfig) IsProduction() bool {
 	return a.Env == "production"
 }
 
+// SlogLevel traduce LOG_LEVEL (debug|info|warn|error) a slog.Level. validate()
+// ya rechaza valores inválidos; ante uno desconocido devuelve Info.
+func (a AppConfig) SlogLevel() slog.Level {
+	var l slog.Level
+	if err := l.UnmarshalText([]byte(strings.TrimSpace(a.LogLevel))); err != nil {
+		return slog.LevelInfo
+	}
+	return l
+}
+
 type ServerConfig struct {
 	Port            string
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration
 	ShutdownTimeout time.Duration
+
+	// F16 (S8/S15). MaxBodyBytes acota el cuerpo de toda petición.
+	// TrustedProxies son las IP/CIDR de los proxies que SÍ pueden informar la IP
+	// real vía X-Forwarded-For (vacío = ninguno). CORSAllowedOrigins es la lista
+	// blanca exacta de orígenes (vacía = ninguno; "*" no se admite).
+	MaxBodyBytes       int64
+	TrustedProxies     []string
+	CORSAllowedOrigins []string
+}
+
+// RateLimitConfig (F16/S8): límites por minuto y ráfaga. NO tienen valor por
+// defecto: un default inseguro (o un "0 = sin límite") pasaría desapercibido,
+// así que deben declararse y ser > 0 (ver .env.example).
+type RateLimitConfig struct {
+	// Por IP y ruta, en login, refresh, logout y reset de contraseña.
+	AuthPorMin int
+	AuthBurst  int
+	// Por usuario autenticado, sobre todas las rutas protegidas.
+	UsuarioPorMin int
+	UsuarioBurst  int
 }
 
 type DatabaseConfig struct {
@@ -58,6 +97,61 @@ type DatabaseConfig struct {
 	ConnMaxIdleTime time.Duration
 	ConnectTimeout  time.Duration
 	PingTimeout     time.Duration
+
+	// F16 (S9). TLSMode: disabled | required | verify-full.
+	//   disabled    sin TLS (prohibido con APP_ENV=production).
+	//   required    TLS obligatorio, cifra el canal pero NO verifica el
+	//               certificado del servidor (no protege contra un MITM activo).
+	//   verify-full TLS verificando la cadena (TLSCAFile o raíces del sistema) y
+	//               que el certificado corresponda a Host.
+	// TLSCAFile (PEM) solo aplica a verify-full.
+	TLSMode   string
+	TLSCAFile string
+}
+
+// nombreTLSMySQL es el nombre con el que se registra la config TLS en el driver
+// (parámetro tls=<nombre> del DSN).
+const nombreTLSMySQL = "planillas-db"
+
+// TLSConfig arma el *tls.Config según TLSMode (nil si disabled).
+func (d DatabaseConfig) TLSConfig() (*tls.Config, error) {
+	switch d.TLSMode {
+	case "", "disabled":
+		return nil, nil
+	case "required":
+		// Cifrado sin verificación de certificado: es exactamente lo que
+		// significa "required" (ver arriba); se documenta y se advierte al
+		// arrancar en producción.
+		return &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, nil // #nosec G402
+	case "verify-full":
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: d.Host}
+		if d.TLSCAFile != "" {
+			pem, err := os.ReadFile(d.TLSCAFile)
+			if err != nil {
+				return nil, fmt.Errorf("config: no se pudo leer DB_TLS_CA_FILE: %w", err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pem) {
+				return nil, fmt.Errorf("config: DB_TLS_CA_FILE no contiene certificados PEM válidos")
+			}
+			cfg.RootCAs = pool
+		}
+		return cfg, nil
+	}
+	return nil, fmt.Errorf("config: DB_TLS_MODE %q no es válido (disabled|required|verify-full)", d.TLSMode)
+}
+
+// RegistrarTLS registra la config TLS en el driver MySQL bajo el nombre que
+// usa DSN(). Debe llamarse ANTES de sql.Open. No hace nada si TLSMode=disabled.
+func (d DatabaseConfig) RegistrarTLS() error {
+	cfg, err := d.TLSConfig()
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return nil
+	}
+	return mysql.RegisterTLSConfig(nombreTLSMySQL, cfg)
 }
 
 // DSN arma el Data Source Name para github.com/go-sql-driver/mysql.
@@ -66,10 +160,14 @@ func (d DatabaseConfig) DSN() string {
 	if params == "" {
 		params = "parseTime=true&loc=UTC&charset=utf8mb4"
 	}
-	return fmt.Sprintf(
+	dsn := fmt.Sprintf(
 		"%s:%s@tcp(%s:%s)/%s?%s&timeout=%s",
 		d.User, d.Password, d.Host, d.Port, d.Name, params, d.ConnectTimeout,
 	)
+	if d.TLSMode != "" && d.TLSMode != "disabled" {
+		dsn += "&tls=" + nombreTLSMySQL
+	}
+	return dsn
 }
 
 // SMTPConfig es el canal de correo del reset de contraseña (F14 / S2).
@@ -87,6 +185,13 @@ type SMTPConfig struct {
 
 type AsistenciaConfig struct {
 	ToleranciaTardanzaMin int
+}
+
+// ParametrosConfig (F18A): caché en memoria del servicio parametros.Generales.
+// CacheTTL es la latencia máxima con la que un cambio en parametros_generales
+// se ve en un proceso que no llamó a Invalidar() (0 = sin caché).
+type ParametrosConfig struct {
+	CacheTTL time.Duration
 }
 
 type AuthConfig struct {
@@ -149,6 +254,10 @@ func LoadConfig() (*Config, error) {
 			WriteTimeout:    v.GetDuration("SERVER_WRITE_TIMEOUT_SECONDS") * time.Second,
 			IdleTimeout:     v.GetDuration("SERVER_IDLE_TIMEOUT_SECONDS") * time.Second,
 			ShutdownTimeout: v.GetDuration("SERVER_SHUTDOWN_TIMEOUT_SECONDS") * time.Second,
+
+			MaxBodyBytes:       v.GetInt64("MAX_BODY_BYTES"),
+			TrustedProxies:     listaCSV(v.GetString("TRUSTED_PROXIES")),
+			CORSAllowedOrigins: listaCSV(v.GetString("CORS_ALLOWED_ORIGINS")),
 		},
 		Database: DatabaseConfig{
 			Host:            v.GetString("DB_HOST"),
@@ -163,8 +272,17 @@ func LoadConfig() (*Config, error) {
 			ConnMaxIdleTime: v.GetDuration("DB_CONN_MAX_IDLE_TIME_MINUTES") * time.Minute,
 			ConnectTimeout:  v.GetDuration("DB_CONNECT_TIMEOUT_SECONDS") * time.Second,
 			PingTimeout:     v.GetDuration("DB_PING_TIMEOUT_SECONDS") * time.Second,
+			TLSMode:         strings.ToLower(strings.TrimSpace(v.GetString("DB_TLS_MODE"))),
+			TLSCAFile:       strings.TrimSpace(v.GetString("DB_TLS_CA_FILE")),
+		},
+		RateLimit: RateLimitConfig{
+			AuthPorMin:    v.GetInt("RATE_LIMIT_AUTH_PER_MIN"),
+			AuthBurst:     v.GetInt("RATE_LIMIT_AUTH_BURST"),
+			UsuarioPorMin: v.GetInt("RATE_LIMIT_USER_PER_MIN"),
+			UsuarioBurst:  v.GetInt("RATE_LIMIT_USER_BURST"),
 		},
 		Asistencia: AsistenciaConfig{ToleranciaTardanzaMin: v.GetInt("ASISTENCIA_TOLERANCIA_TARDANZA_MIN")},
+		Parametros: ParametrosConfig{CacheTTL: v.GetDuration("PARAMETROS_CACHE_TTL")},
 		SMTP: SMTPConfig{
 			Host:         v.GetString("SMTP_HOST"),
 			Port:         v.GetString("SMTP_PORT"),
@@ -215,6 +333,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("DB_CONN_MAX_IDLE_TIME_MINUTES", 2)
 	v.SetDefault("DB_CONNECT_TIMEOUT_SECONDS", 5)
 	v.SetDefault("DB_PING_TIMEOUT_SECONDS", 5)
+	v.SetDefault("DB_TLS_MODE", "disabled") // con APP_ENV=production validate() lo rechaza
+
+	v.SetDefault("MAX_BODY_BYTES", 1<<20) // 1 MiB
+	// RATE_LIMIT_*: sin default a propósito (ver RateLimitConfig).
 
 	v.SetDefault("PASETO_ACCESS_TOKEN_MINUTES", 20)
 	v.SetDefault("AUTH_CACHE_TTL", "5s")
@@ -226,6 +348,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("AUTH_MAX_FAILED_LOGINS", 5)
 	v.SetDefault("AUTH_LOCKOUT_MINUTES", 15)
 	v.SetDefault("ASISTENCIA_TOLERANCIA_TARDANZA_MIN", 0)
+	v.SetDefault("PARAMETROS_CACHE_TTL", "30s")
 
 	v.SetDefault("SMTP_PORT", "587")
 }
@@ -265,6 +388,9 @@ func (c *Config) validate() error {
 	}
 	if c.Auth.CacheTTL < 0 || c.Auth.CacheTTL > time.Minute {
 		return fmt.Errorf("config: AUTH_CACHE_TTL debe estar entre 0 y 1m (es la latencia máxima de una revocación)")
+	}
+	if c.Parametros.CacheTTL < 0 || c.Parametros.CacheTTL > 5*time.Minute {
+		return fmt.Errorf("config: PARAMETROS_CACHE_TTL debe estar entre 0 y 5m")
 	}
 	if c.App.IsProduction() && c.Database.Password == "" {
 		missing = append(missing, "DB_PASSWORD")
@@ -312,11 +438,105 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config: AUTH_LOCKOUT_MINUTES debe ser > 0")
 	}
 
+	if err := c.validarEndurecimientoHTTP(&missing); err != nil {
+		return err
+	}
+
 	if len(missing) > 0 {
 		return fmt.Errorf("config: faltan variables de entorno requeridas: %v", missing)
 	}
 
 	return nil
+}
+
+// validarEndurecimientoHTTP valida lo agregado en F16: logging, límite de
+// cuerpo, rate limiting, CORS, proxies de confianza y TLS a la BD.
+func (c *Config) validarEndurecimientoHTTP(missing *[]string) error {
+	prod := c.App.IsProduction()
+
+	switch strings.ToLower(strings.TrimSpace(c.App.LogLevel)) {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("config: LOG_LEVEL debe ser debug|info|warn|error (es %q)", c.App.LogLevel)
+	}
+
+	if c.Server.MaxBodyBytes <= 0 {
+		return fmt.Errorf("config: MAX_BODY_BYTES debe ser > 0")
+	}
+
+	for _, r := range []struct {
+		nombre string
+		valor  int
+	}{
+		{"RATE_LIMIT_AUTH_PER_MIN", c.RateLimit.AuthPorMin},
+		{"RATE_LIMIT_AUTH_BURST", c.RateLimit.AuthBurst},
+		{"RATE_LIMIT_USER_PER_MIN", c.RateLimit.UsuarioPorMin},
+		{"RATE_LIMIT_USER_BURST", c.RateLimit.UsuarioBurst},
+	} {
+		if r.valor <= 0 {
+			*missing = append(*missing, r.nombre+" (debe ser > 0)")
+		}
+	}
+
+	// CORS: lista blanca exacta. Nunca "*".
+	for _, o := range c.Server.CORSAllowedOrigins {
+		if o == "*" {
+			return fmt.Errorf("config: CORS_ALLOWED_ORIGINS no admite \"*\"; liste los orígenes explícitos")
+		}
+		u, err := url.Parse(o)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+			u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+			return fmt.Errorf("config: CORS_ALLOWED_ORIGINS: origen %q inválido (formato esperado: https://host[:puerto], sin ruta ni barra final)", o)
+		}
+		if prod && u.Scheme != "https" {
+			return fmt.Errorf("config: CORS_ALLOWED_ORIGINS: origen %q debe ser https:// en producción", o)
+		}
+	}
+
+	// Proxies de confianza: IP o CIDR. En producción no se admite confiar en
+	// todo Internet (permitiría falsificar X-Forwarded-For y evadir el rate limit).
+	for _, p := range c.Server.TrustedProxies {
+		if net.ParseIP(p) != nil {
+			continue
+		}
+		_, red, err := net.ParseCIDR(p)
+		if err != nil {
+			return fmt.Errorf("config: TRUSTED_PROXIES: %q no es una IP ni un CIDR válido", p)
+		}
+		if ones, _ := red.Mask.Size(); prod && ones == 0 {
+			return fmt.Errorf("config: TRUSTED_PROXIES: %q confía en todo Internet; no se permite con APP_ENV=production", p)
+		}
+	}
+
+	// TLS a la BD (S9).
+	switch c.Database.TLSMode {
+	case "disabled", "required", "verify-full":
+	default:
+		return fmt.Errorf("config: DB_TLS_MODE %q no es válido (disabled|required|verify-full)", c.Database.TLSMode)
+	}
+	if prod && c.Database.TLSMode == "disabled" {
+		return fmt.Errorf("config: DB_TLS_MODE=disabled no se permite con APP_ENV=production (use required o, mejor, verify-full)")
+	}
+	if c.Database.TLSCAFile != "" && c.Database.TLSMode != "verify-full" {
+		return fmt.Errorf("config: DB_TLS_CA_FILE solo aplica con DB_TLS_MODE=verify-full")
+	}
+	for _, par := range strings.Split(c.Database.ExtraParams, "&") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(par)), "tls=") {
+			return fmt.Errorf("config: no incluya tls= en DB_PARAMS; el TLS se controla con DB_TLS_MODE")
+		}
+	}
+	return nil
+}
+
+// listaCSV separa "a, b,c" en ["a","b","c"] ignorando vacíos.
+func listaCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 var kidValido = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)

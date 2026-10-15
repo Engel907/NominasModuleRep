@@ -233,6 +233,10 @@ type ParametrosCalculo struct {
 	CreditosFiscales map[int64]CreditoFiscalParametro
 
 	SalarioMinimoInembargable decimal.Decimal
+	FactoresHoraExtra         map[int64]ParametroHoraExtra
+	SubsidiosIncapacidad      []TramoSubsidioIncapacidad
+	BaseMinimaContributiva    map[int64]decimal.Decimal
+	EscalaEmbargo             []TramoEscalaEmbargo
 
 	// Divisor de la hora ordinaria (horas ordinarias del mes según jornada).
 	HorasMensualesOrdinarias decimal.Decimal

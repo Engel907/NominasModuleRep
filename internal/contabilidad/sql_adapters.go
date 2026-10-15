@@ -20,6 +20,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"planillas-ccdr/internal/planilla"
+	"planillas-ccdr/internal/shared/porcentaje"
 )
 
 // ============================================================================
@@ -39,14 +40,15 @@ import (
 // Supuestos verificables (si fallan, se retorna error; nunca se contabiliza a ciegas):
 //  1. La FechaEfectiva del cálculo fue periodos_planilla.fecha_fin.
 //  2. El % patronal es el de la fila vigente del concepto CCSS_PAT y el obrero
-//     el de CCSS_OBR, guardados como puntos porcentuales (26.8300 = 26.83 %),
-//     por lo que se dividen entre 100 (el motor trabaja con fracciones).
+//     el de CCSS_OBR, guardados como puntos porcentuales (26.8300 = 26.83 %);
+//     se convierten a fracción con internal/shared/porcentaje (el motor
+//     trabaja con fracciones).
 //
 // D3 — escala de porcentajes: el DOMINIO trabaja con fracciones (0.2683); la
 // base de datos guarda puntos porcentuales (parametros_cargas_sociales.
-// porcentaje_* DECIMAL(6,4), seed 26.8300 / 10.8300). La división entre 100
-// vive SOLO en porcentajeVigente (único punto de conversión de este archivo).
-// TODO(F18): mover la conversión a un helper compartido de parámetros.
+// porcentaje_* DECIMAL(6,4), seed 26.8300 / 10.8300). La conversión la hace
+// ÚNICAMENTE internal/shared/porcentaje; este archivo no divide ni multiplica
+// por 100.
 //
 // Solo se reconstruyen períodos en estado `pagada` (D4); la verificación
 // definitiva (con bloqueo FOR UPDATE) la hace Service.ContabilizarPeriodo
@@ -71,8 +73,6 @@ func NewDetallesSQL(db *sql.DB, cfg ConfigGeneracion, codigoObrero string) (*Det
 	}
 	return &DetallesSQL{db: db, codigoPatronal: cfg.ConceptoCuotaPatronalCCSS, codigoObrero: codigoObrero}, nil
 }
-
-var cien = decimal.NewFromInt(100)
 
 // porcentajeVigente devuelve (patronal, obrero) como FRACCIÓN, exigiendo
 // exactamente una fila vigente a fecha_fin del período.
@@ -104,7 +104,16 @@ func (r *DetallesSQL) porcentajeVigente(ctx context.Context, periodoID int64, co
 	if n != 1 {
 		return decimal.Zero, decimal.Zero, fmt.Errorf("%w: se esperaba 1 parametros_cargas_sociales vigente para %q a la fecha fin del periodo_id=%d y hay %d", ErrConfigInvalida, codigo, periodoID, n)
 	}
-	return pat.Div(cien), obr.Div(cien), nil
+
+	pp, err := porcentaje.DesdePorcentaje(pat)
+	if err != nil {
+		return decimal.Zero, decimal.Zero, fmt.Errorf("%w: %q porcentaje patronal: %v", ErrConfigInvalida, codigo, err)
+	}
+	po, err := porcentaje.DesdePorcentaje(obr)
+	if err != nil {
+		return decimal.Zero, decimal.Zero, fmt.Errorf("%w: %q porcentaje obrero: %v", ErrConfigInvalida, codigo, err)
+	}
+	return pp.Fraccion(), po.Fraccion(), nil
 }
 
 func (r *DetallesSQL) DetallesParaContabilizar(ctx context.Context, periodoID int64) ([]DetallePlanilla, error) {

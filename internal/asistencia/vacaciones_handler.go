@@ -16,11 +16,16 @@ import (
 // forma y traduce errores a códigos HTTP; las reglas de negocio viven en
 // VacacionesService.
 type VacacionesHandler struct {
-	service *VacacionesService
+	service   *VacacionesService
+	empleados middleware.EmpleadoIDResolver
 }
 
-func NewVacacionesHandler(service *VacacionesService) *VacacionesHandler {
-	return &VacacionesHandler{service: service}
+func NewVacacionesHandler(service *VacacionesService, resolver ...middleware.EmpleadoIDResolver) *VacacionesHandler {
+	h := &VacacionesHandler{service: service}
+	if len(resolver) > 0 {
+		h.empleados = resolver[0]
+	}
+	return h
 }
 
 // RegisterRoutes cablea las rutas bajo el grupo /api/v1 ya existente. Cada
@@ -44,7 +49,7 @@ func (h *VacacionesHandler) RegisterRoutes(rg *gin.RouterGroup) {
 // --- Solicitar -----------------------------------------------------------
 
 type solicitarVacacionesRequest struct {
-	EmpleadoID  int64  `json:"empleado_id" binding:"required"`
+	EmpleadoID  int64  `json:"empleado_id"`
 	FechaInicio string `json:"fecha_inicio" binding:"required"` // YYYY-MM-DD
 	FechaFin    string `json:"fecha_fin" binding:"required"`    // YYYY-MM-DD
 }
@@ -61,12 +66,39 @@ func (h *VacacionesHandler) solicitar(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "fecha_inicio/fecha_fin deben tener formato YYYY-MM-DD"})
 		return
 	}
+	payload := middleware.PayloadDesdeContexto(c)
+	if payload == nil {
+		middleware.Fail(c, http.StatusUnauthorized, "missing_token", "Falta el token de autenticación.", nil)
+		return
+	}
+	puedeTerceros := permisoIncluido(payload.Permisos, authz.PermVacacionesSolicitarTerceros)
+	empleadoUsuarioID := int64(0)
+	if !puedeTerceros {
+		resuelto, resolverErr := middleware.EmpleadoIDDelUsuario(c, h.empleados)
+		if resolverErr != nil {
+			if errors.Is(resolverErr, middleware.ErrEmpleadoIDNoVinculado) {
+				middleware.Fail(c, http.StatusUnprocessableEntity, "employee_not_linked", "El usuario no tiene un empleado vinculado.", nil)
+			} else {
+				middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "No se pudo resolver el empleado del usuario.", resolverErr)
+			}
+			return
+		}
+		empleadoUsuarioID = resuelto
+		if req.EmpleadoID == 0 {
+			req.EmpleadoID = empleadoUsuarioID
+		}
+	} else if req.EmpleadoID <= 0 {
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "Debe indicar empleado_id.", nil)
+		return
+	}
 
 	solicitud, err := h.service.SolicitarVacaciones(c.Request.Context(), SolicitarVacacionesInput{
-		EmpleadoID:  req.EmpleadoID,
-		FechaInicio: inicio,
-		FechaFin:    fin,
-		CreadoPor:   middleware.UsuarioID(c),
+		EmpleadoID:             req.EmpleadoID,
+		FechaInicio:            inicio,
+		FechaFin:               fin,
+		CreadoPor:              middleware.UsuarioID(c),
+		EmpleadoIDUsuario:      empleadoUsuarioID,
+		PuedeSolicitarTerceros: puedeTerceros,
 	})
 	if err != nil {
 		vacResponderError(c, err, "no se pudo crear la solicitud de vacaciones")
@@ -83,10 +115,15 @@ func (h *VacacionesHandler) aprobar(c *gin.Context) {
 		_ = c.Error(err)
 		return
 	}
+	aprobadorEmpleadoID, ok := h.aprobadorEmpleadoID(c)
+	if !ok {
+		return
+	}
 	solicitud, err := h.service.ResolverSolicitud(c.Request.Context(), ResolverSolicitudInput{
-		SolicitudID: id,
-		Aprobar:     true,
-		AprobadoPor: middleware.UsuarioID(c),
+		SolicitudID:         id,
+		Aprobar:             true,
+		AprobadoPor:         middleware.UsuarioID(c),
+		AprobadorEmpleadoID: aprobadorEmpleadoID,
 	})
 	if err != nil {
 		vacResponderError(c, err, "no se pudo aprobar la solicitud de vacaciones")
@@ -110,11 +147,16 @@ func (h *VacacionesHandler) rechazar(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	aprobadorEmpleadoID, ok := h.aprobadorEmpleadoID(c)
+	if !ok {
+		return
+	}
 	solicitud, err := h.service.ResolverSolicitud(c.Request.Context(), ResolverSolicitudInput{
-		SolicitudID:   id,
-		Aprobar:       false,
-		MotivoRechazo: req.MotivoRechazo,
-		AprobadoPor:   middleware.UsuarioID(c),
+		SolicitudID:         id,
+		Aprobar:             false,
+		MotivoRechazo:       req.MotivoRechazo,
+		AprobadoPor:         middleware.UsuarioID(c),
+		AprobadorEmpleadoID: aprobadorEmpleadoID,
 	})
 	if err != nil {
 		vacResponderError(c, err, "no se pudo rechazar la solicitud de vacaciones")
@@ -201,11 +243,15 @@ func (h *VacacionesHandler) consultarSaldo(c *gin.Context) {
 func vacResponderError(c *gin.Context, err error, mensajeGenerico string) {
 	var calInc *ErrCalendarioIncompleto
 	switch {
+	case errors.Is(err, ErrVacSolicitarTercerosNoPermitido), errors.Is(err, ErrVacSolicitudPropiaNoResoluble):
+		middleware.Fail(c, http.StatusForbidden, "row_access_denied", "No puede realizar esta operación para otro empleado.", nil)
+		return
 	case errors.As(err, &calInc):
 		fechas := make([]string, len(calInc.Fechas))
 		for i, f := range calInc.Fechas {
 			fechas[i] = f.Format("2006-01-02")
 		}
+
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"error":            calInc.Error(),
 			"fechas_faltantes": fechas,
@@ -235,4 +281,25 @@ func vacResponderError(c *gin.Context, err error, mensajeGenerico string) {
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": mensajeGenerico})
 	}
+}
+
+func (h *VacacionesHandler) aprobadorEmpleadoID(c *gin.Context) (int64, bool) {
+	id, err := middleware.EmpleadoIDDelUsuario(c, h.empleados)
+	if errors.Is(err, middleware.ErrEmpleadoIDNoVinculado) {
+		return 0, true
+	}
+	if err != nil {
+		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "No se pudo resolver el empleado del usuario.", err)
+		return 0, false
+	}
+	return id, true
+}
+
+func permisoIncluido(permisos []string, codigo string) bool {
+	for _, permiso := range permisos {
+		if permiso == codigo {
+			return true
+		}
+	}
+	return false
 }

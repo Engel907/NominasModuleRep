@@ -38,6 +38,7 @@ import (
 	"planillas-ccdr/internal/asistencia"
 	"planillas-ccdr/internal/auth"
 	"planillas-ccdr/internal/authz"
+	"planillas-ccdr/internal/db/dto"
 	"planillas-ccdr/internal/planilla"
 	"planillas-ccdr/internal/prestamos"
 	"planillas-ccdr/internal/security"
@@ -64,12 +65,25 @@ type Deps struct {
 	// se usan desde F20/F24.
 	MotorEmpleado *planilla.MotorEmpleado
 	Acumulados    *planilla.AcumuladosService
+	// F16 (S8): rate limiting. app.New los arma desde la config. Si un test arma
+	// Deps a mano y los deja nil, simplemente no se limita (en producción
+	// siempre los provee app.New).
+	//   LimiteAuth    -> grupo `publico` (login/refresh/logout/reset), por IP+ruta.
+	//   LimiteUsuario -> grupo `protegido`, por usuario autenticado.
+	LimiteAuth    gin.HandlerFunc
+	LimiteUsuario gin.HandlerFunc
 }
 
 // RegisterRoutes monta todos los endpoints de la API.
 func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.TokenMaker, sesiones middleware.SesionVerificador, deps Deps) {
+	queries := dto.New(sqlDB)
 	// Grupo sin autenticación (solo endpoints públicos de auth).
 	publico := rg.Group("")
+	// F16/S8: el grupo `publico` contiene SOLO endpoints de auth sin sesión, que
+	// son el blanco de fuerza bruta/enumeración: límite por IP (y ruta).
+	if deps.LimiteAuth != nil {
+		publico.Use(deps.LimiteAuth)
+	}
 
 	// Grupo con sesión obligatoria.
 	protegido := rg.Group("")
@@ -80,8 +94,16 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	// (necesita el payload) y ANTES de cualquier ruta.
 	protegido.Use(middleware.ExigirCambioPassword())
 
+	// F16/S8: límite general por usuario autenticado (necesita el payload, por
+	// eso va después de AuthPASETO).
+	if deps.LimiteUsuario != nil {
+		protegido.Use(deps.LimiteUsuario)
+	}
+
 	// --- Auth ------------------------------------------------------------
 	NuevoAuthHandler(deps.Auth).RegistrarRutas(publico, protegido)
+	NewUsuariosHandler(deps.Auth).RegisterRoutes(protegido)
+	NewAuditoriaHandler(queries).RegisterRoutes(protegido)
 
 	// --- Empleados / Contratos / Organización ----------------------------
 	empleadoService := services.NewEmpleadoService(sqlDB)
@@ -109,7 +131,7 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	// saldo (GET). Cada ruta aplica su RequirePermission dentro de
 	// VacacionesHandler.RegisterRoutes (authz.PermVacacionesSolicitar / Aprobar /
 	// RegistrarDisfrute / Ver).
-	asistencia.NewVacacionesHandler(deps.Vacaciones).RegisterRoutes(protegido)
+	asistencia.NewVacacionesHandler(deps.Vacaciones, queries).RegisterRoutes(protegido)
 
 	// --- Préstamos / embargos / terceros ---------------------------------
 	prestamos.RegisterRoutes(protegido, prestamos.NewHandler(deps.Prestamos))
@@ -132,13 +154,13 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	// --- Export bancario y boleta ----------------------------------------
 	// Permisos según el comentario de PlanillaExportHandler. No se usa su
 	// RegisterRoutes porque no aplica RequirePermission.
-	exportHandler := NewPlanillaExportHandler(deps.PlanillaExport)
+	exportHandler := NewPlanillaExportHandler(deps.PlanillaExport, queries)
 	planillas := protegido.Group("/planillas")
 	{
 		planillas.GET("/:id/exportar/bancario",
 			middleware.RequirePermission(authz.PermPlanillaExportarBancario), exportHandler.ExportarDispersionBancaria)
 		planillas.GET("/:id/boleta/:empleado_id",
-			middleware.RequirePermission(authz.PermPlanillaVerBoleta), exportHandler.ObtenerBoletaPago)
+			middleware.RequireAnyPermission(authz.PermPlanillaVerBoleta, authz.PermPlanillaVerBoletaPropia), exportHandler.ObtenerBoletaPago)
 	}
 
 	// --- Contabilidad ----------------------------------------------------

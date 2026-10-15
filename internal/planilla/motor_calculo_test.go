@@ -55,7 +55,7 @@ func params() ParametrosCalculo {
 		TramosRenta: []TramoRenta{
 			{OrdenTramo: 1, MontoDesde: d("0"), MontoHasta: d("918000"), Porcentaje: d("0")},
 			{OrdenTramo: 2, MontoDesde: d("918000"), MontoHasta: d("1347000"), Porcentaje: d("0.10")},
-			{OrdenTramo: 3, MontoDesde: d("1347000"), Porcentaje: d("0.15")},
+			{OrdenTramo: 3, MontoDesde: d("1347000"), Porcentaje: d("0.15"), Abierto: true},
 		},
 		HorasMensualesOrdinarias: d("240"), FraccionMensualPeriodo: d("1"), DiasPeriodoCompleto: d("30"),
 	}

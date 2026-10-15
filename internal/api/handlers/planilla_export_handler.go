@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"planillas-ccdr/internal/api/middleware"
+	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/planilla"
 )
 
@@ -25,10 +26,15 @@ import (
 // Delega todo en planilla.ExportService.
 type PlanillaExportHandler struct {
 	exportSvc *planilla.ExportService
+	empleados middleware.EmpleadoIDResolver
 }
 
-func NewPlanillaExportHandler(exportSvc *planilla.ExportService) *PlanillaExportHandler {
-	return &PlanillaExportHandler{exportSvc: exportSvc}
+func NewPlanillaExportHandler(exportSvc *planilla.ExportService, resolver ...middleware.EmpleadoIDResolver) *PlanillaExportHandler {
+	h := &PlanillaExportHandler{exportSvc: exportSvc}
+	if len(resolver) > 0 {
+		h.empleados = resolver[0]
+	}
+	return h
 }
 
 // nombreArchivoSeguro deja solo [A-Za-z0-9._-]; cualquier otro carácter
@@ -103,19 +109,54 @@ func (h *PlanillaExportHandler) ObtenerBoletaPago(c *gin.Context) {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "Token de autenticación requerido", nil)
 		return
 	}
-
-	boleta, err := h.exportSvc.ObtenerBoletaPago(c.Request.Context(), periodoID, empleadoID)
+	payload := middleware.PayloadDesdeContexto(c)
+	var empleadoUsuarioID int64
+	var err error
+	if payload != nil && !tienePermiso(payload.Permisos, authz.PermPlanillaVerBoleta) &&
+		tienePermiso(payload.Permisos, authz.PermPlanillaVerBoletaPropia) {
+		empleadoUsuarioID, err = middleware.EmpleadoIDDelUsuario(c, h.empleados)
+		if err != nil {
+			if errors.Is(err, middleware.ErrEmpleadoIDNoVinculado) {
+				middleware.Fail(c, http.StatusUnprocessableEntity, "employee_not_linked", "El usuario no tiene un empleado vinculado.", nil)
+			} else {
+				middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "No se pudo resolver el empleado del usuario.", err)
+			}
+			return
+		}
+	}
+	permisos := []string(nil)
+	if payload != nil {
+		permisos = payload.Permisos
+	}
+	boleta, err := h.exportSvc.ObtenerBoletaPagoAutorizada(c.Request.Context(), periodoID, empleadoID, empleadoUsuarioID, permisos)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		switch {
+		case errors.Is(err, planilla.ErrBoletaSinPermiso), errors.Is(err, planilla.ErrBoletaNoPropia):
+			middleware.Fail(c, http.StatusForbidden, "row_access_denied", "No tiene permiso para consultar esta boleta.", nil)
+			return
+		case errors.Is(err, planilla.ErrBoletaSinEmpleadoVinculado):
+			middleware.Fail(c, http.StatusUnprocessableEntity, "employee_not_linked", "El usuario no tiene un empleado vinculado.", nil)
+			return
+		case errors.Is(err, sql.ErrNoRows):
 			middleware.Fail(c, http.StatusNotFound, "not_found",
 				"No existe boleta para ese empleado en el período, o el período aún no está aprobado", nil)
 			return
+		default:
+			middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
+			return
 		}
-		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
-		return
 	}
 
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, boleta)
+}
+
+func tienePermiso(permisos []string, buscado string) bool {
+	for _, permiso := range permisos {
+		if permiso == buscado {
+			return true
+		}
+	}
+	return false
 }

@@ -22,6 +22,11 @@ type ContratoHandler struct {
 	service services.ContratoService
 }
 
+type contratoResponseSegura struct {
+	services.ContratoResponse
+	SalarioPactado any `json:"salario_pactado"`
+}
+
 func NewContratoHandler(service services.ContratoService) *ContratoHandler {
 	return &ContratoHandler{service: service}
 }
@@ -61,7 +66,7 @@ func (h *ContratoHandler) CrearContrato(c *gin.Context) {
 		responderErrorRRHH(c, err, http.StatusUnprocessableEntity, "unprocessable_entity", "no se pudo procesar el contrato")
 		return
 	}
-	c.JSON(http.StatusCreated, resp)
+	c.JSON(http.StatusCreated, contratoSeguro(c, *resp))
 }
 
 func (h *ContratoHandler) ActualizarContrato(c *gin.Context) {
@@ -86,7 +91,7 @@ func (h *ContratoHandler) ActualizarContrato(c *gin.Context) {
 		responderErrorRRHH(c, err, http.StatusUnprocessableEntity, "unprocessable_entity", "no se pudo procesar el contrato")
 		return
 	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, contratoSeguro(c, *resp))
 }
 
 func (h *ContratoHandler) GetContratoVigente(c *gin.Context) {
@@ -104,7 +109,7 @@ func (h *ContratoHandler) GetContratoVigente(c *gin.Context) {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al obtener contrato vigente", err)
 		return
 	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, contratoSeguro(c, *resp))
 }
 
 func (h *ContratoHandler) ListarHistoricoPorEmpleado(c *gin.Context) {
@@ -119,7 +124,11 @@ func (h *ContratoHandler) ListarHistoricoPorEmpleado(c *gin.Context) {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al listar histórico de contratos", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"contratos": items, "paginacion": resumenPaginacion})
+	contratos := make([]contratoResponseSegura, 0, len(items))
+	for _, item := range items {
+		contratos = append(contratos, contratoSeguro(c, item))
+	}
+	c.JSON(http.StatusOK, gin.H{"contratos": contratos, "paginacion": resumenPaginacion})
 }
 
 func (h *ContratoHandler) ListarContratos(c *gin.Context) {
@@ -135,5 +144,18 @@ func (h *ContratoHandler) ListarContratos(c *gin.Context) {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al listar contratos", err)
 		return
 	}
-	c.JSON(http.StatusOK, resp)
+	contratos := make([]contratoResponseSegura, 0, len(resp.Contratos))
+	for _, item := range resp.Contratos {
+		contratos = append(contratos, contratoSeguro(c, item))
+	}
+	c.JSON(http.StatusOK, gin.H{"contratos": contratos, "paginacion": resp.Paginacion})
+}
+
+func contratoSeguro(c *gin.Context, contrato services.ContratoResponse) contratoResponseSegura {
+	salario := any(contrato.SalarioPactado)
+	payload := middleware.PayloadDesdeContexto(c)
+	if payload == nil || !tienePermiso(payload.Permisos, authz.PermDatosPersonalesVerSensible) {
+		salario = "***REDACTED***"
+	}
+	return contratoResponseSegura{ContratoResponse: contrato, SalarioPactado: salario}
 }

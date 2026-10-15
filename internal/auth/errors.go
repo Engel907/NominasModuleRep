@@ -24,6 +24,7 @@ var (
 	ErrPermisoInvalido      = errors.New("auth: el código de permiso no pertenece al catálogo")
 	ErrPermisoNoEncontrado  = errors.New("auth: el permiso solicitado no está sembrado en la base de datos")
 	ErrPermisoDuplicado     = errors.New("auth: la lista contiene códigos de permiso duplicados")
+	ErrAutoDesactivacion    = errors.New("auth: no se puede desactivar la cuenta autenticada")
 
 	// ErrPasswordActualIncorrecta: la contraseña actual enviada a
 	// CambiarPassword no coincide. El handler responde 400 (no 401: el token

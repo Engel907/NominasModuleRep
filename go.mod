@@ -13,6 +13,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sync v0.21.0
+	golang.org/x/time v0.15.0
 )
 
 require aidanwoods.dev/go-result v0.3.1 // indirect

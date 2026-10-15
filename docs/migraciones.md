@@ -24,9 +24,13 @@ Cada fase tiene un archivo propio con número reservado `0001NN`, donde `NN` es 
 |------|-------------------|
 | F02  | `000102`          |
 | F12  | `000112`          |
+| F17  | `000117`          |
 | F18  | `000118`          |
 
 Los huecos son válidos (golang-migrate solo exige orden creciente). Si una fase no necesita cambios de BD, su número queda sin usar.
+
+`000117_rol_empleado` agrega el rol `EMPLEADO` con `planilla.ver_boleta_propia`
+y `vacaciones.solicitar`; no vuelve a crear permisos ya sembrados por F12.
 
 **Cambios anuales de parámetros** (renta, salario mínimo, etc.) no pertenecen a una fase y D10 no los cubre. Propuesta, pendiente de confirmar: `AAAANN_...` (año + secuencia, p. ej. `202701_parametros_renta_2027`). Siempre es mayor que `0001NN`, así que el orden se conserva.
 

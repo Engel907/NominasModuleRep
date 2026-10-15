@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -30,17 +31,34 @@ import (
 // New construye los servicios y devuelve el engine de Gin listo para servir.
 // Falla rápido si algún servicio no se puede armar (error de despliegue).
 func New(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (*gin.Engine, error) {
+	// F16: errores de validación con el nombre del tag json (una sola vez,
+	// antes de servir tráfico).
+	middleware.ConfigurarValidador()
+
 	deps, err := buildDeps(cfg, sqlDB, tokenMaker)
 	if err != nil {
 		return nil, fmt.Errorf("deps: %w", err)
 	}
+
+	// F16 (S8): limitadores en memoria (una réplica; ver middleware/ratelimit.go).
+	limAuth, err := middleware.NuevoLimitador(cfg.RateLimit.AuthPorMin, cfg.RateLimit.AuthBurst)
+	if err != nil {
+		return nil, fmt.Errorf("rate limit auth: %w", err)
+	}
+	limUsuario, err := middleware.NuevoLimitador(cfg.RateLimit.UsuarioPorMin, cfg.RateLimit.UsuarioBurst)
+	if err != nil {
+		return nil, fmt.Errorf("rate limit usuario: %w", err)
+	}
+	deps.LimiteAuth = middleware.LimitarPorIP(limAuth)
+	deps.LimiteUsuario = middleware.LimitarPorUsuario(limUsuario)
+
 	// F15: verificador de sesión (activo + permisos_version) con caché de TTL corto.
 	queries := dto.New(sqlDB)
 	sesiones := middleware.NuevoSesionCache(func(ctx context.Context, id int64) (bool, uint32, error) {
 		e, err := queries.GetEstadoSesion(ctx, id)
 		return e.Activo, e.PermisosVersion, err
 	}, cfg.Auth.CacheTTL)
-	return newRouter(cfg, sqlDB, tokenMaker, sesiones, deps), nil
+	return newRouter(cfg, sqlDB, tokenMaker, sesiones, deps)
 }
 
 // NewTokenMaker arma el PasetoMaker real desde el llavero configurado
@@ -132,17 +150,46 @@ func politicaAuth(a config.AuthConfig) auth.Politica {
 	}
 }
 
-// newRouter arma el engine de Gin con el middleware de manejo centralizado de
-// errores montado globalmente y delega el montaje de las rutas de negocio en
-// handlers.RegisterRoutes.
-func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker, sesiones middleware.SesionVerificador, deps handlers.Deps) *gin.Engine {
+// newRouter arma el engine de Gin con la cadena global de middleware (F16) y
+// delega el montaje de las rutas de negocio en handlers.RegisterRoutes.
+func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker, sesiones middleware.SesionVerificador, deps handlers.Deps) (*gin.Engine, error) {
 	if cfg.App.IsProduction() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
-	router.Use(middleware.ErrorHandler())
+
+	// S8: sin esto gin confía en TODOS los proxies y ClientIP() sale de
+	// X-Forwarded-For, que el cliente controla (evade el rate limiter y
+	// falsea los logs). Lista vacía = ninguno: se usa la IP del socket.
+	proxies := cfg.Server.TrustedProxies
+	if proxies == nil {
+		proxies = []string{}
+	}
+	if err := router.SetTrustedProxies(proxies); err != nil {
+		return nil, fmt.Errorf("TRUSTED_PROXIES: %w", err)
+	}
+
+	logger := slog.Default() // main.go lo reemplaza por el logger JSON configurado
+
+	// ORDEN (importa):
+	//  1. RequestID        — primero: todo lo demás ya tiene request_id.
+	//  2. SecurityHeaders  — antes de nada que pueda responder: errores y 404 también las llevan.
+	//  3. RequestLogger    — envuelve al resto para registrar el estado final.
+	//  4. Recovery         — dentro del logger (éste ve el 500) y fuera de ErrorHandler.
+	//  5. ErrorHandler     — escribe el JSON de Fail/RespondWithError; todo lo que use
+	//                        Fail debe ir DESPUÉS de él.
+	//  6. CORS             — antes de auth/limitadores: el preflight no lleva Authorization.
+	//  7. LimitarCuerpo    — 413 antes de que un handler lea el cuerpo.
+	router.Use(
+		middleware.RequestID(),
+		middleware.SecurityHeaders(cfg.App.IsProduction()),
+		middleware.RequestLogger(logger),
+		middleware.Recovery(logger),
+		middleware.ErrorHandler(),
+		middleware.CORS(cfg.Server.CORSAllowedOrigins),
+		middleware.LimitarCuerpo(cfg.Server.MaxBodyBytes),
+	)
 
 	// /healthz se mantiene tal cual (compatibilidad con probes ya configurados).
 	router.GET("/healthz", func(c *gin.Context) {
@@ -162,5 +209,5 @@ func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 	api := router.Group("/api/v1")
 	handlers.RegisterRoutes(api, sqlDB, tokenMaker, sesiones, deps)
 
-	return router
+	return router, nil
 }
