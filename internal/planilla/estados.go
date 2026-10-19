@@ -29,6 +29,27 @@ func (e EstadoPeriodo) Valido() bool {
 	return false
 }
 
+// ClaseTipoPlanilla es la clase de un tipo de planilla (D16). Los valores deben
+// coincidir exactamente con el ENUM tipos_planilla.clase. Go decide el
+// comportamiento por clase, nunca por el codigo de texto del tipo.
+type ClaseTipoPlanilla string
+
+const (
+	ClaseRegular        ClaseTipoPlanilla = "regular"
+	ClaseAguinaldo      ClaseTipoPlanilla = "aguinaldo"
+	ClaseSalarioEscolar ClaseTipoPlanilla = "salario_escolar"
+	ClaseLiquidacion    ClaseTipoPlanilla = "liquidacion"
+)
+
+// Valida indica si c es una de las clases definidas.
+func (c ClaseTipoPlanilla) Valida() bool {
+	switch c {
+	case ClaseRegular, ClaseAguinaldo, ClaseSalarioEscolar, ClaseLiquidacion:
+		return true
+	}
+	return false
+}
+
 // EstadosParaDispersion son los estados desde los que un período puede
 // dispersarse / ya fue dispersado: aprobada, pagada.
 //

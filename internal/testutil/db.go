@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,11 +128,17 @@ func NuevaBD(t *testing.T) *sql.DB {
 }
 
 func migrar(t testing.TB, cfg *mysql.Config) error {
-	ruta := filepath.ToSlash(filepath.Join(RaizRepo(t), "db", "migrations"))
-	if !strings.HasPrefix(ruta, "/") { // Windows: C:/... -> /C:/...
-		ruta = "/" + ruta
+	ruta := filepath.Join(RaizRepo(t), "db", "migrations")
+	sourceURL := "file://" + filepath.ToSlash(ruta)
+	if volumen := filepath.VolumeName(ruta); volumen != "" {
+		rutaSlash := filepath.ToSlash(ruta)
+		sourceURL = (&url.URL{
+			Scheme: "file",
+			Host:   volumen,
+			Path:   strings.TrimPrefix(rutaSlash, filepath.ToSlash(volumen)),
+		}).String()
 	}
-	m, err := migrate.New("file://"+ruta, "mysql://"+cfg.FormatDSN())
+	m, err := migrate.New(sourceURL, "mysql://"+cfg.FormatDSN())
 	if err != nil {
 		return fmt.Errorf("inicializar golang-migrate: %w", err)
 	}

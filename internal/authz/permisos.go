@@ -71,11 +71,11 @@ const (
 
 // --- Planilla, aguinaldo, salario escolar y dashboard ----------------------
 const (
-	PermPlanillaCrear            = "planilla.crear"             // reservado
-	PermPlanillaCalcular         = "planilla.calcular"          // reservado
-	PermPlanillaVer              = "planilla.ver"               // reservado
-	PermPlanillaAprobar          = "planilla.aprobar"           // reservado
-	PermPlanillaPagar            = "planilla.pagar"             // reservado
+	PermPlanillaCrear            = "planilla.crear"             // ruta
+	PermPlanillaCalcular         = "planilla.calcular"          // ruta
+	PermPlanillaVer              = "planilla.ver"               // ruta
+	PermPlanillaAprobar          = "planilla.aprobar"           // ruta
+	PermPlanillaPagar            = "planilla.pagar"             // ruta
 	PermPlanillaExportarBancario = "planilla.exportar_bancario" // ruta
 	PermPlanillaVerBoleta        = "planilla.ver_boleta"        // ruta
 	PermPlanillaVerBoletaPropia  = "planilla.ver_boleta_propia" // reservado

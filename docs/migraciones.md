@@ -68,6 +68,53 @@ UPDATE parametros_xxx
 
 Recuerde: los porcentajes en BD son porcentaje (10.83), salvo `parametros_salario_escolar` (fracción 0.0833) — D3.
 
+## Cargar `SALARIO_MINIMO_INEMBARGABLE` (L4)
+
+Ninguna migración siembra este parámetro: su monto y su base legal los confirma
+quien administra los parámetros (D13 del ADR-001: monto global). Hasta que exista
+una fila vigente, `CargadorParametros.Cargar` falla con `ErrParametroFaltante` y
+`go run ./cmd/jobs verificar-parametros` sale con código 1. Se carga como
+migración de datos (`AAAANN_parametro_salario_minimo_inembargable`):
+
+```sql
+-- up
+-- 1) Cierra la vigencia anterior, si existe (en la primera carga no afecta filas).
+UPDATE parametros_generales
+   SET fecha_fin_vigencia = DATE_SUB('<FECHA_INICIO>', INTERVAL 1 DAY)
+ WHERE clave = 'SALARIO_MINIMO_INEMBARGABLE'
+   AND fecha_fin_vigencia IS NULL;
+
+-- 2) Inserta el valor nuevo. fuente_legal es OBLIGATORIA: la norma que fija el monto.
+INSERT INTO parametros_generales
+    (clave, valor, tipo, descripcion, fuente_legal, fecha_inicio_vigencia, fecha_fin_vigencia, creado_por)
+SELECT v.clave, v.valor, 'decimal',
+       'Salario mínimo inembargable (monto global) para el cálculo de embargos',
+       v.fuente_legal, '<FECHA_INICIO>', NULL, 1
+FROM (SELECT 'SALARIO_MINIMO_INEMBARGABLE' AS clave,
+             '<MONTO>' AS valor,
+             '<FUENTE_LEGAL>' AS fuente_legal) v
+WHERE NOT EXISTS (
+    SELECT 1 FROM parametros_generales g
+     WHERE g.clave = v.clave AND g.es_vigente = 1
+);
+```
+
+```sql
+-- down: no-op intencional.
+-- parametros_generales es historial legal inmutable desde L2:
+-- no se borran filas y una vigencia cerrada no se reabre.
+```
+
+Reglas: sin valor inventado ni por defecto; `<MONTO>`, `<FECHA_INICIO>` y
+`<FUENTE_LEGAL>` los aporta quien valida el parámetro. Desde L2
+(`trg_pg_vigencia_*`), las filas no se pueden borrar ni una vigencia cerrada
+reabrir. Por eso la reversa de una
+migración de parámetros generales debe ser no-op; para corregir una carga se
+agrega una nueva migración que cierra la vigente e inserta la fila correcta.
+No copiar para esta tabla el `DELETE` ni la reapertura del ejemplo genérico de
+arriba. Pruebe el `up` y confirme el `down` no-op en una BD efímera antes de
+aplicarla.
+
 ## Requisitos de conexión
 
 - La URL debe llevar `multiStatements=true`; `cmd/migrate` lo fuerza. Los scripts ya no usan `DELIMITER`: el servidor entiende `CREATE TRIGGER ... BEGIN ... END;` dentro de multi-statement.

@@ -238,6 +238,10 @@ type ParametrosCalculo struct {
 	BaseMinimaContributiva    map[int64]decimal.Decimal
 	EscalaEmbargo             []TramoEscalaEmbargo
 
+	// Divisor de días del mes para el salario diario
+	// (parametros_generales.DIVISOR_DIAS_MES). L4 solo lo carga; lo consume L10.
+	DivisorDiasMes decimal.Decimal
+
 	// Divisor de la hora ordinaria (horas ordinarias del mes según jornada).
 	HorasMensualesOrdinarias decimal.Decimal
 

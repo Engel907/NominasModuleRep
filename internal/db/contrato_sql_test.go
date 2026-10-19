@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"planillas-ccdr/internal/contabilidad"
 	"planillas-ccdr/internal/db/dto"
 	"planillas-ccdr/internal/planilla"
 	"planillas-ccdr/internal/testutil"
@@ -28,7 +29,13 @@ import (
 // específico ejecuta sus variantes reales. Una consulta dinámica en un archivo
 // que no esté aquí hace fallar el test de contrato.
 var listaBlancaDinamicas = map[string]string{
-	"internal/db/dto/planilla_export.go": "IN (?,?,...) con estados de período; variantes ejecutadas en TestVariantesDinamicasExport.",
+	"internal/db/dto/planilla_export.go":          "IN (?,?,...) con estados de período; variantes ejecutadas en TestVariantesDinamicasExport.",
+	"internal/contabilidad/sql_adapters.go":       "IN (?,?,...) de líneas de asientos; ejecutada en TestVariantesDinamicasSQL.",
+	"internal/db/dto/acumulados_liquidaciones.go": "Filtro IN de estados de período; ejecutado en TestVariantesDinamicasSQL.",
+	"internal/db/dto/dashboard.go":                "Placeholders variables según estados cerrados; ejecutados en TestVariantesDinamicasSQL.",
+	"internal/db/dto/planilla_ciclo.go":           "Filtros opcionales de período; ejecutados en TestVariantesDinamicasSQL.",
+	"internal/db/dto/planilla_periodo.go":         "Columna de base elegida por método y query agregada; ejecutadas en TestVariantesDinamicasSQL.",
+	"internal/db/dto/usuarios_admin.go":           "Filtros opcionales de usuario/auditoría y UPDATE selectivo; ejecutados en TestVariantesDinamicasSQL.",
 }
 
 type consulta struct {
@@ -121,11 +128,12 @@ func extraerConsultas(t *testing.T, raiz string) []consulta {
 				return true
 			}
 			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				if s, uerr := strconv.Unquote(lit.Value); uerr == nil && pareceSQL(s) {
+				if s, uerr := strconv.Unquote(lit.Value); uerr == nil && pareceSQL(s) && !esFragmentoSQL(pila, rel) {
 					var padre ast.Node
 					if len(pila) > 0 {
 						padre = pila[len(pila)-1]
 					}
+
 					out = append(out, consulta{
 						archivo:  rel,
 						linea:    fset.Position(lit.Pos()).Line,
@@ -143,6 +151,22 @@ func extraerConsultas(t *testing.T, raiz string) []consulta {
 		t.Fatalf("recorriendo internal/: %v", err)
 	}
 	return out
+}
+
+func esFragmentoSQL(pila []ast.Node, archivo string) bool {
+	if archivo != "internal/db/dto/usuarios_admin.go" || len(pila) == 0 {
+		return false
+	}
+	valor, ok := pila[len(pila)-1].(*ast.ValueSpec)
+	if !ok {
+		return false
+	}
+	for _, nombre := range valor.Names {
+		if nombre.Name == "usuarioAdminSelect" {
+			return true
+		}
+	}
+	return false
 }
 
 // TestContratoSQL prepara CADA consulta SQL embebida en Go contra el esquema
@@ -212,6 +236,7 @@ func TestVariantesDinamicasExport(t *testing.T) {
 		planilla.EstadoBorrador, planilla.EstadoCalculada, planilla.EstadoAprobada,
 		planilla.EstadoPagada, planilla.EstadoContabilizada,
 	}
+
 	variantes := map[string][]planilla.EstadoPeriodo{
 		"dispersion": planilla.EstadosParaDispersion(),
 		"acumulados": planilla.EstadosParaAcumulados(),
@@ -248,4 +273,86 @@ func TestVariantesDinamicasExport(t *testing.T) {
 		}
 		_ = rows.Close()
 	})
+}
+
+func TestVariantesDinamicasSQL(t *testing.T) {
+	sqlDB := testutil.NuevaBD(t)
+	ctx := context.Background()
+	q := dto.New(sqlDB)
+	desde := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	hasta := desde.AddDate(1, 0, 0)
+
+	if _, err := q.SumarSalariosBrutosPeriodo(ctx, 1, desde, hasta); err != nil {
+		t.Fatalf("SumarSalariosBrutosPeriodo: %v", err)
+	}
+	if _, err := q.ListSalariosBrutosUltimosPeriodos(ctx, 1, hasta, 5); err != nil {
+		t.Fatalf("ListSalariosBrutosUltimosPeriodos: %v", err)
+	}
+	if _, err := q.ObtenerMetricasDashboard(ctx, hasta, []string{"aprobada", "pagada", "contabilizada"}); err != nil {
+		t.Fatalf("ObtenerMetricasDashboard: %v", err)
+	}
+	filtroCiclo := dto.FiltroPeriodosCiclo{Estado: "borrador"}
+	if _, err := q.ListarPeriodosCiclo(ctx, filtroCiclo, 10, 0); err != nil {
+		t.Fatalf("ListarPeriodosCiclo: %v", err)
+	}
+	if _, err := q.ContarPeriodosCiclo(ctx, filtroCiclo); err != nil {
+		t.Fatalf("ContarPeriodosCiclo: %v", err)
+	}
+	if _, err := q.SumarBaseAguinaldoPorEmpleado(ctx, desde, hasta); err != nil {
+		t.Fatalf("SumarBaseAguinaldoPorEmpleado: %v", err)
+	}
+	if _, err := q.SumarBaseSalarioEscolarPorEmpleado(ctx, desde, hasta); err != nil {
+		t.Fatalf("SumarBaseSalarioEscolarPorEmpleado: %v", err)
+	}
+
+	usuarioID, err := q.CrearUsuarioAdministracion(ctx, "contrato_sql", "Contrato SQL", "contrato-sql@example.test", sql.NullInt64{}, "hash-de-prueba")
+	if err != nil {
+		t.Fatalf("CrearUsuarioAdministracion: %v", err)
+	}
+	nombre := "Usuario contrato actualizado"
+	correo := "contrato-actualizado@example.test"
+	if _, err := q.ActualizarUsuarioAdministracion(ctx, usuarioID, &nombre, &correo, nil); err != nil {
+		t.Fatalf("ActualizarUsuarioAdministracion: %v", err)
+	}
+	if _, _, err := q.ListarUsuariosAdministracion(ctx, dto.FiltroUsuarios{Texto: "contrato", Activo: boolPuntero(true), Rol: "admin", Limit: 10}); err != nil {
+		t.Fatalf("ListarUsuariosAdministracion: %v", err)
+	}
+	if _, _, err := q.ListarAuditoria(ctx, dto.FiltroAuditoria{Tabla: "usuarios", Limit: 10}); err != nil {
+		t.Fatalf("ListarAuditoria: %v", err)
+	}
+
+	var periodoTipoID, tipoAsientoID int64
+	if err := sqlDB.QueryRowContext(ctx, `SELECT id FROM tipos_planilla LIMIT 1`).Scan(&periodoTipoID); errors.Is(err, sql.ErrNoRows) {
+		res, err := sqlDB.ExecContext(ctx, `INSERT INTO tipos_planilla (codigo, nombre) VALUES (?, ?)`, "contrato_sql", "Tipo contrato SQL")
+		if err != nil {
+			t.Fatalf("creando tipo de planilla de prueba: %v", err)
+		}
+		periodoTipoID, err = res.LastInsertId()
+		if err != nil {
+			t.Fatalf("leyendo id de tipo de planilla de prueba: %v", err)
+		}
+	} else if err != nil {
+		t.Fatalf("buscando tipo de planilla de prueba: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx, `SELECT id FROM tipos_asiento LIMIT 1`).Scan(&tipoAsientoID); err != nil {
+		t.Fatalf("buscando tipo de asiento de prueba: %v", err)
+	}
+	res, err := sqlDB.ExecContext(ctx, `INSERT INTO periodos_planilla (tipo_planilla_id, fecha_inicio, fecha_fin) VALUES (?, ?, ?)`, periodoTipoID, desde, hasta)
+	if err != nil {
+		t.Fatalf("creando período para contrato de contabilidad: %v", err)
+	}
+	periodoID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("leyendo id de período de prueba: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `INSERT INTO asientos_contables (periodo_planilla_id, tipo_asiento_id, numero_asiento, fecha_generacion) VALUES (?, ?, ?, ?)`, periodoID, tipoAsientoID, "CONTRATO-1", hasta); err != nil {
+		t.Fatalf("creando asiento para contrato de contabilidad: %v", err)
+	}
+	if _, err := contabilidad.NewLectorSQL(sqlDB).ListarAsientos(ctx, contabilidad.FiltroAsientos{PeriodoID: &periodoID}); err != nil {
+		t.Fatalf("ListarAsientos: %v", err)
+	}
+}
+
+func boolPuntero(valor bool) *bool {
+	return &valor
 }

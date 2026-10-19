@@ -1397,6 +1397,8 @@ CRITERIOS DE ACEPTACIÓN
 
 ---
 
+ahora si
+
 ## FASE 20 — Orquestador de cálculo y persistencia completa
 
 **Contexto.** Nadie hidrata `CalculoEmpleadoInput`, arma los parámetros, recorre a los empleados ni persiste `planilla_detalle_empleado`, `planilla_detalle_concepto` y `planilla_detalle_embargo`. Además la **cuota patronal no se persiste** (la contabilidad la recalcula con el porcentaje vigente al fin del período y aborta si no cuadra: frágil, L7), `planilla_detalle_embargo` no guarda calculado/aplicado/insatisfecho (F9 dejó "F20" ahí), y no se guarda con qué parámetros se calculó (trazabilidad legal: qué porcentaje se aplicó en esa planilla).
@@ -1467,9 +1469,14 @@ CRITERIOS DE ACEPTACIÓN
 
 **Archivos a pasar**
 - `internal/planilla/domain.go` (254), `motor_calculo.go` (608), `calculator.go` (340), `estados.go`, `periodo_service.go` (F19), `cargador_parametros.go` (F18)
+
+
 - `internal/db/dto/planilla_periodo.go` (501), `planilla_motor.go` (158), `planilla_ciclo.go` (F19)
+
 - `internal/api/handlers/planilla_periodo_handler.go` (F19), `routes.go`, `internal/authz/permisos.go`
 - `cmd/api/main.go` o `internal/app/app.go`, `internal/db/audit.go`
+
+
 - DDL: `planilla_detalle_empleado`, `planilla_detalle_concepto`, `planilla_detalle_embargo`, `periodos_planilla` (schema.sql 944–1035, 1136–1152), `embargos`, `prestamos` (1066–1135), `conceptos_salariales` (514–586)
 - **Informes de traspaso de F18 y F19.**
 

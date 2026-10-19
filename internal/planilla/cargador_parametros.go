@@ -23,6 +23,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/parametros"
 	"planillas-ccdr/internal/shared/porcentaje"
 )
 
@@ -34,6 +35,7 @@ const (
 
 // Claves de parametros_generales usadas por el cargador.
 const (
+	// Deprecada: se retira en L12 (jornada y divisor de hora extra).
 	ClaveHorasMensualesOrdinarias = "HORAS_MENSUALES_ORDINARIAS"
 )
 
@@ -99,9 +101,12 @@ func frac(d decimal.Decimal, ctxMsg string) (decimal.Decimal, error) {
 
 // Cargar resuelve todos los parámetros a la fecha fin del período.
 //
+// DivisorDiasMes y SalarioMinimoInembargable salen de parametros_generales
+// (D13 del ADR-001: el salario mínimo inembargable es un monto global, no se
+// resuelve por empleado). Si faltan, Cargar falla con ErrParametroFaltante y
+// la clave en el mensaje.
+//
 // Quedan SIN cargar aquí (dependen de datos que este método no recibe):
-//   - SalarioMinimoInembargable: es por empleado (clasificación del puesto);
-//     usar Queries.ObtenerSalarioMinimoEnFecha por empleado.
 //   - FraccionMensualPeriodo / DiasPeriodoCompleto: dependen del tipo de
 //     planilla (quincena 0.5/15, mes 1/30); los fija el orquestador. El motor
 //     ya falla si faltan cuando prorratea SAL_BASE.
@@ -134,16 +139,56 @@ func (c *CargadorParametros) Cargar(ctx context.Context, fechaInicio, fechaFin t
 	if err := c.cargarEscalaEmbargo(ctx, f, out); err != nil {
 		return nil, err
 	}
+	if err := c.cargarGenerales(ctx, f, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
-	h, err := c.generales.Decimal(ctx, ClaveHorasMensualesOrdinarias, f)
+// decimalGeneral lee un decimal de parametros_generales. Si la clave no está
+// vigente, el error envuelve ErrParametroFaltante y también el error tipado de
+// parametros (errors.Is/As funcionan con ambos; el mensaje trae la clave).
+func (c *CargadorParametros) decimalGeneral(ctx context.Context, clave string, f time.Time) (decimal.Decimal, error) {
+	d, err := c.generales.Decimal(ctx, clave, f)
 	if err != nil {
-		return nil, err // ya es ErrParametroNoConfigurado explícito
+		var nc parametros.ErrParametroNoConfigurado
+		if errors.As(err, &nc) {
+			return decimal.Zero, fmt.Errorf("%w: %w", ErrParametroFaltante, err)
+		}
+		return decimal.Zero, err
+	}
+	return d, nil
+}
+
+func (c *CargadorParametros) cargarGenerales(ctx context.Context, f time.Time, out *ParametrosCalculo) error {
+	// Deprecada (L12): sigue cargándose hasta entonces.
+	h, err := c.decimalGeneral(ctx, ClaveHorasMensualesOrdinarias, f)
+	if err != nil {
+		return err
 	}
 	if !h.IsPositive() {
-		return nil, fmt.Errorf("planilla: %s debe ser > 0, es %s", ClaveHorasMensualesOrdinarias, h)
+		return fmt.Errorf("planilla: %s debe ser > 0, es %s", ClaveHorasMensualesOrdinarias, h)
 	}
 	out.HorasMensualesOrdinarias = h
-	return out, nil
+
+	div, err := c.decimalGeneral(ctx, parametros.ClaveDivisorDiasMes, f)
+	if err != nil {
+		return err
+	}
+	if !div.IsPositive() {
+		return fmt.Errorf("planilla: %s debe ser > 0, es %s", parametros.ClaveDivisorDiasMes, div)
+	}
+	out.DivisorDiasMes = div
+
+	smi, err := c.decimalGeneral(ctx, parametros.ClaveSalarioMinimoInembargable, f)
+	if err != nil {
+		return err
+	}
+	if !smi.IsPositive() {
+		return fmt.Errorf("planilla: %s debe ser > 0, es %s", parametros.ClaveSalarioMinimoInembargable, smi)
+	}
+	out.SalarioMinimoInembargable = smi
+	return nil
 }
 
 func (c *CargadorParametros) cargarCCSS(ctx context.Context, f time.Time, out *ParametrosCalculo) error {

@@ -4,7 +4,9 @@ package planilla_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,8 +19,27 @@ import (
 	"planillas-ccdr/internal/testutil"
 )
 
+// montoFixtureSalarioMinimo es un valor de PRUEBA, no un valor legal.
+const montoFixtureSalarioMinimo = "1000000"
+
+// sembrarSalarioMinimoFixture inserta SALARIO_MINIMO_INEMBARGABLE, que ninguna
+// migración siembra (no se inventan valores legales).
+func sembrarSalarioMinimoFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+INSERT INTO parametros_generales
+	(clave, valor, tipo, descripcion, fuente_legal, fecha_inicio_vigencia, fecha_fin_vigencia, creado_por)
+VALUES
+	(?, ?, 'decimal', 'Fixture de prueba L4', 'FIXTURE DE PRUEBA - NO ES UN VALOR LEGAL', '2026-01-01', NULL, 1)`,
+		parametros.ClaveSalarioMinimoInembargable, montoFixtureSalarioMinimo)
+	if err != nil {
+		t.Fatalf("sembrando fixture de %s: %v", parametros.ClaveSalarioMinimoInembargable, err)
+	}
+}
+
 func TestCargadorSeedsReales(t *testing.T) {
 	db := testutil.NuevaBD(t)
+	sembrarSalarioMinimoFixture(t, db)
 	fuente := infra.NewFuenteParametros(dto.New(db))
 	gen := parametros.NewGenerales(parametros.NewRepositorioSQL(db), 0)
 	c := planilla.NewCargadorParametros(fuente, gen)
@@ -47,6 +68,8 @@ func TestCargadorSeedsReales(t *testing.T) {
 		t.Fatal("el último tramo de renta debe estar marcado como abierto")
 	}
 	eq("horas mensuales ordinarias", p.HorasMensualesOrdinarias, "240")
+	eq("divisor de días del mes", p.DivisorDiasMes, "30")
+	eq("salario mínimo inembargable", p.SalarioMinimoInembargable, montoFixtureSalarioMinimo)
 	if len(p.FactoresHoraExtra) == 0 || len(p.SubsidiosIncapacidad) == 0 ||
 		len(p.BaseMinimaContributiva) == 0 || len(p.EscalaEmbargo) == 0 {
 		t.Fatal("el cargador no resolvió todos los grupos de parámetros")
@@ -60,6 +83,26 @@ func TestCargadorSeedsReales(t *testing.T) {
 	eq("salario escolar", esc, "0.0833")
 }
 
+func TestCargadorFallaSinSalarioMinimoInembargable(t *testing.T) {
+	db := testutil.NuevaBD(t) // sin fixture: la clave no existe en la BD
+	fuente := infra.NewFuenteParametros(dto.New(db))
+	gen := parametros.NewGenerales(parametros.NewRepositorioSQL(db), 0)
+	c := planilla.NewCargadorParametros(fuente, gen)
+
+	fin := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+	_, err := c.Cargar(context.Background(), fin.AddDate(0, 0, -30), fin)
+	if !errors.Is(err, planilla.ErrParametroFaltante) {
+		t.Fatalf("se esperaba ErrParametroFaltante, llegó %v", err)
+	}
+	if !strings.Contains(err.Error(), parametros.ClaveSalarioMinimoInembargable) {
+		t.Fatalf("el mensaje debe nombrar la clave faltante: %v", err)
+	}
+	var nc parametros.ErrParametroNoConfigurado
+	if !errors.As(err, &nc) || nc.Clave != parametros.ClaveSalarioMinimoInembargable {
+		t.Fatalf("el error tipado de parametros debe seguir accesible: %v", err)
+	}
+}
+
 func TestCargadorRechazaHuecoRenta(t *testing.T) {
 	db := testutil.NuevaBD(t)
 	tx, err := db.Begin()
@@ -67,15 +110,25 @@ func TestCargadorRechazaHuecoRenta(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(context.Background(), `
+	_, err = tx.ExecContext(context.Background(), `
 UPDATE parametros_tramos_renta
-SET monto_desde = monto_desde + 1000
-WHERE orden_tramo = 3 AND fecha_fin_vigencia IS NULL`)
+SET fecha_fin_vigencia = '2026-02-28'
+WHERE fecha_fin_vigencia IS NULL`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, err := result.RowsAffected(); err != nil || n != 1 {
-		t.Fatalf("actualización de fixture afectó %d filas (err=%v); se esperaba 1", n, err)
+	_, err = tx.ExecContext(context.Background(), `
+INSERT INTO parametros_tramos_renta
+	(orden_tramo, monto_desde, monto_hasta, porcentaje, fecha_inicio_vigencia)
+SELECT orden_tramo,
+       monto_desde + IF(orden_tramo = 3, 1000, 0),
+       monto_hasta,
+       porcentaje,
+       '2026-03-01'
+FROM parametros_tramos_renta
+WHERE fecha_fin_vigencia = '2026-02-28'`)
+	if err != nil {
+		t.Fatalf("insertar versión de prueba con hueco: %v", err)
 	}
 
 	gen := parametros.NewGenerales(parametros.NewRepositorioSQL(db), 0)

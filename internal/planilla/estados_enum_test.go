@@ -112,6 +112,11 @@ func TestEnumsEstadoCoincidenConConstantes(t *testing.T) {
 			enumReal(t, bd, "periodos_planilla", "estado"),
 			constantesGo(t, "estados.go", "Estado"))
 	})
+	t.Run("tipos_planilla.clase", func(t *testing.T) {
+		compararConjuntos(t, "tipos_planilla.clase",
+			enumReal(t, bd, "tipos_planilla", "clase"),
+			constantesGo(t, "estados.go", "Clase"))
+	})
 	t.Run("prestamos.estado", func(t *testing.T) {
 		compararConjuntos(t, "prestamos.estado",
 			enumReal(t, bd, "prestamos", "estado"),

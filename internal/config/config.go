@@ -227,7 +227,11 @@ type AuthConfig struct {
 // de entorno del proceso y, si existe, un archivo .env en el directorio
 // actual. No falla si el .env no existe (útil en producción, donde las
 // variables ya vienen inyectadas por el orquestador).
-func LoadConfig() (*Config, error) {
+func LoadConfig() (*Config, error) { return cargarConfig((*Config).validate) }
+
+// cargarConfig lee la configuración y la valida con la función dada. LoadConfig
+// valida todo; LoadJobsConfig solo lo que necesita un job (sin PASETO/SMTP).
+func cargarConfig(validar func(*Config) error) (*Config, error) {
 	v := viper.New()
 	v.SetConfigName(".env")
 	v.SetConfigType("env")
@@ -307,7 +311,7 @@ func LoadConfig() (*Config, error) {
 		},
 	}
 
-	if err := cfg.validate(); err != nil {
+	if err := validar(cfg); err != nil {
 		return nil, err
 	}
 

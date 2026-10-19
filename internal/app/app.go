@@ -118,7 +118,8 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 		// Liquidaciones: *dto.Queries debe implementar services.LiquidacionRepository.
 		Liquidacion: services.NewLiquidacionService(sqlDB, queries, infra.NewMotorRepository(queries)),
 
-		PlanillaExport: planilla.NewExportService(infra.NewExportRepository(queries), infra.NewExportUnitOfWork(sqlDB)),
+		PlanillaExport:  planilla.NewExportService(infra.NewExportRepository(queries), infra.NewExportUnitOfWork(sqlDB)),
+		PlanillaPeriodo: planilla.NewPeriodoService(sqlDB, planilla.PeriodoGanchos{}),
 
 		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
 

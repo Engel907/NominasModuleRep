@@ -48,6 +48,8 @@ func usuarioAdminDesdeRow(row interface{ Scan(...any) error }) (UsuarioAdministr
 	return u, nil
 }
 
+// usuarioAdminSelect es un fragmento; cada consulta lo completa con sus filtros,
+// GROUP BY y paginación antes de ejecutarse.
 const usuarioAdminSelect = `SELECT u.id, u.nombre_usuario, u.nombre_completo, u.correo,
        u.empleado_id, u.activo, u.requiere_cambio_password, u.permisos_version,
        u.created_at, u.updated_at, GROUP_CONCAT(DISTINCT r.codigo ORDER BY r.codigo SEPARATOR ',')
