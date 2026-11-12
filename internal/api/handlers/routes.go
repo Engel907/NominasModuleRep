@@ -52,15 +52,16 @@ import (
 // Se construyen en cmd/api/main.go (buildDeps) y se pasan acá; así routes.go
 // no tiene que adivinar los constructores de cada módulo.
 type Deps struct {
-	Auth            *auth.Servicio
-	Asistencia      *asistencia.Service
-	Vacaciones      *asistencia.VacacionesService
-	Prestamos       *prestamos.Service
-	Liquidacion     *services.LiquidacionService
-	Dashboard       *services.DashboardService
-	PlanillaExport  *planilla.ExportService
-	PlanillaPeriodo *planilla.PeriodoService
-	Contabilidad    *ContabilidadDeps
+	Auth             *auth.Servicio
+	Asistencia       *asistencia.Service
+	Vacaciones       *asistencia.VacacionesService
+	Prestamos        *prestamos.Service
+	Liquidacion      *services.LiquidacionService
+	Dashboard        *services.DashboardService
+	PlanillaExport   *planilla.ExportService
+	PlanillaPeriodo  *planilla.PeriodoService
+	PlanillaDevengos *planilla.DevengosService
+	Contabilidad     *ContabilidadDeps
 
 	// Acumulados está construido pero aún sin rutas: lo reemplaza L19.
 	Acumulados *planilla.AcumuladosService
@@ -161,6 +162,9 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 		planillas.GET("/:id/boleta/:empleado_id",
 			middleware.RequireAnyPermission(authz.PermPlanillaVerBoleta, authz.PermPlanillaVerBoletaPropia), exportHandler.ObtenerBoletaPago)
 		NewPlanillaPeriodoHandler(deps.PlanillaPeriodo).RegisterRoutes(planillas)
+		if deps.PlanillaDevengos != nil {
+			NewPlanillaDevengosHandler(deps.PlanillaDevengos).RegisterRoutes(planillas)
+		}
 	}
 
 	// --- Contabilidad ----------------------------------------------------

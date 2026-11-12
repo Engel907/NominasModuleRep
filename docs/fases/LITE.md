@@ -13,7 +13,7 @@
 | L6 ⇄ | Hidratador (lecturas) | 1 + firmas | — | L5 | Completada; unitarios y contrato SQL verificados |
 | L7 ⇄ | Escritor de detalle (persistencia) | firmas | — | L5 | Completada; integración verificada en MySQL |
 | L8 | Orquestador + cableado + prueba de punta a punta | 3 | 000123 | L6, L7 | Completada; ciclo completo verificado en MySQL |
-| L9 ⇄ | Devengos manuales (API) | 2 | — | L8 | Pendiente |
+| L9 ⇄ | Devengos manuales (API) | 2 | — | L8 | Completada; integración verificada en MySQL |
 | **C — Reglas (una por archivo)** |||||| 
 | L10 | Salario: fuente única, días comerciales, vigencias | 3 | 000123 | L8 | Pendiente |
 | L11 ⇄ | Incapacidades | 2 | — | L10 | Pendiente |
@@ -177,3 +177,11 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - Verificado (MySQL): `TestL8CicloCompletoTresEmpleados` (crear→calcular→recalcular sin duplicar→aprobar→pagar, 3 usuarios, cuadre, snapshot con % en fracción, cuota patronal persistida), `TestL8EmpleadoConErrorNoPersisteNada`, `TestL8SinSalarioMinimoInembargable…`; unit `TestFallarCalculoConErrores`.
 - Suite de integración: arreglados tests rotos previos (fixture L2 sin `fraccion_mensual`, `security_integration_test` sin BD, `TestHumoAPI` sin issuer/rate-limit/body-limit y sin rol de negocio). Quedan rojos y **preexistentes**: `TestHumoAPI/crear_y_listar_empleado` (cuerpo de alta de empleado desactualizado) y `TestEnumsEstado…/prestamos.estado` (`pagado`, lo resuelve L18).
 - Sigue faltando cargar `SALARIO_MINIMO_INEMBARGABLE` real: sin él, calcular responde 422 `parametros_incompletos`.
+
+## Notas L9
+
+- Archivos: `internal/planilla/devengos_service.go`, `internal/db/dto/planilla_devengos.go`, `internal/api/handlers/planilla_devengos_handler.go`, `routes.go` (`Deps.PlanillaDevengos`), `app.go`; test `devengos_integration_test.go`.
+- Rutas: `POST /planillas/:id/devengos` y `DELETE /planillas/:id/devengos/:devengo_id` (`planilla.crear`), `GET /planillas/:id/devengos?empleado_id=` (`planilla.ver`, paginado). `monto` se recibe como **texto decimal** (nunca float).
+- Reglas: período bloqueado `FOR UPDATE` y en `borrador` (si no, 409); concepto activo, `captura_manual`, `ingreso` y presente en `tipo_planilla_concepto` del tipo del período (422); empleado activo (422); monto > 0, ≤ 2 decimales, cabe en DECIMAL(14,2) (400).
+- Firmas: `NewDevengosService`, `(*DevengosService).{Crear,Listar,Eliminar}`, `NuevoDevengo`, errores `ErrDevengoNoEncontrado`, `ErrConceptoNoCapturable`, `ErrEmpleadoNoActivo`, `ErrMontoDevengoInvalido`, `ErrObservacionMuyLarga`.
+- Verificado (MySQL): `TestL9DevengosManuales` (el motor consume el devengo; 409 en período calculado), `TestContratoSQL`.
