@@ -37,7 +37,7 @@ func fila(id int64, cod, nat string, orden int32, expr string, ccss, renta bool)
 
 func repoBase() fakeMotorRepo {
 	return fakeMotorRepo{
-		contrato: ContratoVigente{ContratoID: 1, EmpleadoID: 7, RegimenLaboralID: 1, SalarioPactado: d("1000000")},
+		contrato: ContratoVigente{ContratoID: 1, EmpleadoID: 7, RegimenLaboralID: 1, SalarioPactado: d("1000000"), Jornada: "DIURNA", JornadaID: ip(1)},
 		conceptos: []ConceptoAplicableFila{ // desordenados a propósito
 			fila(3, "IMP_RENTA", "deduccion", 110, `{"tipo":"renta"}`, false, false),
 			fila(1, "SAL_BASE", "ingreso", 10, `{"tipo":"referencia_directa"}`, true, true),
@@ -62,7 +62,7 @@ func params() ParametrosCalculo {
 			{OrdenTramo: 2, MontoDesde: d("918000"), MontoHasta: d("1347000"), Porcentaje: d("0.10")},
 			{OrdenTramo: 3, MontoDesde: d("1347000"), Porcentaje: d("0.15"), Abierto: true},
 		},
-		HorasMensualesOrdinarias: d("240"), FraccionMensualPeriodo: d("1"), DiasPeriodoCompleto: d("30"), DivisorDiasMes: d("30"),
+		DivisorPorJornada: map[int64]decimal.Decimal{1: d("240")}, FraccionMensualPeriodo: d("1"), DiasPeriodoCompleto: d("30"), DivisorDiasMes: d("30"),
 	}
 }
 

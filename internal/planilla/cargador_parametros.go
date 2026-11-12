@@ -35,8 +35,7 @@ const (
 
 // Claves de parametros_generales usadas por el cargador.
 const (
-	// Deprecada: se retira en L12 (jornada y divisor de hora extra).
-	ClaveHorasMensualesOrdinarias = "HORAS_MENSUALES_ORDINARIAS"
+// Deprecada: se retira en L12 (jornada y divisor de hora extra).
 )
 
 // ErrParametroFaltante envuelve cualquier parámetro obligatorio no vigente.
@@ -71,6 +70,7 @@ type FuenteParametros interface {
 	// Escala de embargo en % de BD (0-100).
 	ListarEscalaEmbargoEnFecha(ctx context.Context, fecha time.Time) ([]TramoEscalaEmbargo, error)
 	ListarBaseMinimaContributivaEnFecha(ctx context.Context, fecha time.Time) ([]BaseMinimaContributivaFila, error)
+	ListarParametrosJornadaEnFecha(ctx context.Context, fecha time.Time) ([]dto.ParametroJornadaRow, error)
 }
 
 // GeneralesLector: subconjunto de parametros.Generales usado aquí.
@@ -142,6 +142,9 @@ func (c *CargadorParametros) Cargar(ctx context.Context, fechaInicio, fechaFin t
 	if err := c.cargarGenerales(ctx, f, out); err != nil {
 		return nil, err
 	}
+	if err := c.cargarJornadas(ctx, f, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -161,16 +164,6 @@ func (c *CargadorParametros) decimalGeneral(ctx context.Context, clave string, f
 }
 
 func (c *CargadorParametros) cargarGenerales(ctx context.Context, f time.Time, out *ParametrosCalculo) error {
-	// Deprecada (L12): sigue cargándose hasta entonces.
-	h, err := c.decimalGeneral(ctx, ClaveHorasMensualesOrdinarias, f)
-	if err != nil {
-		return err
-	}
-	if !h.IsPositive() {
-		return fmt.Errorf("planilla: %s debe ser > 0, es %s", ClaveHorasMensualesOrdinarias, h)
-	}
-	out.HorasMensualesOrdinarias = h
-
 	div, err := c.decimalGeneral(ctx, parametros.ClaveDivisorDiasMes, f)
 	if err != nil {
 		return err
@@ -383,6 +376,24 @@ func (c *CargadorParametros) cargarEscalaEmbargo(ctx context.Context, f time.Tim
 		}
 		r.Porcentaje = p
 		out.EscalaEmbargo = append(out.EscalaEmbargo, r)
+	}
+	return nil
+}
+
+// cargarJornadas: divisor de la hora ordinaria por jornada (L12). Una jornada
+// sin fila vigente no falla aquí: falla, con error explícito, el empleado de
+// esa jornada que tenga horas extra (MIXTA y NOCTURNA no se siembran).
+func (c *CargadorParametros) cargarJornadas(ctx context.Context, f time.Time, out *ParametrosCalculo) error {
+	rows, err := c.fuente.ListarParametrosJornadaEnFecha(ctx, f)
+	if err != nil {
+		return fmt.Errorf("planilla: leyendo parametros_jornada: %w", err)
+	}
+	out.DivisorPorJornada = make(map[int64]decimal.Decimal, len(rows))
+	for _, r := range rows {
+		if !r.DivisorHorasMensuales.IsPositive() {
+			return fmt.Errorf("planilla: divisor de horas de la jornada %s debe ser > 0, es %s", r.JornadaCodigo, r.DivisorHorasMensuales)
+		}
+		out.DivisorPorJornada[r.JornadaID] = r.DivisorHorasMensuales
 	}
 	return nil
 }

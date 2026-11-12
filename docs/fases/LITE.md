@@ -17,7 +17,7 @@
 | **C — Reglas (una por archivo)** |||||| 
 | L10 | Salario: fuente única, días comerciales, vigencias | 3 | 000124 | L8 | Completada; golden + integración en MySQL |
 | L11 ⇄ | Incapacidades | 2 | — | L10 | Completada; golden + integración en MySQL |
-| L12 | Jornada y divisor de hora extra | 2 | 000124 | L10 | Pendiente |
+| L12 | Jornada y divisor de hora extra | 2 | 000125 | L10 | Completada; unit + integración en MySQL |
 | L13 ⇄ | Horas extra: autorización | 3 | 000125 | L12 | Pendiente |
 | L14 ⇄ | Horas extra: tipificación | 2 | 000126 | L13 | Pendiente |
 | L15 ⇄ | CCSS con base mínima + `regimen_ccss_id` | 3 | 000127 | L8 | Pendiente |
@@ -204,3 +204,11 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - `regla_salario` descuenta los días comerciales incapacitados por segmento (no se paga dos veces); `DiasTrabajados` = días con contrato − incapacidad y debe coincidir. `SUB_INCAP` = solo la parte patronal; la de CCSS/INS va a `planilla_detalle_incapacidad.monto_entidad_informativo`. Se quitó el error "aún no implementado". Boletas solapadas → error; incapacidad sin `SUB_INCAP` aplicable → error.
 - `SUPUESTOS A VALIDAR` (en `incapacidad.go`): serie por boleta (una prórroga en otra boleta reinicia la serie); cada día vale sus días comerciales; salario diario = salario del segmento ÷ divisor; cotización del subsidio según banderas de `SUB_INCAP` (hoy no afecta CCSS ni renta).
 - Verificado: golden (2 días, boleta que cruza dos períodos con serie continua, todo el período, tramo sin `dia_hasta`, sin tramo → error), motor completo, `TestL11IncapacidadEnElCalculo` (MySQL: líneas por tramo, SUB_INCAP 11 666.67, cuadre).
+
+## Notas L12 (000125)
+
+- Migración `000125_jornadas`: catálogo `jornadas` (DIURNA, MIXTA, NOCTURNA), `parametros_jornada` con inmutabilidad (`gen_inmutabilidad_parametros.sh`) y auditoría; **solo DIURNA = 240**, copiado de `HORAS_MENSUALES_ORDINARIAS` (MIXTA/NOCTURNA no se siembran: valor legal). `contratos.jornada_id` y `turnos.jornada_id` (FK) con backfill; `trg_contratos_catalogos_bi` resuelve `jornada_id` y `tipo_contrato_id` desde el texto para todo escritor; auditoría de `contratos` y `turnos` regenerada. up/down/up verificado.
+- **Desvío del plan:** `horas_diarias_ordinarias` es NULL-able (el código no tenía ese valor; no se inventa).
+- Go: `ContratoVigente.JornadaID` (y `dto.ContratoVigenteEnFechaRow`), `dto.ListarParametrosJornadaEnFecha`, `dto.ExisteJornada`, `FuenteParametros.ListarParametrosJornadaEnFecha` (infra actualizado), `ParametrosCalculo.DivisorPorJornada map[int64]decimal.Decimal`. **Quitados:** `ParametrosCalculo.HorasMensualesOrdinarias` y `ClaveHorasMensualesOrdinarias` (la clave queda en BD, deprecada, nadie la lee). El subselect de `tipo_contrato_id` en `CrearVersionContrato` (L10) se sustituye por el trigger (un solo lugar).
+- `regla_horas_extra`: divisor = `DivisorPorJornada[contrato.JornadaID]`; contrato sin jornada del catálogo o jornada sin parámetro vigente → error (solo si hay horas extra). `contrato_service` rechaza (400) una jornada que no esté en el catálogo.
+- Verificado: `TestHorasExtraPorJornada` (diurna 1.5 → 50 000; nocturna sin divisor y contrato sin jornada → error), `TestL12JornadaYDivisor` (MySQL), L7–L11, `TestCargador*`, `TestContratoSQL`.

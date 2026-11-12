@@ -32,6 +32,7 @@ type ContratoVigenteEnFechaRow struct {
 	RegimenLaboralID int64
 	SalarioPactado   decimal.Decimal
 	Jornada          string
+	JornadaID        *int64 // FK a jornadas (L12); NULL si el texto no calzó con el catálogo
 }
 
 // ObtenerContratoVigenteEnFecha devuelve la versión de contrato cuya
@@ -40,14 +41,14 @@ type ContratoVigenteEnFechaRow struct {
 func (q *Queries) ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (ContratoVigenteEnFechaRow, error) {
 	var r ContratoVigenteEnFechaRow
 	err := q.db.QueryRowContext(ctx, `
-SELECT id, empleado_id, regimen_laboral_id, salario_pactado, jornada
+SELECT id, empleado_id, regimen_laboral_id, salario_pactado, jornada, jornada_id
 FROM contratos
 WHERE empleado_id = ?
   AND fecha_inicio_vigencia <= ?
   AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
 ORDER BY fecha_inicio_vigencia DESC
 LIMIT 1`, empleadoID, fecha, fecha).
-		Scan(&r.ContratoID, &r.EmpleadoID, &r.RegimenLaboralID, &r.SalarioPactado, &r.Jornada)
+		Scan(&r.ContratoID, &r.EmpleadoID, &r.RegimenLaboralID, &r.SalarioPactado, &r.Jornada, &r.JornadaID)
 	return r, err
 }
 
@@ -155,6 +156,40 @@ ORDER BY tipo_hora_extra_id ASC`, fecha, fecha)
 	for rows.Next() {
 		var r ParametroHoraExtraRow
 		if err := rows.Scan(&r.TipoHoraExtraID, &r.FactorRecargo); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ============================================================================
+// PARAMETROS_JORNADA A UNA FECHA (L12)
+// ============================================================================
+
+type ParametroJornadaRow struct {
+	JornadaID             int64
+	JornadaCodigo         string
+	DivisorHorasMensuales decimal.Decimal
+}
+
+// ListarParametrosJornadaEnFecha: divisor de la hora ordinaria vigente por jornada.
+func (q *Queries) ListarParametrosJornadaEnFecha(ctx context.Context, fecha time.Time) ([]ParametroJornadaRow, error) {
+	rows, err := q.db.QueryContext(ctx, `
+SELECT p.jornada_id, j.codigo, p.divisor_horas_mensuales
+FROM parametros_jornada p
+JOIN jornadas j ON j.id = p.jornada_id
+WHERE p.fecha_inicio_vigencia <= ?
+  AND (p.fecha_fin_vigencia IS NULL OR p.fecha_fin_vigencia >= ?)
+ORDER BY p.jornada_id ASC`, fecha, fecha)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ParametroJornadaRow
+	for rows.Next() {
+		var r ParametroJornadaRow
+		if err := rows.Scan(&r.JornadaID, &r.JornadaCodigo, &r.DivisorHorasMensuales); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

@@ -16,8 +16,9 @@ const (
 // Requerido describe un parámetro general sin el cual el motor no puede calcular.
 type Requerido struct{ Clave, Tipo, Descripcion string }
 
-// Requeridos lista los parámetros generales obligatorios. HORAS_MENSUALES_ORDINARIAS
-// no figura aquí: queda deprecada y se retira en L12.
+// Requeridos lista los parámetros generales obligatorios.
+// HORAS_MENSUALES_ORDINARIAS está deprecada desde L12: el divisor de la hora
+// sale de parametros_jornada (por jornada) y nadie la lee.
 func Requeridos() []Requerido {
 	return []Requerido{
 		{

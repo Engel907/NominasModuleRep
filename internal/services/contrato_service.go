@@ -216,6 +216,9 @@ func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, re
 		if err := ValidarSalarioMinimo(ctx, q, req.PuestoID, req.SalarioPactado); err != nil {
 			return err
 		}
+		if err := validarJornada(ctx, q, jornada); err != nil {
+			return err
+		}
 
 		// Un "crear" no debe pisar silenciosamente un contrato vigente: eso es
 		// ActualizarContrato (2 pasos explícitos). Con el lock del empleado esta
@@ -273,6 +276,9 @@ func (s *contratoService) ActualizarContrato(ctx context.Context, usuarioID, emp
 		}
 
 		if err := ValidarSalarioMinimo(ctx, q, req.PuestoID, req.SalarioPactado); err != nil {
+			return err
+		}
+		if err := validarJornada(ctx, q, jornada); err != nil {
 			return err
 		}
 
@@ -382,4 +388,18 @@ func contratoRespuestaDesdeRow(c dto.Contrato) ContratoResponse {
 		r.FechaFinContrato = &f
 	}
 	return r
+}
+
+// validarJornada (L12): la jornada debe existir en el catálogo `jornadas`; la
+// BD resuelve contratos.jornada_id a partir de ese código (000125) y el
+// divisor de la hora extra depende de ella.
+func validarJornada(ctx context.Context, q *dto.Queries, jornada string) error {
+	ok, err := q.ExisteJornada(ctx, jornada)
+	if err != nil {
+		return fmt.Errorf("validar jornada: %w", err)
+	}
+	if !ok {
+		return validacion("jornada", "no existe en el catálogo de jornadas (DIURNA, MIXTA, NOCTURNA)")
+	}
+	return nil
 }

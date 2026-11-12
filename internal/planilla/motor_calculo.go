@@ -32,6 +32,7 @@ type ContratoVigente struct {
 	RegimenLaboralID int64
 	SalarioPactado   decimal.Decimal
 	Jornada          string
+	JornadaID        *int64 // L12: el divisor de la hora extra depende de la jornada
 }
 
 // ConceptoAplicableFila es la fila cruda (aún sin interpretar la fórmula).
@@ -190,8 +191,9 @@ type ParametrosCalculo struct {
 	// de los días comerciales y del salario diario (D15).
 	DivisorDiasMes decimal.Decimal
 
-	// Divisor de la hora ordinaria (horas ordinarias del mes según jornada).
-	HorasMensualesOrdinarias decimal.Decimal
+	// Divisor de la hora ordinaria por jornada (parametros_jornada, L12):
+	// jornada_id -> horas mensuales ordinarias.
+	DivisorPorJornada map[int64]decimal.Decimal
 
 	// Fracción del mes que cubre el tipo de planilla (mes 1, quincena 0.5) y
 	// días comerciales del período completo (= DivisorDiasMes × fracción).

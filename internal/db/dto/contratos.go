@@ -185,13 +185,13 @@ func (q *Queries) CrearVersionContrato(
 ) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
 INSERT INTO contratos (
-    empleado_id, puesto_id, regimen_laboral_id, tipo_contrato, tipo_contrato_id, salario_pactado, jornada,
+    empleado_id, puesto_id, regimen_laboral_id, tipo_contrato, salario_pactado, jornada,
     fecha_inicio_contrato, fecha_fin_contrato, fecha_inicio_vigencia, fecha_fin_vigencia,
     creado_por, created_at
-) VALUES (?, ?, ?, ?,
-    (SELECT t.id FROM tipos_contrato t WHERE UPPER(t.codigo) = UPPER(?) OR UPPER(t.nombre) = UPPER(?) ORDER BY t.id LIMIT 1),
-    ?, ?, ?, ?, ?, NULL, ?, NOW())`,
-		empleadoID, puestoID, regimenLaboralID, tipoContrato, tipoContrato, tipoContrato, salarioPactado, jornada,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NOW())`,
+		// tipo_contrato_id y jornada_id los resuelve trg_contratos_catalogos_bi
+		// a partir del texto (000125).
+		empleadoID, puestoID, regimenLaboralID, tipoContrato, salarioPactado, jornada,
 		fechaInicioContrato, fechaFinContrato, fechaInicioVigencia, creadoPor)
 	if err != nil {
 		return 0, err
@@ -238,4 +238,12 @@ LIMIT 1`, puestoID)
 	var p ParametroSalarioMinimo
 	err := row.Scan(&p.ID, &p.ClasificacionPuestoID, &p.MontoMensual, &p.FechaInicioVigencia, &p.FechaFinVigencia, &p.FuenteLegal)
 	return p, err
+}
+
+// ExisteJornada indica si `codigo` es una jornada activa del catálogo (L12).
+func (q *Queries) ExisteJornada(ctx context.Context, codigo string) (bool, error) {
+	var n int
+	err := q.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jornadas WHERE UPPER(codigo) = UPPER(?) AND activo = 1`, codigo).Scan(&n)
+	return n > 0, err
 }

@@ -8,12 +8,23 @@ import (
 )
 
 // reglaHorasExtra (horas_extra): la base es el salario MENSUAL completo del
-// contrato, no el devengo prorrateado del período.
+// contrato vigente a la fecha efectiva, y el divisor de la hora ordinaria es
+// el de la JORNADA del contrato (parametros_jornada, L12).
 type reglaHorasExtra struct{}
 
 func (reglaHorasExtra) Aplicar(rc *ContextoRegla) error {
 	rc.St.usados[formulaHorasExtra] = true
-	monto, horas, err := CalcularHorasExtra(rc.Contrato.SalarioPactado, rc.P.HorasMensualesOrdinarias, rc.In.HorasExtra, rc.Factores)
+	if len(rc.In.HorasExtra) == 0 {
+		return nil
+	}
+	if rc.Contrato.JornadaID == nil {
+		return fmt.Errorf("el contrato %d no tiene jornada del catálogo (jornada %q)", rc.Contrato.ContratoID, rc.Contrato.Jornada)
+	}
+	divisor, ok := rc.P.DivisorPorJornada[*rc.Contrato.JornadaID]
+	if !ok {
+		return fmt.Errorf("la jornada %q (id %d) no tiene parametros_jornada vigente para calcular horas extra", rc.Contrato.Jornada, *rc.Contrato.JornadaID)
+	}
+	monto, horas, err := CalcularHorasExtra(rc.Contrato.SalarioPactado, divisor, rc.In.HorasExtra, rc.Factores)
 	if err != nil {
 		return err
 	}

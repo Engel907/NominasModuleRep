@@ -67,7 +67,7 @@ func TestCargadorSeedsReales(t *testing.T) {
 	if !p.TramosRenta[4].Abierto {
 		t.Fatal("el último tramo de renta debe estar marcado como abierto")
 	}
-	eq("horas mensuales ordinarias", p.HorasMensualesOrdinarias, "240")
+	eq("divisor de la jornada DIURNA (sembrado desde HORAS_MENSUALES_ORDINARIAS)", p.DivisorPorJornada[1], "240")
 	eq("divisor de días del mes", p.DivisorDiasMes, "30")
 	eq("salario mínimo inembargable", p.SalarioMinimoInembargable, montoFixtureSalarioMinimo)
 	if len(p.FactoresHoraExtra) == 0 || len(p.SubsidiosIncapacidad) == 0 ||

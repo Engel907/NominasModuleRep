@@ -16,6 +16,7 @@ type parametrosQueries interface {
 	ListarTramosSubsidioIncapacidadEnFecha(context.Context, time.Time) ([]dto.TramoSubsidioIncapacidadRow, error)
 	ListarEscalaEmbargoEnFecha(context.Context, time.Time) ([]dto.TramoEscalaEmbargoVigenteRow, error)
 	ListarBaseMinimaContributivaEnFecha(context.Context, time.Time) ([]dto.BaseMinimaContributivaVigenteRow, error)
+	ListarParametrosJornadaEnFecha(context.Context, time.Time) ([]dto.ParametroJornadaRow, error)
 }
 
 var _ parametrosQueries = (*dto.Queries)(nil)
@@ -76,4 +77,8 @@ func (f *fuenteParametros) ListarBaseMinimaContributivaEnFecha(ctx context.Conte
 		})
 	}
 	return out, nil
+}
+
+func (f *fuenteParametros) ListarParametrosJornadaEnFecha(ctx context.Context, fecha time.Time) ([]dto.ParametroJornadaRow, error) {
+	return f.q.ListarParametrosJornadaEnFecha(ctx, fecha)
 }
