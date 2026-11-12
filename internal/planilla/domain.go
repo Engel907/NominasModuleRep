@@ -157,6 +157,7 @@ type EmbargoAplicadoOutput struct {
 type ConceptoCalculadoOutput struct {
 	ConceptoSalarialID int64
 	Codigo             string // conceptos_salariales.codigo (ver seed Fase 3.5)
+	Naturaleza         string // ingreso | deduccion (conceptos_salariales.naturaleza)
 	OrdenCalculo       int32
 	Monto              decimal.Decimal
 	Cantidad           decimal.Decimal // si aplica (ej. horas extra), cero si no aplica

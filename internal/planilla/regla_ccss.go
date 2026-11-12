@@ -30,7 +30,8 @@ func (s *estadoCalculo) resolverCCSS(c ConceptoAplicable, p ParametrosCalculo) e
 		return errors.New("no hay parametros_cargas_sociales vigentes (ambos porcentajes en cero)")
 	}
 	if !s.ccssHecho {
-		s.ccssObrero, s.ccssPatronal = CalcularCCSS(CalcularBaseCCSS(s.ingresos), p.CargaSocial)
+		s.baseCCSS = CalcularBaseCCSS(s.ingresos)
+		s.ccssObrero, s.ccssPatronal = CalcularCCSS(s.baseCCSS, p.CargaSocial)
 		s.ccssHecho = true
 	}
 	switch c.Lado {
@@ -39,7 +40,13 @@ func (s *estadoCalculo) resolverCCSS(c ConceptoAplicable, p ParametrosCalculo) e
 			s.agregar(c, s.ccssObrero, decimal.Zero)
 		}
 	case ladoPatronal:
-		// solo informativo; ya quedó en s.ccssPatronal
+		// Sin línea en el desglose; se persiste en planilla_detalle_patronal (D20).
+		s.patronal = append(s.patronal, LineaPatronal{
+			ConceptoSalarialID: c.ConceptoSalarialID,
+			Base:               s.baseCCSS,
+			Porcentaje:         p.CargaSocial.PorcentajePatronal,
+			Monto:              s.ccssPatronal,
+		})
 	default:
 		return fmt.Errorf("carga_social con lado desconocido %q", c.Lado)
 	}

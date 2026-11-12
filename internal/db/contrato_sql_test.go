@@ -36,6 +36,7 @@ var listaBlancaDinamicas = map[string]string{
 	"internal/db/dto/planilla_ciclo.go":           "Filtros opcionales de período; ejecutados en TestVariantesDinamicasSQL.",
 	"internal/db/dto/planilla_periodo.go":         "Columna de base elegida por método y query agregada; ejecutadas en TestVariantesDinamicasSQL.",
 	"internal/db/dto/usuarios_admin.go":           "Filtros opcionales de usuario/auditoría y UPDATE selectivo; ejecutados en TestVariantesDinamicasSQL.",
+	"internal/db/dto/planilla_detalle.go":         "INSERT multi-fila por lote en las 6 tablas planilla_detalle_*; ejecutado en TestL7EscribirYEliminarDetalle (internal/planilla).",
 }
 
 type consulta struct {

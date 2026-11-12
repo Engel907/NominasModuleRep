@@ -203,8 +203,11 @@ type ParametrosCalculo struct {
 // (para planilla_detalle_concepto.concepto_salarial_formula_id).
 type CalculoEmpleadoDetalle struct {
 	ResultadoEmpleadoOutput
-	FormulaPorConcepto map[int64]int64 // concepto_salarial_id -> concepto_salarial_formula_id
-	SalarioBasePeriodo decimal.Decimal // planilla_detalle_empleado.salario_base_periodo
+	FormulaPorConcepto map[int64]int64    // concepto_salarial_id -> concepto_salarial_formula_id
+	SalarioBasePeriodo decimal.Decimal    // planilla_detalle_empleado.salario_base_periodo
+	Patronal           []LineaPatronal    // planilla_detalle_patronal
+	Prestamos          []LineaPrestamo    // planilla_detalle_prestamo
+	Incapacidades      []LineaIncapacidad // planilla_detalle_incapacidad (L11)
 }
 
 type estadoCalculo struct {
@@ -216,15 +219,21 @@ type estadoCalculo struct {
 
 	salarioBase              decimal.Decimal
 	totalIng, totalDed       decimal.Decimal
+	baseCCSS                 decimal.Decimal
 	ccssObrero, ccssPatronal decimal.Decimal
 	ccssHecho                bool
 	rentaNeta                decimal.Decimal
+
+	patronal      []LineaPatronal
+	prestamos     []LineaPrestamo
+	incapacidades []LineaIncapacidad
 }
 
 func (s *estadoCalculo) agregar(c ConceptoAplicable, monto, cantidad decimal.Decimal) {
 	l := ConceptoCalculadoOutput{
 		ConceptoSalarialID:   c.ConceptoSalarialID,
 		Codigo:               c.Codigo,
+		Naturaleza:           c.Naturaleza,
 		OrdenCalculo:         c.OrdenCalculo,
 		Monto:                monto,
 		Cantidad:             cantidad,
@@ -336,7 +345,9 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 	res.ImpuestoRentaNeto = st.rentaNeta
 	res.DesglosePorConcepto = st.lineas
 
-	return &CalculoEmpleadoDetalle{ResultadoEmpleadoOutput: *res, FormulaPorConcepto: st.formulas, SalarioBasePeriodo: st.salarioBase}, nil
+	return &CalculoEmpleadoDetalle{ResultadoEmpleadoOutput: *res, FormulaPorConcepto: st.formulas, SalarioBasePeriodo: st.salarioBase,
+		Patronal: st.patronal, Prestamos: st.prestamos, Incapacidades: st.incapacidades,
+	}, nil
 }
 
 func (m *MotorEmpleado) calcularConcepto(

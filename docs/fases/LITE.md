@@ -11,7 +11,7 @@
 | **B — Orquestador** |||||| 
 | L5 | Motor → una regla por archivo (sin cambiar comportamiento) | 1 | — | L4 | Completada; tests sin cambios de expectativas |
 | L6 ⇄ | Hidratador (lecturas) | 1 + firmas | — | L5 | Completada; unitarios y contrato SQL verificados |
-| L7 ⇄ | Escritor de detalle (persistencia) | firmas | — | L5 | Pendiente |
+| L7 ⇄ | Escritor de detalle (persistencia) | firmas | — | L5 | Completada; integración verificada en MySQL |
 | L8 | Orquestador + cableado + prueba de punta a punta | 3 | — | L6, L7 | Pendiente |
 | L9 ⇄ | Devengos manuales (API) | 2 | — | L8 | Pendiente |
 | **C — Reglas (una por archivo)** |||||| 
@@ -156,3 +156,12 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - Incapacidad (`SUPUESTO A VALIDAR`, L11): días naturales de la boleta dentro del período; `DiaDesde` numerado de forma continua desde el inicio de la boleta.
 - Contrato y datos laborales se resuelven a `fecha_fin`: un cese a mitad de período da `ErrEmpleadoSinContrato` hasta L10.
 - Verificado: `go vet`, `go test ./internal/planilla/... ./internal/db/...`, `gofmt -l` limpio en archivos de L6. `TestContratoSQL` y `TestVariantesDinamicasSQL` pasan contra MySQL 8 (contenedor de desarrollo, puerto 3307).
+
+## Notas L7
+
+- Archivos: `internal/planilla/escritor_detalle.go`, `internal/db/dto/planilla_detalle.go`, tests `escritor_detalle_integration_test.go` y `fixture_calculo_integration_test.go` (fixture compartido con L8: 3 empleados con contrato, datos laborales, embargo, préstamo y horas extra).
+- Firmas nuevas: `LineaPatronal`, `LineaPrestamo`, `LineaIncapacidad`, `ResultadoPersistible`, `EscritorDetalle{Escribir, EliminarDetalle, GuardarSnapshot}` (implementa `EliminadorDetalle`), `ErrDetalleNoCuadra{EmpleadoID, Motivo}`; dto `InsertarDetalles{Empleado,Concepto,Patronal,Embargo,Incapacidad,Prestamo}`, `EliminarDetallePeriodo`, `GuardarSnapshotPeriodo`.
+- Motor (solo salida nueva, sin cambio de cálculo): `ConceptoCalculadoOutput.Naturaleza`; `CalculoEmpleadoDetalle.{Patronal,Prestamos,Incapacidades}`; `regla_ccss` emite la `LineaPatronal` del concepto de lado patronal; `regla_prestamo` emite una `LineaPrestamo` por préstamo.
+- `Escribir` replica `fn_detalle_cuadra` y los CHECK hijos en memoria antes de insertar. Los ids de `planilla_detalle_empleado` se leen de vuelta (no se asumen consecutivos). Lotes de 500 filas.
+- `planilla_detalle.go` agregado a `listaBlancaDinamicas` de `TestContratoSQL`.
+- Verificado: `TestL7*` (integración), `TestContratoSQL`, `go test ./...`.
