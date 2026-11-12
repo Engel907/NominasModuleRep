@@ -65,18 +65,21 @@ type DatosPersonalesInput struct {
 	FechaEfectiva string `json:"fecha_efectiva" binding:"required"` // fecha_inicio_vigencia
 }
 
+// salarioDerivadoPorBD: valor que se envía en salario_base_nominal (NOT NULL).
+// trg_edl_salario_derivado_bi lo reemplaza por el salario del contrato vigente;
+// si aún no hay contrato, trg_contratos_sync_salario_ai lo actualiza al crearlo.
+var salarioDerivadoPorBD = decimal.Zero
+
 // DatosLaboralesInput — TipoContratoID/ProgramaPresupuestarioID/SindicatoID.
 type DatosLaboralesInput struct {
 	PuestoID int64 `json:"puesto_id" binding:"required,gt=0"`
-	// TODO F22: salario_base_nominal es la fuente de salario que F22 (D5)
-	// unifica con contratos.salario_pactado. No tocar la lógica aquí. Se
-	// valida en el servicio (> 0, escala 2) porque `required` no detecta el
-	// cero de un decimal.Decimal.
-	SalarioBaseNominal       decimal.Decimal `json:"salario_base_nominal"`
-	TipoContratoID           int64           `json:"tipo_contrato_id" binding:"required,gt=0"`
-	ProgramaPresupuestarioID int64           `json:"programa_presupuestario_id" binding:"required,gt=0"`
-	SindicatoID              *int64          `json:"sindicato_id" binding:"omitempty,gt=0"` // opcional (afiliación sindical)
-	FechaEfectiva            string          `json:"fecha_efectiva" binding:"required"`
+	// El salario NO se captura aquí (D5): la fuente única es
+	// contratos.salario_pactado; empleado_datos_laborales.salario_base_nominal
+	// es una copia derivada que mantiene la BD (triggers de 000124).
+	TipoContratoID           int64  `json:"tipo_contrato_id" binding:"required,gt=0"`
+	ProgramaPresupuestarioID int64  `json:"programa_presupuestario_id" binding:"required,gt=0"`
+	SindicatoID              *int64 `json:"sindicato_id" binding:"omitempty,gt=0"` // opcional (afiliación sindical)
+	FechaEfectiva            string `json:"fecha_efectiva" binding:"required"`
 }
 
 // DatosBancariosInput — BancoID (FK a `bancos`); tipo_cuenta es ENUM.
@@ -199,11 +202,6 @@ func (s *empleadoService) CrearExpediente(ctx context.Context, usuarioID int64, 
 	if err != nil {
 		return nil, err
 	}
-	// TODO F22: salario_base_nominal — fuente única de salario (D5).
-	if err := validarMontoSalario("datos_laborales.salario_base_nominal", req.DatosLaborales.SalarioBaseNominal); err != nil {
-		return nil, err
-	}
-
 	var (
 		fechaEfectivaBancarios time.Time
 		numeroCuenta           string
@@ -233,8 +231,8 @@ func (s *empleadoService) CrearExpediente(ctx context.Context, usuarioID int64, 
 			return traducirErrorBD(err, "crear datos personales")
 		}
 
-		// TODO F22: aquí se escribe salario_base_nominal.
-		if _, err := q.CrearVersionDatosLaborales(ctx, empleadoID, req.DatosLaborales.PuestoID, req.DatosLaborales.SalarioBaseNominal,
+		// salario_base_nominal: lo deriva la BD del contrato vigente (D5).
+		if _, err := q.CrearVersionDatosLaborales(ctx, empleadoID, req.DatosLaborales.PuestoID, salarioDerivadoPorBD,
 			req.DatosLaborales.TipoContratoID, req.DatosLaborales.ProgramaPresupuestarioID, req.DatosLaborales.SindicatoID,
 			fechaEfectivaLaborales); err != nil {
 			return traducirErrorBD(err, "crear datos laborales")
@@ -348,11 +346,6 @@ func (s *empleadoService) ActualizarDatosLaborales(ctx context.Context, usuarioI
 	if err != nil {
 		return err
 	}
-	// TODO F22: salario_base_nominal — fuente única de salario (D5).
-	if err := validarMontoSalario("salario_base_nominal", in.SalarioBaseNominal); err != nil {
-		return err
-	}
-
 	return db.WithAuditContext(ctx, s.sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
 		if err := bloquearEmpleado(ctx, q, empleadoID); err != nil {
 			return err
@@ -372,8 +365,8 @@ func (s *empleadoService) ActualizarDatosLaborales(ctx context.Context, usuarioI
 			return fmt.Errorf("obtener datos laborales vigentes: %w", err)
 		}
 
-		// TODO F22: aquí se escribe salario_base_nominal.
-		if _, err := q.CrearVersionDatosLaborales(ctx, empleadoID, in.PuestoID, in.SalarioBaseNominal,
+		// salario_base_nominal: lo deriva la BD del contrato vigente (D5).
+		if _, err := q.CrearVersionDatosLaborales(ctx, empleadoID, in.PuestoID, salarioDerivadoPorBD,
 			in.TipoContratoID, in.ProgramaPresupuestarioID, in.SindicatoID, fechaEfectiva); err != nil {
 			return traducirErrorBD(err, "crear version datos laborales")
 		}

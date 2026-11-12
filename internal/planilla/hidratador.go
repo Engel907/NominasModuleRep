@@ -23,9 +23,9 @@ const (
 	codigoCreditoHijo    = "HIJO"
 )
 
-// PeriodoParaCalculo: datos del período que necesita la hidratación.
-// DiasPeriodoCompleto = DivisorDiasMes × FraccionMensual (lo arma L8 con los
-// parámetros ya cargados; el hidratador no conoce el divisor).
+// PeriodoParaCalculo: datos del período que necesita la hidratación. El
+// orquestador llena DivisorDiasMes (DIVISOR_DIAS_MES) y DiasPeriodoCompleto
+// (= DivisorDiasMes × FraccionMensual) con los parámetros ya cargados.
 type PeriodoParaCalculo struct {
 	ID                  int64
 	Inicio, Fin         time.Time
@@ -33,6 +33,7 @@ type PeriodoParaCalculo struct {
 	TipoPlanillaID      int64
 	FraccionMensual     decimal.Decimal
 	DiasPeriodoCompleto decimal.Decimal
+	DivisorDiasMes      int
 }
 
 // EntradaEmpleado: input del motor más los datos que el escritor de detalle
@@ -46,7 +47,7 @@ type EntradaEmpleado struct {
 // FuenteHidratacion: subconjunto de dto.Queries que usa el hidratador.
 type FuenteHidratacion interface {
 	ListarEmpleadosActivosEnRango(ctx context.Context, desde, hasta time.Time) ([]int64, error)
-	ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (dto.ContratoVigenteEnFechaRow, error)
+	ListarContratosEnRango(ctx context.Context, empleadoID int64, desde, hasta time.Time) ([]dto.ContratoEnRangoRow, error)
 	ObtenerContextoLaboral(ctx context.Context, empleadoID int64, fecha time.Time) (dto.ContextoLaboralRow, error)
 	SumarHorasExtraPeriodo(ctx context.Context, empleadoID int64, desde, hasta time.Time) ([]dto.HorasExtraPeriodoRow, error)
 	ListarIncapacidadesSolapadas(ctx context.Context, empleadoID int64, desde, hasta time.Time) ([]dto.IncapacidadSolapadaRow, error)
@@ -90,24 +91,22 @@ func (h *Hidratador) EmpleadosDelPeriodo(ctx context.Context, p PeriodoParaCalcu
 	return ids, nil
 }
 
-// Hidratar arma la entrada de un empleado. La fecha efectiva es el fin del
-// período (contrato, datos laborales, préstamos, embargos y familia se
-// resuelven a esa fecha).
+// Hidratar arma la entrada de un empleado. La fecha efectiva es el último día
+// con contrato dentro del período (fin del período, o la fecha de cese): a esa
+// fecha se resuelven contrato, datos laborales, préstamos, embargos y familia.
 func (h *Hidratador) Hidratar(ctx context.Context, p PeriodoParaCalculo, empleadoID int64) (EntradaEmpleado, error) {
-	if !p.DiasPeriodoCompleto.IsPositive() {
-		return EntradaEmpleado{}, errors.New("planilla: DiasPeriodoCompleto del período no definido para hidratar")
+	if !p.DiasPeriodoCompleto.IsPositive() || p.DivisorDiasMes <= 0 {
+		return EntradaEmpleado{}, errors.New("planilla: DiasPeriodoCompleto/DivisorDiasMes del período no definidos para hidratar")
 	}
-	fecha := p.Fin
-
-	// TODO L10: un cese o ingreso a mitad de período deja al empleado sin
-	// contrato a fecha_fin o con días parciales; L10 segmenta por vigencias.
-	contrato, err := h.f.ObtenerContratoVigenteEnFecha(ctx, empleadoID, fecha)
-	if errors.Is(err, sql.ErrNoRows) {
+	segs, err := h.segmentos(ctx, p, empleadoID)
+	if err != nil {
+		return EntradaEmpleado{}, err
+	}
+	if len(segs) == 0 {
 		return EntradaEmpleado{}, ErrEmpleadoSinContrato{EmpleadoID: empleadoID}
 	}
-	if err != nil {
-		return EntradaEmpleado{}, fmt.Errorf("planilla: empleado_id=%d, contrato: %w", empleadoID, err)
-	}
+	ultimo := segs[len(segs)-1]
+	fecha := ultimo.Fin
 
 	lab, err := h.f.ObtenerContextoLaboral(ctx, empleadoID, fecha)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -124,9 +123,8 @@ func (h *Hidratador) Hidratar(ctx context.Context, p PeriodoParaCalculo, emplead
 		FechaEfectiva:      fecha,
 		FechaInicioPeriodo: p.Inicio,
 		FechaFinPeriodo:    p.Fin,
-		// SalarioBaseNominal NO se llena (D5: la fuente es contratos.salario_pactado).
-		// TODO L10: días comerciales reales según vigencias; provisional = período completo.
-		DiasTrabajados: p.DiasPeriodoCompleto,
+		Segmentos:          segs,
+		DiasTrabajados:     decimal.NewFromInt(int64(DiasSegmentos(segs))),
 	}
 	if lab.ClasificacionPuestoID != nil {
 		in.ClasificacionPuestoID = *lab.ClasificacionPuestoID
@@ -159,9 +157,39 @@ func (h *Hidratador) Hidratar(ctx context.Context, p PeriodoParaCalculo, emplead
 
 	return EntradaEmpleado{
 		Input:                    in,
-		ContratoID:               contrato.ContratoID,
+		ContratoID:               ultimo.ContratoID,
 		ProgramaPresupuestarioID: lab.ProgramaPresupuestarioID,
 	}, nil
+}
+
+// segmentos: tramos del período con contrato. Cada versión de contrato vale
+// en la intersección de su vigencia con [fecha_inicio_contrato,
+// fecha_fin_contrato] (así un cese o un ingreso a mitad de período parten el
+// salario).
+func (h *Hidratador) segmentos(ctx context.Context, p PeriodoParaCalculo, empleadoID int64) ([]SegmentoSalario, error) {
+	filas, err := h.f.ListarContratosEnRango(ctx, empleadoID, p.Inicio, p.Fin)
+	if err != nil {
+		return nil, fmt.Errorf("planilla: empleado_id=%d, contratos del período: %w", empleadoID, err)
+	}
+	vig := make([]VigenciaContrato, 0, len(filas))
+	for _, c := range filas {
+		v := VigenciaContrato{ContratoID: c.ContratoID, Salario: c.SalarioPactado,
+			Desde: maxFecha(c.FechaInicioVigencia, c.FechaInicioContrato)}
+		switch {
+		case c.FechaFinVigencia != nil && c.FechaFinContrato != nil:
+			v.Hasta = minFecha(*c.FechaFinVigencia, *c.FechaFinContrato)
+		case c.FechaFinVigencia != nil:
+			v.Hasta = *c.FechaFinVigencia
+		case c.FechaFinContrato != nil:
+			v.Hasta = *c.FechaFinContrato
+		}
+		vig = append(vig, v)
+	}
+	segs, err := SegmentarPeriodo(p.Inicio, p.Fin, vig, p.DivisorDiasMes)
+	if err != nil {
+		return nil, fmt.Errorf("planilla: empleado_id=%d: %w", empleadoID, err)
+	}
+	return segs, nil
 }
 
 func (h *Hidratador) hidratarAsistencia(ctx context.Context, p PeriodoParaCalculo, empleadoID int64, in *CalculoEmpleadoInput) error {

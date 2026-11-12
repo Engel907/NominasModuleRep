@@ -199,7 +199,8 @@ func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, re
 	if err != nil {
 		return nil, err
 	}
-	// TODO F22: salario_pactado vs salario_base_nominal — fuente única (D5).
+	// salario_pactado es la fuente única de salario (D5); la BD copia el valor
+	// a empleado_datos_laborales.salario_base_nominal (000124).
 	if err := validarMontoSalario("salario_pactado", req.SalarioPactado); err != nil {
 		return nil, err
 	}
@@ -258,7 +259,8 @@ func (s *contratoService) ActualizarContrato(ctx context.Context, usuarioID, emp
 	if err != nil {
 		return nil, err
 	}
-	// TODO F22: salario_pactado vs salario_base_nominal — fuente única (D5).
+	// salario_pactado es la fuente única de salario (D5); la BD copia el valor
+	// a empleado_datos_laborales.salario_base_nominal (000124).
 	if err := validarMontoSalario("salario_pactado", req.SalarioPactado); err != nil {
 		return nil, err
 	}

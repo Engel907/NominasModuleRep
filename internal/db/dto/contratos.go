@@ -185,11 +185,13 @@ func (q *Queries) CrearVersionContrato(
 ) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
 INSERT INTO contratos (
-    empleado_id, puesto_id, regimen_laboral_id, tipo_contrato, salario_pactado, jornada,
+    empleado_id, puesto_id, regimen_laboral_id, tipo_contrato, tipo_contrato_id, salario_pactado, jornada,
     fecha_inicio_contrato, fecha_fin_contrato, fecha_inicio_vigencia, fecha_fin_vigencia,
     creado_por, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NOW())`,
-		empleadoID, puestoID, regimenLaboralID, tipoContrato, salarioPactado, jornada,
+) VALUES (?, ?, ?, ?,
+    (SELECT t.id FROM tipos_contrato t WHERE UPPER(t.codigo) = UPPER(?) OR UPPER(t.nombre) = UPPER(?) ORDER BY t.id LIMIT 1),
+    ?, ?, ?, ?, ?, NULL, ?, NOW())`,
+		empleadoID, puestoID, regimenLaboralID, tipoContrato, tipoContrato, tipoContrato, salarioPactado, jornada,
 		fechaInicioContrato, fechaFinContrato, fechaInicioVigencia, creadoPor)
 	if err != nil {
 		return 0, err

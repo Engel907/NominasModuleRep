@@ -43,12 +43,17 @@ type CalculoEmpleadoInput struct {
 	FechaInicioPeriodo time.Time
 	FechaFinPeriodo    time.Time
 
-	// Datos laborales vigentes del empleado al momento del cálculo.
-	SalarioBaseNominal    decimal.Decimal // empleado_datos_laborales.salario_base_nominal
-	ClasificacionPuestoID int64           // FK para resolver parametros_salario_minimo
-	RegimenCCSSID         int64           // FK para resolver parametros_base_minima_contributiva
+	// Datos laborales vigentes del empleado al momento del cálculo. El salario
+	// NO viene de aquí: sale de los contratos (D5, Segmentos).
+	ClasificacionPuestoID int64 // FK para resolver parametros_salario_minimo
+	RegimenCCSSID         int64 // FK para resolver parametros_base_minima_contributiva
 
-	// Asistencia del período.
+	// Segmentos del período con contrato y salario (L10): ingreso, cese y
+	// aumentos a mitad de período parten el salario por días comerciales.
+	Segmentos []SegmentoSalario
+
+	// Asistencia del período. DiasTrabajados = días comerciales con contrato
+	// (Σ Segmentos.Dias); L11 le descuenta la incapacidad.
 	DiasTrabajados decimal.Decimal
 	HorasExtra     []HoraExtraInput
 	Incapacidades  []IncapacidadInput

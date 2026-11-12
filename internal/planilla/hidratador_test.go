@@ -15,6 +15,7 @@ import (
 type fuenteFalsa struct {
 	empleados  []int64
 	contratos  map[int64]dto.ContratoVigenteEnFechaRow
+	rangos     map[int64][]dto.ContratoEnRangoRow // si está, reemplaza a contratos
 	laborales  map[int64]dto.ContextoLaboralRow
 	horas      map[int64][]dto.HorasExtraPeriodoRow
 	incaps     map[int64][]dto.IncapacidadSolapadaRow
@@ -28,12 +29,18 @@ type fuenteFalsa struct {
 func (f *fuenteFalsa) ListarEmpleadosActivosEnRango(context.Context, time.Time, time.Time) ([]int64, error) {
 	return f.empleados, nil
 }
-func (f *fuenteFalsa) ObtenerContratoVigenteEnFecha(_ context.Context, id int64, _ time.Time) (dto.ContratoVigenteEnFechaRow, error) {
+
+// ListarContratosEnRango: cada contrato falso es una versión abierta desde 2020.
+func (f *fuenteFalsa) ListarContratosEnRango(_ context.Context, id int64, _, _ time.Time) ([]dto.ContratoEnRangoRow, error) {
+	if r, ok := f.rangos[id]; ok {
+		return r, nil
+	}
 	c, ok := f.contratos[id]
 	if !ok {
-		return c, sql.ErrNoRows
+		return nil, nil
 	}
-	return c, nil
+	return []dto.ContratoEnRangoRow{{ContratoID: c.ContratoID, SalarioPactado: c.SalarioPactado,
+		FechaInicioVigencia: fecha("2020-01-01"), FechaInicioContrato: fecha("2020-01-01")}}, nil
 }
 func (f *fuenteFalsa) ObtenerContextoLaboral(_ context.Context, id int64, _ time.Time) (dto.ContextoLaboralRow, error) {
 	l, ok := f.laborales[id]
@@ -80,7 +87,7 @@ func periodoPrueba() PeriodoParaCalculo {
 	return PeriodoParaCalculo{
 		ID: 50, Inicio: fecha("2026-03-01"), Fin: fecha("2026-03-31"),
 		Clase: "regular", TipoPlanillaID: 1,
-		FraccionMensual: d("1"), DiasPeriodoCompleto: d("30"),
+		FraccionMensual: d("1"), DiasPeriodoCompleto: d("30"), DivisorDiasMes: 30,
 	}
 }
 
@@ -137,8 +144,8 @@ func TestHidratadorTresEmpleados(t *testing.T) {
 	if e1.ContratoID != 101 || e1.ProgramaPresupuestarioID != 11 || e1.Input.ClasificacionPuestoID != 4 {
 		t.Errorf("empleado 1: contrato/programa/clasificación = %d/%d/%d", e1.ContratoID, e1.ProgramaPresupuestarioID, e1.Input.ClasificacionPuestoID)
 	}
-	if !e1.Input.SalarioBaseNominal.IsZero() {
-		t.Error("SalarioBaseNominal no debe llenarse (D5)")
+	if len(e1.Input.Segmentos) != 1 || !e1.Input.Segmentos[0].Salario.Equal(d("800000")) || e1.Input.Segmentos[0].Dias != 30 {
+		t.Errorf("segmentos (D5: salario del contrato): %+v", e1.Input.Segmentos)
 	}
 	if !e1.Input.FechaEfectiva.Equal(p.Fin) || !e1.Input.DiasTrabajados.Equal(d("30")) {
 		t.Errorf("fecha efectiva/días = %s/%s", e1.Input.FechaEfectiva, e1.Input.DiasTrabajados)

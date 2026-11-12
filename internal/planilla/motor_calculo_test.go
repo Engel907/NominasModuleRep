@@ -49,6 +49,11 @@ func repoBase() fakeMotorRepo {
 	}
 }
 
+// mesCompleto: un segmento de 30 días comerciales con el salario del contrato falso.
+func mesCompleto() []SegmentoSalario {
+	return []SegmentoSalario{{ContratoID: 1, Salario: d("1000000"), Dias: 30}}
+}
+
 func params() ParametrosCalculo {
 	return ParametrosCalculo{
 		CargaSocial: ParametroCargaSocial{PorcentajeObrero: d("0.1083"), PorcentajePatronal: d("0.2683")},
@@ -57,7 +62,7 @@ func params() ParametrosCalculo {
 			{OrdenTramo: 2, MontoDesde: d("918000"), MontoHasta: d("1347000"), Porcentaje: d("0.10")},
 			{OrdenTramo: 3, MontoDesde: d("1347000"), Porcentaje: d("0.15"), Abierto: true},
 		},
-		HorasMensualesOrdinarias: d("240"), FraccionMensualPeriodo: d("1"), DiasPeriodoCompleto: d("30"),
+		HorasMensualesOrdinarias: d("240"), FraccionMensualPeriodo: d("1"), DiasPeriodoCompleto: d("30"), DivisorDiasMes: d("30"),
 	}
 }
 
@@ -81,7 +86,7 @@ func TestCalcularEmpleado_FlujoCompleto(t *testing.T) {
 	m := NewMotorEmpleado(repoBase())
 	in := CalculoEmpleadoInput{
 		EmpleadoID: 7, PeriodoID: 1, FechaEfectiva: time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC),
-		DiasTrabajados: d("30"), HorasExtra: []HoraExtraInput{{1, d("10")}},
+		DiasTrabajados: d("30"), Segmentos: mesCompleto(), HorasExtra: []HoraExtraInput{{1, d("10")}},
 	}
 	r, err := m.CalcularEmpleado(context.Background(), in, params())
 	if err != nil {
@@ -114,7 +119,7 @@ func TestCalcularEmpleado_HorasExtraSinConceptoAplicable(t *testing.T) {
 	repo := repoBase()
 	repo.conceptos = append([]ConceptoAplicableFila{}, repo.conceptos[:0]...)
 	repo.conceptos = append(repo.conceptos, fila(1, "SAL_BASE", "ingreso", 10, `{"tipo":"referencia_directa"}`, true, true))
-	in := CalculoEmpleadoInput{EmpleadoID: 7, FechaEfectiva: time.Now(), DiasTrabajados: d("30"), HorasExtra: []HoraExtraInput{{1, d("2")}}}
+	in := CalculoEmpleadoInput{EmpleadoID: 7, FechaEfectiva: time.Now(), DiasTrabajados: d("30"), Segmentos: mesCompleto(), HorasExtra: []HoraExtraInput{{1, d("2")}}}
 	if _, err := NewMotorEmpleado(repo).CalcularEmpleado(context.Background(), in, params()); err == nil {
 		t.Fatal("esperaba error: horas extra sin HRS_EXTRA aplicable al régimen")
 	}

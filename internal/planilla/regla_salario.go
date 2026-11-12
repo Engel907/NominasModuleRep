@@ -3,25 +3,36 @@ package planilla
 import (
 	"errors"
 	"fmt"
+
+	"github.com/shopspring/decimal"
 )
 
 // reglaSalarioBase (referencia_directa): SAL_BASE a partir de
-// contratos.salario_pactado del contrato vigente (D5), prorrateado:
+// contratos.salario_pactado (D5), por segmentos de vigencia (L10):
 //
-//	salario * FraccionMensualPeriodo * DiasTrabajados / DiasPeriodoCompleto
+//	Σ(salario del segmento × días comerciales del segmento) ÷ DivisorDiasMes
+//
+// con un solo redondeo al final. Ingreso, cese y aumentos a mitad de período
+// quedan prorrateados por sus días.
 type reglaSalarioBase struct{}
 
 func (reglaSalarioBase) Aplicar(rc *ContextoRegla) error {
 	p, in := rc.P, rc.In
-	if !p.FraccionMensualPeriodo.IsPositive() || !p.DiasPeriodoCompleto.IsPositive() {
-		return errors.New("faltan FraccionMensualPeriodo/DiasPeriodoCompleto para prorratear el salario base")
+	if !p.DivisorDiasMes.IsPositive() || !p.DiasPeriodoCompleto.IsPositive() {
+		return errors.New("faltan DivisorDiasMes/DiasPeriodoCompleto para calcular el salario base")
 	}
-	if in.DiasTrabajados.IsNegative() || in.DiasTrabajados.GreaterThan(p.DiasPeriodoCompleto) {
-		return fmt.Errorf("DiasTrabajados=%s fuera de rango [0, %s]", in.DiasTrabajados, p.DiasPeriodoCompleto)
+	if len(in.Segmentos) == 0 {
+		return errors.New("el empleado no tiene segmentos de contrato en el período")
 	}
-	monto := rc.Contrato.SalarioPactado.Mul(p.FraccionMensualPeriodo).Mul(in.DiasTrabajados).
-		DivRound(p.DiasPeriodoCompleto, 6).Round(dosDecimales)
+	dias := decimal.NewFromInt(int64(DiasSegmentos(in.Segmentos)))
+	if dias.GreaterThan(p.DiasPeriodoCompleto) {
+		return fmt.Errorf("los segmentos suman %s días comerciales, más que el período (%s)", dias, p.DiasPeriodoCompleto)
+	}
+	if in.DiasTrabajados.IsNegative() || in.DiasTrabajados.GreaterThan(dias) {
+		return fmt.Errorf("DiasTrabajados=%s fuera de rango [0, %s]", in.DiasTrabajados, dias)
+	}
+	monto := SalarioBasePeriodo(in.Segmentos, p.DivisorDiasMes)
 	rc.St.salarioBase = monto
-	rc.St.agregar(rc.Concepto, monto, in.DiasTrabajados)
+	rc.St.agregar(rc.Concepto, monto, dias)
 	return nil
 }

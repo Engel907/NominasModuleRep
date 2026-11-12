@@ -15,7 +15,7 @@
 | L8 | Orquestador + cableado + prueba de punta a punta | 3 | 000123 | L6, L7 | Completada; ciclo completo verificado en MySQL |
 | L9 ⇄ | Devengos manuales (API) | 2 | — | L8 | Completada; integración verificada en MySQL |
 | **C — Reglas (una por archivo)** |||||| 
-| L10 | Salario: fuente única, días comerciales, vigencias | 3 | 000123 | L8 | Pendiente |
+| L10 | Salario: fuente única, días comerciales, vigencias | 3 | 000124 | L8 | Completada; golden + integración en MySQL |
 | L11 ⇄ | Incapacidades | 2 | — | L10 | Pendiente |
 | L12 | Jornada y divisor de hora extra | 2 | 000124 | L10 | Pendiente |
 | L13 ⇄ | Horas extra: autorización | 3 | 000125 | L12 | Pendiente |
@@ -185,3 +185,13 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - Reglas: período bloqueado `FOR UPDATE` y en `borrador` (si no, 409); concepto activo, `captura_manual`, `ingreso` y presente en `tipo_planilla_concepto` del tipo del período (422); empleado activo (422); monto > 0, ≤ 2 decimales, cabe en DECIMAL(14,2) (400).
 - Firmas: `NewDevengosService`, `(*DevengosService).{Crear,Listar,Eliminar}`, `NuevoDevengo`, errores `ErrDevengoNoEncontrado`, `ErrConceptoNoCapturable`, `ErrEmpleadoNoActivo`, `ErrMontoDevengoInvalido`, `ErrObservacionMuyLarga`.
 - Verificado (MySQL): `TestL9DevengosManuales` (el motor consume el devengo; 409 en período calculado), `TestContratoSQL`.
+
+## Notas L10 (000124)
+
+- Migración `000124_salario_fuente_unica`: `contratos.tipo_contrato_id` (FK, backfill por código/nombre; texto deprecado), triggers `trg_edl_salario_derivado_bi` y `trg_contratos_sync_salario_ai` (`salario_base_nominal` = copia derivada de `salario_pactado`), y **auditoría de `contratos`** (no tenía). up/down/up verificado.
+- Archivos: `internal/planilla/salario_periodo{,_test}.go`, `regla_salario.go`, `hidratador.go`, `service.go`, `domain.go`, `dto/planilla_hidratacion.go` (`ListarContratosEnRango`), `dto/contratos.go` (el INSERT resuelve `tipo_contrato_id`), `services/empleado_service.go` y `contrato_service.go` (sin `TODO F22`).
+- Firmas: `DiasComerciales(desde, hasta, divisor int) int`, `VigenciaContrato`, `SegmentoSalario`, **`SegmentarPeriodo(desde, hasta, v, divisor int)`** (el plan no traía divisor: cada segmento necesita sus días), `SalarioBasePeriodo(s, divisor)`, `DiasSegmentos`; `CalculoEmpleadoInput.Segmentos`; `PeriodoParaCalculo.DivisorDiasMes`; `FuenteHidratacion` cambia `ObtenerContratoVigenteEnFecha` → `ListarContratosEnRango`. **Quitados:** `CalculoEmpleadoInput.SalarioBaseNominal`, `DatosLaboralesInput.SalarioBaseNominal` (la API ya no lo acepta) y la advertencia "salarios difieren".
+- Días comerciales (D15, `SUPUESTO A VALIDAR`): posición(fin) − posición(día previo) por mes ⇒ cualquier partición del mes suma `DIVISOR_DIAS_MES`. Un aumento el 31 aporta 0 días; ingreso el último día de febrero aporta 3.
+- Segmento = vigencia de la versión ∩ [fecha_inicio_contrato, fecha_fin_contrato]. Convención existente de `CerrarContratoVigente`: la versión vieja cierra el mismo día en que abre la nueva → ese día es de la nueva; otro solape = error.
+- Fecha efectiva del empleado = último día con contrato (fin del período o cese). `DiasTrabajados` = Σ días de segmentos (L11 descuenta incapacidad).
+- Verificado: golden (mes completo, ingreso 10, aumento 16 con y sin frontera compartida, cese 20, febrero, quincena 16–31, redondeo único), `TestL10AumentoAMitadDePeriodoYSalarioDerivado`, L7–L9 en verde, `TestContratoSQL`.

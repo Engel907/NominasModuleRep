@@ -77,3 +77,45 @@ LIMIT 1`, empleadoID, fecha, fecha).Scan(&r.ProgramaPresupuestarioID, &clasif)
 	}
 	return r, nil
 }
+
+type ContratoEnRangoRow struct {
+	ContratoID          int64
+	SalarioPactado      decimal.Decimal
+	FechaInicioVigencia time.Time
+	FechaFinVigencia    *time.Time
+	FechaInicioContrato time.Time
+	FechaFinContrato    *time.Time
+}
+
+// ListarContratosEnRango: versiones de contrato del empleado cuya vigencia se
+// solapa con [desde, hasta], por inicio de vigencia (L10: segmentación del
+// salario por ingreso, cese y aumentos).
+func (q *Queries) ListarContratosEnRango(ctx context.Context, empleadoID int64, desde, hasta time.Time) ([]ContratoEnRangoRow, error) {
+	rows, err := q.db.QueryContext(ctx, `
+SELECT id, salario_pactado, fecha_inicio_vigencia, fecha_fin_vigencia, fecha_inicio_contrato, fecha_fin_contrato
+FROM contratos
+WHERE empleado_id = ?
+  AND fecha_inicio_vigencia <= ?
+  AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
+ORDER BY fecha_inicio_vigencia ASC, id ASC`, empleadoID, hasta, desde)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ContratoEnRangoRow
+	for rows.Next() {
+		var r ContratoEnRangoRow
+		var finVig, finCon sql.NullTime
+		if err := rows.Scan(&r.ContratoID, &r.SalarioPactado, &r.FechaInicioVigencia, &finVig, &r.FechaInicioContrato, &finCon); err != nil {
+			return nil, err
+		}
+		if finVig.Valid {
+			r.FechaFinVigencia = &finVig.Time
+		}
+		if finCon.Valid {
+			r.FechaFinContrato = &finCon.Time
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

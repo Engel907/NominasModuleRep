@@ -186,16 +186,17 @@ type ParametrosCalculo struct {
 	BaseMinimaContributiva    map[int64]decimal.Decimal
 	EscalaEmbargo             []TramoEscalaEmbargo
 
-	// Divisor de días del mes para el salario diario
-	// (parametros_generales.DIVISOR_DIAS_MES). L4 solo lo carga; lo consume L10.
+	// Divisor de días del mes (parametros_generales.DIVISOR_DIAS_MES): base
+	// de los días comerciales y del salario diario (D15).
 	DivisorDiasMes decimal.Decimal
 
 	// Divisor de la hora ordinaria (horas ordinarias del mes según jornada).
 	HorasMensualesOrdinarias decimal.Decimal
 
-	// Devengo de SAL_BASE en el período:
-	//   salario * FraccionMensualPeriodo * DiasTrabajados / DiasPeriodoCompleto
-	// (ej. quincena: 0.5 y 15; mes: 1 y 30).
+	// Fracción del mes que cubre el tipo de planilla (mes 1, quincena 0.5) y
+	// días comerciales del período completo (= DivisorDiasMes × fracción).
+	// SAL_BASE se calcula por segmentos (L10); DiasPeriodoCompleto acota
+	// DiasTrabajados.
 	FraccionMensualPeriodo decimal.Decimal
 	DiasPeriodoCompleto    decimal.Decimal
 }
@@ -268,12 +269,6 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 
 	res := &ResultadoEmpleadoOutput{EmpleadoID: in.EmpleadoID, PeriodoID: in.PeriodoID}
 	st := &estadoCalculo{formulas: map[int64]int64{}, res: res, usados: map[string]bool{}}
-
-	if !in.SalarioBaseNominal.IsZero() && !in.SalarioBaseNominal.Equal(contrato.SalarioPactado) {
-		res.Advertencias = append(res.Advertencias, fmt.Sprintf(
-			"salario_base_nominal del input (%s) difiere de contratos.salario_pactado (%s); se usó el del contrato",
-			in.SalarioBaseNominal.StringFixed(dosDecimales), contrato.SalarioPactado.StringFixed(dosDecimales)))
-	}
 
 	// Devengos manuales por concepto; todos deben consumirse.
 	manuales := map[int64]decimal.Decimal{}

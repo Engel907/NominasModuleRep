@@ -94,6 +94,10 @@ func (o *Orquestador) Calcular(ctx context.Context, q *dto.Queries, periodo dto.
 		}
 		return fmt.Errorf("planilla: cargando parámetros: %w", err)
 	}
+	divisor, err := divisorEntero(params.DivisorDiasMes)
+	if err != nil {
+		return &ErrorCiclo{Codigo: ErrParametrosIncompletos.Codigo, Mensaje: err.Error(), HTTP: ErrParametrosIncompletos.HTTP}
+	}
 	fraccion := tipo.FraccionMensual.Decimal
 	params.FraccionMensualPeriodo = fraccion
 	params.DiasPeriodoCompleto = params.DivisorDiasMes.Mul(fraccion)
@@ -101,7 +105,7 @@ func (o *Orquestador) Calcular(ctx context.Context, q *dto.Queries, periodo dto.
 	pc := PeriodoParaCalculo{
 		ID: periodo.ID, Inicio: periodo.FechaInicio, Fin: periodo.FechaFin,
 		Clase: tipo.Clase, TipoPlanillaID: tipo.ID, FraccionMensual: fraccion,
-		DiasPeriodoCompleto: params.DiasPeriodoCompleto,
+		DiasPeriodoCompleto: params.DiasPeriodoCompleto, DivisorDiasMes: divisor,
 	}
 	ids, err := o.h.EmpleadosDelPeriodo(ctx, pc)
 	if err != nil {
