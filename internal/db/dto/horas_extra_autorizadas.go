@@ -133,19 +133,18 @@ type HoraExtraCandidataRow struct {
 	HorasRegistradas decimal.Decimal
 }
 
-// ListarHorasExtraCandidatas: días con horas extra registradas en
-// registro_asistencia y SIN autorización (ni pendiente, ni resuelta). Son las
-// que no llegarán a planilla si nadie las solicita.
+// ListarHorasExtraCandidatas: días con horas extra tipificadas (L14) y SIN
+// autorización (ni pendiente, ni resuelta). Son las que no llegarán a planilla
+// si nadie las solicita.
 func (q *Queries) ListarHorasExtraCandidatas(ctx context.Context, empleadoID *int64, desde, hasta time.Time) ([]HoraExtraCandidataRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
-SELECT ra.empleado_id, ra.fecha,
-       ra.horas_extra_diurnas + ra.horas_extra_nocturnas + ra.horas_extra_mixtas + ra.horas_dobles AS horas
-FROM registro_asistencia ra
-LEFT JOIN horas_extra_autorizadas a ON a.empleado_id = ra.empleado_id AND a.fecha = ra.fecha
-WHERE ra.fecha >= ? AND ra.fecha <= ? AND (? IS NULL OR ra.empleado_id = ?)
+SELECT h.empleado_id, h.fecha, SUM(h.horas) AS horas
+FROM asistencia_hora_extra_tipificada h
+LEFT JOIN horas_extra_autorizadas a ON a.empleado_id = h.empleado_id AND a.fecha = h.fecha
+WHERE h.fecha >= ? AND h.fecha <= ? AND (? IS NULL OR h.empleado_id = ?)
   AND a.id IS NULL
-  AND ra.horas_extra_diurnas + ra.horas_extra_nocturnas + ra.horas_extra_mixtas + ra.horas_dobles > 0
-ORDER BY ra.fecha ASC, ra.empleado_id ASC`, desde, hasta, empleadoID, empleadoID)
+GROUP BY h.empleado_id, h.fecha
+ORDER BY h.fecha ASC, h.empleado_id ASC`, desde, hasta, empleadoID, empleadoID)
 	if err != nil {
 		return nil, err
 	}

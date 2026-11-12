@@ -73,8 +73,8 @@ VALUES ('HE1', ?, 'HE-0001', 'Empleado HE', '2020-01-01')`, tipoIdent)
 		t.Errorf("resolver dos veces: %v", err)
 	}
 
-	exec(t, db, `INSERT INTO registro_asistencia (empleado_id, fecha, horas_ordinarias, horas_extra_diurnas) VALUES (?, '2026-03-12', 8, 3)`, emp)
-	exec(t, db, `INSERT INTO registro_asistencia (empleado_id, fecha, horas_ordinarias, horas_extra_nocturnas) VALUES (?, '2026-03-20', 8, 2)`, emp)
+	exec(t, db, `INSERT INTO asistencia_hora_extra_tipificada (empleado_id, fecha, tipo_hora_extra_id, horas) SELECT ?, '2026-03-12', id, 3 FROM tipos_hora_extra WHERE clase = 'diurna'`, emp)
+	exec(t, db, `INSERT INTO asistencia_hora_extra_tipificada (empleado_id, fecha, tipo_hora_extra_id, horas) SELECT ?, '2026-03-20', id, 2 FROM tipos_hora_extra WHERE clase = 'nocturna'`, emp)
 	cand, err := he.Candidatas(ctx, nil, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC))
 	if err != nil || len(cand) != 1 || cand[0].Fecha.Day() != 20 || !cand[0].HorasRegistradas.Equal(decimal.NewFromInt(2)) {
 		t.Fatalf("candidatas: %+v, %v", cand, err)

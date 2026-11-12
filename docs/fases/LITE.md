@@ -19,7 +19,7 @@
 | L11 ⇄ | Incapacidades | 2 | — | L10 | Completada; golden + integración en MySQL |
 | L12 | Jornada y divisor de hora extra | 2 | 000125 | L10 | Completada; unit + integración en MySQL |
 | L13 ⇄ | Horas extra: autorización | 3 | 000126 | L12 | Completada; integración en MySQL |
-| L14 ⇄ | Horas extra: tipificación | 2 | 000126 | L13 | Pendiente |
+| L14 ⇄ | Horas extra: tipificación | 2 | 000127 | L13 | Completada; golden + integración en MySQL |
 | L15 ⇄ | CCSS con base mínima + `regimen_ccss_id` | 3 | 000127 | L8 | Pendiente |
 | L16 ⇄ | Embargos 100 % desde BD | 2 | 000128 | L8 | Pendiente |
 | L17 | Tope de neto (obligatorias vs voluntarias) | 2 | 000129 | L16 | Pendiente |
@@ -220,3 +220,13 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - `dto.SumarHorasExtraPeriodo` (misma firma) suma solo días `autorizada`, con tope `horas_autorizadas` por día; si la autorización fija el tipo, solo ese tipo. `SUPUESTO A VALIDAR`: sin tipo fijado, el tope se reparte por orden de `tipo_hora_extra_id` (lo reemplaza L14).
 - Firmas: `authz.PermHorasExtraAutorizar`; dto `InsertarHoraExtraAutorizacion`, `ObtenerHoraExtraAutorizacion[ParaActualizar]`, `ResolverHoraExtraAutorizacion`, `Listar/ContarHorasExtraAutorizaciones`, `ListarHorasExtraCandidatas`, `ExisteTipoHoraExtraActivo`; `asistencia.NewHorasExtraService`, `NewHorasExtraHandler`; `Deps.HorasExtra`.
 - Verificado (MySQL): `TestL13HorasExtraSoloAutorizadas` (6/6 → 26 250; 4 de 6 → 17 500; sin autorización o pendiente → sin línea), `TestL13SegregacionAutorizacion` (403 en Go, CHECK 3819 en BD, doble resolución 409, duplicado 409, candidatas). El fixture de cálculo ahora autoriza sus 6 horas.
+
+## Notas L14 (000127)
+
+- **Hallazgo:** la API de asistencia escribe `registro_asistencia_detalle` (un solo exceso sin tipo) y la planilla leía las columnas tipificadas de `registro_asistencia`, que ninguna API llena: ninguna hora extra registrada por API llegaba a planilla. Ahora `RegistrarAsistencia` tipifica el exceso y lo guarda en `asistencia_hora_extra_tipificada` (reemplaza el día en cada upsert); `dto.SumarHorasExtraPeriodo` y `ListarHorasExtraCandidatas` leen de esa tabla (con el tope de autorización de L13). `registro_asistencia` ya no se usa para horas extra.
+- Migración `000127_horas_extra_tipificadas`: `tipos_hora_extra.clase` (ENUM único, backfill desde el código), `parametros_franja_nocturna` (**no sembrada**, inmutable, auditada), `asistencia_hora_extra_tipificada` (auditada); auditoría de `tipos_hora_extra` regenerada. up/down/up verificado.
+- Firmas: `asistencia.TipificarHorasExtra(entrada, salida, turnoIni, turnoFin, franja FranjaNocturna, esFeriado, esDescanso, jornadaMixta) ([]HoraExtraTipificada, error)`, `FranjaNocturna{Vigente; Inicio, Fin}`, `HoraExtraTipificada{Clase, Horas}`, `ClaseHE*`, errores `ErrFranjaNocturnaNoVigente`, `ErrCalendarioNoGenerado`, `ErrSinJornadaContrato` (422 en el handler); dto `ObtenerFranjaNocturnaEnFecha`, `ObtenerJornadaContratoEnFecha`, `ReemplazarHorasExtraTipificadas`.
+- `SUPUESTOS A VALIDAR` (en `tipificacion.go`): horas extra = los últimos N minutos trabajados (N = trabajado − jornada del turno; coincide con `ExcesoJornada` y llegar/salir tarde no genera extra — el plan decía "minutos fuera del turno"); feriado o descanso (`calendario_laboral_dia`: `es_feriado`, o `es_habil = 0`) → todo doble; franja nocturna → nocturna, o mixta si la jornada del contrato es `MIXTA`.
+- **Bloqueo operativo:** sin `parametros_franja_nocturna` vigente, registrar un día hábil con exceso responde 422 y no guarda nada (D8). Feriados, descansos y días sin exceso no lo necesitan. Cargar la franja con migración de datos (cierre + inserción, `fuente_legal`).
+- Verificado: golden (diurna, cruza a nocturna, mitad/mitad, feriado, descanso, turno que cruza medianoche, exceso nocturno tras medianoche, jornada mixta, llegar y salir tarde), `TestL14RegistrarAsistenciaTipificaHorasExtra` (MySQL), L13 con la nueva fuente.
+- Suite de integración completa tras L5–L14 (`go test -p 1 -tags=integration ./...`): verde salvo los 2 rojos **preexistentes** (`TestHumoAPI/crear_y_listar_empleado`, `TestEnumsEstado…/prestamos.estado` → L18). Correr con `-p 1`: en paralelo los paquetes saturan el único MySQL (`ping BD de prueba: context deadline exceeded`).

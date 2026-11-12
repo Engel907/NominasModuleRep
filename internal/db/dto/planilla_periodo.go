@@ -399,28 +399,19 @@ type HorasExtraPeriodoRow struct {
 	Horas           decimal.Decimal
 }
 
-// SumarHorasExtraPeriodo suma, por tipo de hora extra, las horas de
-// registro_asistencia en [desde, hasta] que estén AUTORIZADAS (L13): solo
-// cuentan los días con una fila de horas_extra_autorizadas en estado
-// 'autorizada', y de cada día se paga como máximo horas_autorizadas.
-//
-// Mapeo columna -> tipo por código de tipos_hora_extra (DIURNA, NOCTURNA,
-// MIXTA, DOBLE). Si la autorización fija un tipo, solo cuenta ese tipo. Si no,
-// el tope del día se reparte entre los tipos en orden de id (SUPUESTO A
-// VALIDAR: L14 tipifica las horas y reemplaza este reparto).
+// SumarHorasExtraPeriodo suma, por tipo, las horas extra TIPIFICADAS (L14,
+// asistencia_hora_extra_tipificada) en [desde, hasta] que estén AUTORIZADAS
+// (L13): solo cuentan los días con horas_extra_autorizadas en estado
+// 'autorizada', y de cada día se paga como máximo horas_autorizadas. Si la
+// autorización fija un tipo, solo cuenta ese tipo; si no, el tope se reparte
+// entre los tipos del día en orden de id (SUPUESTO A VALIDAR).
 func (q *Queries) SumarHorasExtraPeriodo(ctx context.Context, empleadoID int64, desde, hasta time.Time) ([]HorasExtraPeriodoRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
 WITH dia AS (
-    SELECT ra.fecha, t.id AS tipo,
-           CASE t.codigo
-                WHEN 'DIURNA'   THEN ra.horas_extra_diurnas
-                WHEN 'NOCTURNA' THEN ra.horas_extra_nocturnas
-                WHEN 'MIXTA'    THEN ra.horas_extra_mixtas
-                WHEN 'DOBLE'    THEN ra.horas_dobles
-                ELSE 0 END AS horas
-    FROM registro_asistencia ra
-    JOIN tipos_hora_extra t ON t.activo = 1
-    WHERE ra.empleado_id = ? AND ra.fecha >= ? AND ra.fecha <= ?
+    SELECT h.fecha, h.tipo_hora_extra_id AS tipo, h.horas
+    FROM asistencia_hora_extra_tipificada h
+    JOIN tipos_hora_extra t ON t.id = h.tipo_hora_extra_id AND t.activo = 1
+    WHERE h.empleado_id = ? AND h.fecha >= ? AND h.fecha <= ?
 ),
 autorizado AS (
     SELECT d.fecha, d.tipo, d.horas, a.horas_autorizadas AS tope

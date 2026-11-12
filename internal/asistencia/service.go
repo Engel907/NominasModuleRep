@@ -297,10 +297,9 @@ type RegistrarAsistenciaInput struct {
 // registro_asistencia_detalle es único por (empleado_id, fecha), no tiene
 // patrón es_vigente — ver excepción documentada en ADR-000 §2.
 //
-// El "exceso sobre jornada" se guarda en la columna horas_extra pero es solo
-// una hora extra CANDIDATA: queda pendiente de autorización y de tipificación
-// (diurna/nocturna/mixta), que son de F22. Aquí no se conecta a tipos de hora
-// extra ni se decide su pago.
+// El "exceso sobre jornada" se guarda en horas_extra (total) y, tipificado por
+// clase (L14), en asistencia_hora_extra_tipificada. Solo se paga si el día
+// tiene autorización (L13).
 func (s *Service) RegistrarAsistencia(ctx context.Context, in RegistrarAsistenciaInput) (dto.RegistroAsistenciaDetalle, error) {
 	if _, ok := estadosAsistencia[in.Estado]; !ok {
 		return dto.RegistroAsistenciaDetalle{}, fmt.Errorf("%w: estado %q no válido", ErrRegistroAsistenciaInvalido, in.Estado)
@@ -327,6 +326,15 @@ func (s *Service) RegistrarAsistencia(ctx context.Context, in RegistrarAsistenci
 
 	var registro dto.RegistroAsistenciaDetalle
 	err = db.WithAuditContext(ctx, s.sqlDB, in.CreadoPor, func(ctx context.Context, q *dto.Queries) error {
+		// L14: el exceso se tipifica y se guarda por clase; sin exceso, el día
+		// queda sin horas extra (re-registrar recalcula).
+		tipificadas, err := s.tipificar(ctx, q, in, turno, horas)
+		if err != nil {
+			return err
+		}
+		if err := q.ReemplazarHorasExtraTipificadas(ctx, in.EmpleadoID, in.Fecha, tipificadas); err != nil {
+			return err
+		}
 		r, err := q.UpsertRegistroAsistencia(ctx, dto.UpsertRegistroAsistenciaParams{
 			EmpleadoID:      in.EmpleadoID,
 			TurnoID:         turnoID,
@@ -334,7 +342,7 @@ func (s *Service) RegistrarAsistencia(ctx context.Context, in RegistrarAsistenci
 			HoraEntradaReal: in.HoraEntradaReal,
 			HoraSalidaReal:  in.HoraSalidaReal,
 			HorasOrdinarias: horas.Ordinarias,
-			HorasExtra:      horas.ExcesoJornada, // candidata, pendiente F22
+			HorasExtra:      horas.ExcesoJornada, // total; el desglose por clase va a asistencia_hora_extra_tipificada (L14)
 			HorasTardanza:   horas.Tardanza,
 			MinutosTardanza: int16(horas.MinutosTardanza),
 			Estado:          in.Estado,
@@ -398,4 +406,54 @@ func (s *Service) RegistrarIncapacidad(ctx context.Context, in RegistrarIncapaci
 		return nil
 	})
 	return creada, err
+}
+
+// --- Tipificación de horas extra (L14) ---------------------------------------
+
+// codigoJornadaMixta: código del catálogo `jornadas` cuyo tramo nocturno se
+// tipifica como "mixta".
+const codigoJornadaMixta = "MIXTA"
+
+var (
+	ErrCalendarioNoGenerado = errors.New("el calendario laboral no está generado para esa fecha (no se sabe si es feriado o descanso)")
+	ErrSinJornadaContrato   = errors.New("el empleado no tiene contrato vigente con una jornada del catálogo")
+)
+
+// tipificar reparte el exceso del día entre clases de hora extra. Sin exceso
+// no consulta nada y devuelve nil.
+func (s *Service) tipificar(ctx context.Context, q *dto.Queries, in RegistrarAsistenciaInput,
+	turno dto.ObtenerTurnoVigenteEmpleadoRow, horas ResultadoHoras) ([]dto.HoraExtraTipificadaInsert, error) {
+	if !horas.ExcesoJornada.IsPositive() || in.HoraEntradaReal == nil || in.HoraSalidaReal == nil {
+		return nil, nil
+	}
+	dia, err := q.ObtenerDiaCalendario(ctx, in.Fecha)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrCalendarioNoGenerado
+	}
+	if err != nil {
+		return nil, fmt.Errorf("leyendo calendario laboral: %w", err)
+	}
+	franja := FranjaNocturna{}
+	if f, err := q.ObtenerFranjaNocturnaEnFecha(ctx, in.Fecha); err == nil {
+		franja = FranjaNocturna{Vigente: true, Inicio: f.HoraInicio, Fin: f.HoraFin}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("leyendo franja nocturna: %w", err)
+	}
+	jornada, err := q.ObtenerJornadaContratoEnFecha(ctx, in.EmpleadoID, in.Fecha)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrSinJornadaContrato
+	}
+	if err != nil {
+		return nil, fmt.Errorf("leyendo jornada del contrato: %w", err)
+	}
+	tip, err := TipificarHorasExtra(*in.HoraEntradaReal, *in.HoraSalidaReal, turno.HoraEntrada, turno.HoraSalida,
+		franja, dia.EsFeriado, !dia.EsHabil && !dia.EsFeriado, jornada == codigoJornadaMixta)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dto.HoraExtraTipificadaInsert, 0, len(tip))
+	for _, t := range tip {
+		out = append(out, dto.HoraExtraTipificadaInsert{Clase: t.Clase, Horas: t.Horas})
+	}
+	return out, nil
 }

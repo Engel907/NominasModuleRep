@@ -106,7 +106,8 @@ VALUES (?, ?, ?, 12.50, 1, '2025-01-01')`, f.emp[0], tercero, tipoPension)
 INSERT INTO prestamos (empleado_id, tercero_id, monto_total, cuota_periodica, saldo_pendiente, fecha_inicio)
 VALUES (?, ?, 300000, 25000, 300000, '2025-01-01')`, f.emp[1], tercero)
 	mustExec(t, db, `
-INSERT INTO registro_asistencia (empleado_id, fecha, horas_ordinarias, horas_extra_diurnas) VALUES (?, '2026-03-10', 8, 6)`, f.emp[2])
+INSERT INTO asistencia_hora_extra_tipificada (empleado_id, fecha, tipo_hora_extra_id, horas)
+SELECT ?, '2026-03-10', id, 6 FROM tipos_hora_extra WHERE clase = 'diurna'`, f.emp[2])
 	// L13: sin autorización la hora extra no llega a planilla.
 	f.autorizacionHE = mustExec(t, db, `
 INSERT INTO horas_extra_autorizadas (empleado_id, fecha, horas_autorizadas, motivo, estado, solicitado_por, resuelto_por, fecha_resolucion)

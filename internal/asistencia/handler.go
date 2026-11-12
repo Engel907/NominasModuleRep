@@ -64,6 +64,11 @@ func responderError(c *gin.Context, err error) {
 		errors.Is(err, ErrTurnoInvalido),
 		errors.Is(err, ErrAnioFueraDeRango):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrFranjaNocturnaNoVigente),
+		errors.Is(err, ErrCalendarioNoGenerado),
+		errors.Is(err, ErrSinJornadaContrato):
+		// L14: falta un dato para tipificar las horas extra (mensaje de dominio).
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case errors.Is(err, db.ErrNilUserID):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "usuario no autenticado"})
 	default:
