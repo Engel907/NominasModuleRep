@@ -10,7 +10,7 @@
 | L4 ⇄ | Parámetros requeridos + verificador + cargador | 2 | — | L3 | Completada; tests, vet y cargador de integración verificados; falta cargar el parámetro legal para habilitar L8 |
 | **B — Orquestador** |||||| 
 | L5 | Motor → una regla por archivo (sin cambiar comportamiento) | 1 | — | L4 | Completada; tests sin cambios de expectativas |
-| L6 ⇄ | Hidratador (lecturas) | 1 + firmas | — | L5 | Pendiente |
+| L6 ⇄ | Hidratador (lecturas) | 1 + firmas | — | L5 | Completada; unitarios ok, contrato SQL pendiente con MySQL |
 | L7 ⇄ | Escritor de detalle (persistencia) | firmas | — | L5 | Pendiente |
 | L8 | Orquestador + cableado + prueba de punta a punta | 3 | — | L6, L7 | Pendiente |
 | L9 ⇄ | Devengos manuales (API) | 2 | — | L8 | Pendiente |
@@ -146,3 +146,13 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - Migración: ninguna.
 - Verificado: `go vet ./internal/planilla`, `go test ./internal/planilla/... -count=1`, `go build ./...`; archivos de L5 sin salida en `gofmt -l`. Ningún test existente cambió.
 - Pendiente: L6 (hidratador) y L7 (escritor de detalle) pueden ir en paralelo.
+
+## Notas L6
+
+- Archivos: `internal/planilla/hidratador{,_test}.go`, `internal/db/dto/planilla_hidratacion.go`.
+- Firmas nuevas: `PeriodoParaCalculo`, `EntradaEmpleado`, `FuenteHidratacion` (los 7 métodos del plan + `ListarCreditosFiscalesEnFecha` para traducir CONYUGE/HIJO a `tipo_credito_fiscal_id`), `NewHidratador`, `(*Hidratador).EmpleadosDelPeriodo`, `(*Hidratador).Hidratar`, `ErrEmpleadoSinContrato{EmpleadoID}`, `ErrEmpleadoSinDatosLaborales{EmpleadoID}`; dto `ListarDevengosManualesEmpleado`, `ObtenerContextoLaboral` → `ContextoLaboralRow{ProgramaPresupuestarioID; ClasificacionPuestoID, RegimenCCSSID *int64}` (`RegimenCCSSID` siempre nil hasta L15).
+- **Ampliación del contrato:** `PeriodoParaCalculo.DiasPeriodoCompleto` (= `DivisorDiasMes × FraccionMensual`, lo llena L8). El hidratador no conoce el divisor y no hardcodea 30; `DiasTrabajados` = ese valor de forma provisional (`TODO L10`). Sin valor → error.
+- Embargo: `porcentaje` de BD (0–100) pasa a fracción con `porcentaje.DesdePorcentaje`; sin porcentaje ni monto fijo → error. `TopeMensual` queda en cero (la tabla no lo trae; L16).
+- Incapacidad (`SUPUESTO A VALIDAR`, L11): días naturales de la boleta dentro del período; `DiaDesde` numerado de forma continua desde el inicio de la boleta.
+- Contrato y datos laborales se resuelven a `fecha_fin`: un cese a mitad de período da `ErrEmpleadoSinContrato` hasta L10.
+- Verificado: `go vet`, `go test ./internal/planilla/... ./internal/db/...`, `gofmt -l` limpio en archivos de L6. **No verificado contra MySQL** (Docker apagado): correr `go test -tags=integration ./internal/db -run TestContratoSQL` para validar las 2 consultas nuevas.
