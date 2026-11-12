@@ -14,20 +14,21 @@ import (
 // mensual de marzo 2026 con 3 empleados:
 //   - emp[0]: pensión alimentaria del 12.5 %
 //   - emp[1]: préstamo con cuota 25 000
-//   - emp[2]: 6 horas extra diurnas (incapacidad opcional con crearIncapacidad)
+//   - emp[2]: 6 horas extra diurnas autorizadas (incapacidad opcional con crearIncapacidad)
 type fixtureCalculo struct {
-	db          *sql.DB
-	preparador  int64
-	aprobador   int64
-	pagador     int64
-	tipoMensual int64
-	programaID  int64
-	emp         [3]int64
-	contrato    [3]int64
-	embargoID   int64
-	prestamoID  int64
-	incapID     int64
-	concepto    map[string]int64 // codigo -> conceptos_salariales.id
+	db             *sql.DB
+	preparador     int64
+	aprobador      int64
+	pagador        int64
+	tipoMensual    int64
+	programaID     int64
+	emp            [3]int64
+	contrato       [3]int64
+	embargoID      int64
+	prestamoID     int64
+	incapID        int64
+	autorizacionHE int64
+	concepto       map[string]int64 // codigo -> conceptos_salariales.id
 }
 
 func mustExec(t *testing.T, db *sql.DB, q string, args ...any) int64 {
@@ -106,6 +107,10 @@ INSERT INTO prestamos (empleado_id, tercero_id, monto_total, cuota_periodica, sa
 VALUES (?, ?, 300000, 25000, 300000, '2025-01-01')`, f.emp[1], tercero)
 	mustExec(t, db, `
 INSERT INTO registro_asistencia (empleado_id, fecha, horas_ordinarias, horas_extra_diurnas) VALUES (?, '2026-03-10', 8, 6)`, f.emp[2])
+	// L13: sin autorización la hora extra no llega a planilla.
+	f.autorizacionHE = mustExec(t, db, `
+INSERT INTO horas_extra_autorizadas (empleado_id, fecha, horas_autorizadas, motivo, estado, solicitado_por, resuelto_por, fecha_resolucion)
+VALUES (?, '2026-03-10', 6, 'fixture', 'autorizada', ?, ?, NOW())`, f.emp[2], f.preparador, f.aprobador)
 	return f
 }
 

@@ -18,7 +18,7 @@
 | L10 | Salario: fuente única, días comerciales, vigencias | 3 | 000124 | L8 | Completada; golden + integración en MySQL |
 | L11 ⇄ | Incapacidades | 2 | — | L10 | Completada; golden + integración en MySQL |
 | L12 | Jornada y divisor de hora extra | 2 | 000125 | L10 | Completada; unit + integración en MySQL |
-| L13 ⇄ | Horas extra: autorización | 3 | 000125 | L12 | Pendiente |
+| L13 ⇄ | Horas extra: autorización | 3 | 000126 | L12 | Completada; integración en MySQL |
 | L14 ⇄ | Horas extra: tipificación | 2 | 000126 | L13 | Pendiente |
 | L15 ⇄ | CCSS con base mínima + `regimen_ccss_id` | 3 | 000127 | L8 | Pendiente |
 | L16 ⇄ | Embargos 100 % desde BD | 2 | 000128 | L8 | Pendiente |
@@ -212,3 +212,11 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - Go: `ContratoVigente.JornadaID` (y `dto.ContratoVigenteEnFechaRow`), `dto.ListarParametrosJornadaEnFecha`, `dto.ExisteJornada`, `FuenteParametros.ListarParametrosJornadaEnFecha` (infra actualizado), `ParametrosCalculo.DivisorPorJornada map[int64]decimal.Decimal`. **Quitados:** `ParametrosCalculo.HorasMensualesOrdinarias` y `ClaveHorasMensualesOrdinarias` (la clave queda en BD, deprecada, nadie la lee). El subselect de `tipo_contrato_id` en `CrearVersionContrato` (L10) se sustituye por el trigger (un solo lugar).
 - `regla_horas_extra`: divisor = `DivisorPorJornada[contrato.JornadaID]`; contrato sin jornada del catálogo o jornada sin parámetro vigente → error (solo si hay horas extra). `contrato_service` rechaza (400) una jornada que no esté en el catálogo.
 - Verificado: `TestHorasExtraPorJornada` (diurna 1.5 → 50 000; nocturna sin divisor y contrato sin jornada → error), `TestL12JornadaYDivisor` (MySQL), L7–L11, `TestCargador*`, `TestContratoSQL`.
+
+## Notas L13 (000126)
+
+- Migración `000126_horas_extra_autorizadas`: tabla con `chk_hea_segregacion` (quien solicita ≠ quien resuelve) y `chk_hea_estado`, `UNIQUE (empleado_id, fecha)`, auditoría; permiso `horas_extra.autorizar` asignado a `RRHH` por código; sube `permisos_version` de usuarios RRHH (sus tokens se renuevan). up/down/up verificado.
+- Rutas (`internal/asistencia/horas_extra_{service,handler}.go`): `POST /horas-extra/autorizaciones` (`asistencia.crear`), `GET /horas-extra/autorizaciones?empleado_id&estado&desde&hasta` (`asistencia.ver`, paginado), `POST /horas-extra/autorizaciones/:id/autorizar|rechazar` (`horas_extra.autorizar`; rechazar exige motivo), `GET /horas-extra/candidatas?desde&hasta[&empleado_id]` (días con horas extra y sin autorización). Errores tipados `ErrorHorasExtra` (nunca `err.Error()` interno). `horas_autorizadas` como texto decimal.
+- `dto.SumarHorasExtraPeriodo` (misma firma) suma solo días `autorizada`, con tope `horas_autorizadas` por día; si la autorización fija el tipo, solo ese tipo. `SUPUESTO A VALIDAR`: sin tipo fijado, el tope se reparte por orden de `tipo_hora_extra_id` (lo reemplaza L14).
+- Firmas: `authz.PermHorasExtraAutorizar`; dto `InsertarHoraExtraAutorizacion`, `ObtenerHoraExtraAutorizacion[ParaActualizar]`, `ResolverHoraExtraAutorizacion`, `Listar/ContarHorasExtraAutorizaciones`, `ListarHorasExtraCandidatas`, `ExisteTipoHoraExtraActivo`; `asistencia.NewHorasExtraService`, `NewHorasExtraHandler`; `Deps.HorasExtra`.
+- Verificado (MySQL): `TestL13HorasExtraSoloAutorizadas` (6/6 → 26 250; 4 de 6 → 17 500; sin autorización o pendiente → sin línea), `TestL13SegregacionAutorizacion` (403 en Go, CHECK 3819 en BD, doble resolución 409, duplicado 409, candidatas). El fixture de cálculo ahora autoriza sus 6 horas.

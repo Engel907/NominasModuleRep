@@ -400,25 +400,45 @@ type HorasExtraPeriodoRow struct {
 }
 
 // SumarHorasExtraPeriodo suma, por tipo de hora extra, las horas de
-// registro_asistencia en [desde, hasta]. El mapeo columna -> tipo usa el
-// código de tipos_hora_extra (DIURNA, NOCTURNA, MIXTA, DOBLE); un tipo
-// activo sin columna en registro_asistencia simplemente suma 0.
+// registro_asistencia en [desde, hasta] que estén AUTORIZADAS (L13): solo
+// cuentan los días con una fila de horas_extra_autorizadas en estado
+// 'autorizada', y de cada día se paga como máximo horas_autorizadas.
+//
+// Mapeo columna -> tipo por código de tipos_hora_extra (DIURNA, NOCTURNA,
+// MIXTA, DOBLE). Si la autorización fija un tipo, solo cuenta ese tipo. Si no,
+// el tope del día se reparte entre los tipos en orden de id (SUPUESTO A
+// VALIDAR: L14 tipifica las horas y reemplaza este reparto).
 func (q *Queries) SumarHorasExtraPeriodo(ctx context.Context, empleadoID int64, desde, hasta time.Time) ([]HorasExtraPeriodoRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
-SELECT t.id,
-       COALESCE(SUM(CASE t.codigo
-            WHEN 'DIURNA'   THEN ra.horas_extra_diurnas
-            WHEN 'NOCTURNA' THEN ra.horas_extra_nocturnas
-            WHEN 'MIXTA'    THEN ra.horas_extra_mixtas
-            WHEN 'DOBLE'    THEN ra.horas_dobles
-            ELSE 0 END), 0) AS total
-FROM tipos_hora_extra t
-LEFT JOIN registro_asistencia ra
-  ON ra.empleado_id = ? AND ra.fecha >= ? AND ra.fecha <= ?
-WHERE t.activo = 1
-GROUP BY t.id, t.codigo
+WITH dia AS (
+    SELECT ra.fecha, t.id AS tipo,
+           CASE t.codigo
+                WHEN 'DIURNA'   THEN ra.horas_extra_diurnas
+                WHEN 'NOCTURNA' THEN ra.horas_extra_nocturnas
+                WHEN 'MIXTA'    THEN ra.horas_extra_mixtas
+                WHEN 'DOBLE'    THEN ra.horas_dobles
+                ELSE 0 END AS horas
+    FROM registro_asistencia ra
+    JOIN tipos_hora_extra t ON t.activo = 1
+    WHERE ra.empleado_id = ? AND ra.fecha >= ? AND ra.fecha <= ?
+),
+autorizado AS (
+    SELECT d.fecha, d.tipo, d.horas, a.horas_autorizadas AS tope
+    FROM dia d
+    JOIN horas_extra_autorizadas a
+      ON a.empleado_id = ? AND a.fecha = d.fecha AND a.estado = 'autorizada'
+    WHERE d.horas > 0 AND (a.tipo_hora_extra_id IS NULL OR a.tipo_hora_extra_id = d.tipo)
+),
+acumulado AS (
+    SELECT tipo, horas, tope,
+           SUM(horas) OVER (PARTITION BY fecha ORDER BY tipo) - horas AS previas
+    FROM autorizado
+)
+SELECT tipo, SUM(GREATEST(LEAST(horas, tope - previas), 0)) AS total
+FROM acumulado
+GROUP BY tipo
 HAVING total > 0
-ORDER BY t.id ASC`, empleadoID, desde, hasta)
+ORDER BY tipo ASC`, empleadoID, desde, hasta, empleadoID)
 	if err != nil {
 		return nil, err
 	}

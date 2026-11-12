@@ -52,6 +52,7 @@ const (
 	PermVacacionesVer               = "vacaciones.ver"                // ruta
 	PermVacacionesSolicitarTerceros = "vacaciones.solicitar_terceros" // reservado
 	PermVacacionesVerTerceros       = "vacaciones.ver_terceros"       // reservado
+	PermHorasExtraAutorizar         = "horas_extra.autorizar"         // ruta
 )
 
 // --- Préstamos, embargos, terceros y liquidaciones -------------------------
@@ -137,6 +138,7 @@ func Todos() []Permiso {
 		{Codigo: PermVacacionesVer, Nombre: "Ver vacaciones", Modulo: "asistencia"},
 		{Codigo: PermVacacionesSolicitarTerceros, Nombre: "Solicitar vacaciones en nombre de terceros", Modulo: "asistencia"},
 		{Codigo: PermVacacionesVerTerceros, Nombre: "Ver vacaciones de terceros", Modulo: "asistencia"},
+		{Codigo: PermHorasExtraAutorizar, Nombre: "Autorizar o rechazar horas extra", Modulo: "asistencia"},
 		{Codigo: PermPrestamosCrear, Nombre: "Crear préstamos de empleados", Modulo: "planilla"},
 		{Codigo: PermPrestamosVer, Nombre: "Consultar préstamos de empleados", Modulo: "planilla"},
 		{Codigo: PermPrestamosAbonar, Nombre: "Aplicar abonos a préstamos", Modulo: "planilla"},

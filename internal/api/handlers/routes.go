@@ -55,6 +55,7 @@ type Deps struct {
 	Auth             *auth.Servicio
 	Asistencia       *asistencia.Service
 	Vacaciones       *asistencia.VacacionesService
+	HorasExtra       *asistencia.HorasExtraService
 	Prestamos        *prestamos.Service
 	Liquidacion      *services.LiquidacionService
 	Dashboard        *services.DashboardService
@@ -124,6 +125,10 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 	// Pendiente: PUT /turnos/:id responde 501 (DTO de actualización sin
 	// definir en handler.actualizarTurno).
 	asistencia.NewHandler(deps.Asistencia).RegisterRoutes(protegido)
+	// L13: /horas-extra (autorización previa).
+	if deps.HorasExtra != nil {
+		asistencia.NewHorasExtraHandler(deps.HorasExtra).RegisterRoutes(protegido)
+	}
 
 	// --- Vacaciones ------------------------------------------------------
 	// Rutas: /vacaciones/solicitudes (POST), /vacaciones/solicitudes/:id/

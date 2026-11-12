@@ -136,6 +136,7 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 		PlanillaDevengos: planilla.NewDevengosService(sqlDB),
 
 		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
+		HorasExtra: asistencia.NewHorasExtraService(sqlDB),
 
 		// Construido, sin rutas todavía: lo reemplaza L19.
 		Acumulados: planilla.NewAcumuladosService(infra.NewAcumuladosRepository(queries)),
