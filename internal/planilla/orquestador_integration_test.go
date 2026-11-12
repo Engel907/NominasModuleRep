@@ -190,7 +190,11 @@ func TestL8EmpleadoConErrorNoPersisteNada(t *testing.T) {
 	f.sembrarSalarioMinimoInembargable(t)
 	// El empleado 1 pierde sus datos laborales: el resto está bien.
 	mustExec(t, f.db, `DELETE FROM empleado_datos_laborales WHERE empleado_id = ?`, f.emp[1])
-	f.crearIncapacidad(t) // el empleado 2 tiene incapacidad: aún no implementada (L11)
+	// El empleado 2 tiene dos boletas que se solapan (descontaría el salario dos veces).
+	f.crearIncapacidad(t)
+	mustExec(t, f.db, `
+INSERT INTO incapacidades (empleado_id, entidad_emisora, numero_boleta, fecha_inicio, fecha_fin, dias, creado_por)
+VALUES (?, 'CCSS', 'B-CALC-2', '2026-03-03', '2026-03-05', 3, ?)`, f.emp[2], f.preparador)
 	svc := f.servicio()
 	p := marzo(t, svc, f)
 
@@ -203,7 +207,7 @@ func TestL8EmpleadoConErrorNoPersisteNada(t *testing.T) {
 	for _, e := range ce.Errores {
 		codigos[e.EmpleadoID] = e.Codigo
 	}
-	if len(ce.Errores) != 2 || codigos[f.emp[1]] != "empleado_sin_datos_laborales" || codigos[f.emp[2]] != "calculo_invalido" {
+	if len(ce.Errores) != 2 || codigos[f.emp[1]] != "empleado_sin_datos_laborales" || codigos[f.emp[2]] != "datos_incompletos" {
 		t.Fatalf("errores reportados: %+v", ce.Errores)
 	}
 	for tabla, c := range f.contar(t, p.ID) {

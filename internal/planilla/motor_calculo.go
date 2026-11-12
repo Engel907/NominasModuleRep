@@ -182,7 +182,7 @@ type ParametrosCalculo struct {
 
 	SalarioMinimoInembargable decimal.Decimal
 	FactoresHoraExtra         map[int64]ParametroHoraExtra
-	SubsidiosIncapacidad      []TramoSubsidioIncapacidad
+	SubsidiosIncapacidad      []TramoSubsidio
 	BaseMinimaContributiva    map[int64]decimal.Decimal
 	EscalaEmbargo             []TramoEscalaEmbargo
 
@@ -310,6 +310,9 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 	}
 	if len(in.Embargos) > 0 && !st.usados[formulaEmbargo] {
 		return nil, fmt.Errorf("planilla: empleado_id=%d tiene embargos activos pero EMBARGO no aplica a su régimen", in.EmpleadoID)
+	}
+	if len(in.Incapacidades) > 0 && !st.usados[formulaIncapacidad] {
+		return nil, fmt.Errorf("planilla: empleado_id=%d tiene incapacidades pero SUB_INCAP no aplica a su régimen/tipo de planilla", in.EmpleadoID)
 	}
 	if len(in.Prestamos) > 0 && !st.usados[formulaPrestamo] {
 		return nil, fmt.Errorf("planilla: empleado_id=%d tiene préstamos activos pero PRESTAMO no aplica a su régimen", in.EmpleadoID)

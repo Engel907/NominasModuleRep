@@ -191,8 +191,12 @@ func TestHidratadorTresEmpleados(t *testing.T) {
 		t.Fatalf("incapacidades: %+v", e3.Input.Incapacidades)
 	}
 	inc := e3.Input.Incapacidades[0]
-	if inc.DiaDesde != 3 || !inc.DiasIncapacidad.Equal(d("4")) || inc.EntidadEmisoraID != 2 {
-		t.Errorf("incapacidad = %+v, esperado DiaDesde 3, 4 días, entidad 2", inc)
+	if inc.DiaSerieDesde != 3 || !inc.Desde.Equal(fecha("2026-03-01")) || !inc.Hasta.Equal(fecha("2026-03-04")) || inc.EntidadEmisoraID != 2 || inc.IncapacidadID != 9 {
+		t.Errorf("incapacidad = %+v, esperado día de serie 3, 1–4 mar, entidad 2", inc)
+	}
+	// 30 días con contrato − 4 incapacitados.
+	if !e3.Input.DiasTrabajados.Equal(d("26")) {
+		t.Errorf("DiasTrabajados = %s, esperado 26", e3.Input.DiasTrabajados)
 	}
 }
 

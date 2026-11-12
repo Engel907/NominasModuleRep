@@ -56,7 +56,7 @@ type CalculoEmpleadoInput struct {
 	// (Σ Segmentos.Dias); L11 le descuenta la incapacidad.
 	DiasTrabajados decimal.Decimal
 	HorasExtra     []HoraExtraInput
-	Incapacidades  []IncapacidadInput
+	Incapacidades  []IncapacidadInput // ver incapacidad.go (L11)
 
 	// Devengos adicionales que no se derivan de una fórmula automática
 	// (ej. bonos discrecionales, comisiones capturadas manualmente).
@@ -71,12 +71,6 @@ type CalculoEmpleadoInput struct {
 type HoraExtraInput struct {
 	TipoHoraExtraID int64
 	CantidadHoras   decimal.Decimal
-}
-
-type IncapacidadInput struct {
-	EntidadEmisoraID int64
-	DiaDesde         int32 // ancla la escala en parametros_subsidios_incapacidad.dia_desde
-	DiasIncapacidad  decimal.Decimal
 }
 
 // ConceptoDevengoManualInput inyecta un monto ya decidido para un
@@ -246,12 +240,6 @@ type TramoRenta struct {
 type CreditoFiscalParametro struct {
 	TipoCreditoFiscalID int64
 	MontoCredito        decimal.Decimal
-}
-
-type TramoSubsidioIncapacidad struct {
-	EntidadEmisoraID int64
-	DiaDesde         int32
-	Porcentaje       decimal.Decimal // asunción: escala expresada como % del salario, a confirmar
 }
 
 type ParametroHoraExtra struct {

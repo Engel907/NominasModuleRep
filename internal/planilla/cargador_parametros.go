@@ -334,12 +334,20 @@ func (c *CargadorParametros) cargarSubsidios(ctx context.Context, f time.Time, o
 		return faltante("no hay parametros_subsidios_incapacidad vigentes al %s", f.Format("2006-01-02"))
 	}
 	for _, r := range rows {
-		p, err := frac(r.PorcentajePatronal, fmt.Sprintf("subsidio %s día %d", r.EntidadCodigo, r.DiaDesde))
+		etiqueta := fmt.Sprintf("subsidio %s día %d", r.EntidadCodigo, r.DiaDesde)
+		pat, err := frac(r.PorcentajePatronal, etiqueta+" (patrono)")
 		if err != nil {
 			return err
 		}
-		out.SubsidiosIncapacidad = append(out.SubsidiosIncapacidad, TramoSubsidioIncapacidad{
-			EntidadEmisoraID: r.EntidadEmisoraID, DiaDesde: r.DiaDesde, Porcentaje: p})
+		ent := decimal.Zero
+		if r.PorcentajeEntidad.Valid {
+			if ent, err = frac(r.PorcentajeEntidad.Decimal, etiqueta+" (entidad)"); err != nil {
+				return err
+			}
+		}
+		out.SubsidiosIncapacidad = append(out.SubsidiosIncapacidad, TramoSubsidio{
+			EntidadEmisoraID: r.EntidadEmisoraID, DiaDesde: r.DiaDesde, DiaHasta: r.DiaHasta,
+			PctPatronal: pat, PctEntidad: ent})
 	}
 	return nil
 }

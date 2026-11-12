@@ -1,16 +1,53 @@
 package planilla
 
-import "errors"
+import (
+	"fmt"
 
-// reglaIncapacidad (incapacidad): el subsidio por incapacidad aún no se
-// calcula (lo implementa L11 con parametros_subsidios_incapacidad). Mientras
-// tanto, un empleado con incapacidades en el período produce error explícito
-// para no pagarle dos veces ni omitir el subsidio en silencio.
+	"github.com/shopspring/decimal"
+)
+
+// reglaIncapacidad (incapacidad): SUB_INCAP = parte PATRONAL del subsidio de
+// cada boleta, por tramos de parametros_subsidios_incapacidad y con el
+// salario del segmento de contrato de cada día. La parte de la CCSS/INS no
+// suma al neto: queda en planilla_detalle_incapacidad.monto_entidad_informativo.
+// Los días ya se descontaron del salario base (regla_salario).
 type reglaIncapacidad struct{}
 
 func (reglaIncapacidad) Aplicar(rc *ContextoRegla) error {
-	if len(rc.In.Incapacidades) > 0 {
-		return errors.New("subsidio de incapacidad aún no implementado en este flujo (requiere parametros_subsidios_incapacidad)")
+	st := rc.St
+	st.usados[formulaIncapacidad] = true
+	if len(rc.In.Incapacidades) == 0 {
+		return nil
+	}
+	divisor, err := divisorEntero(rc.P.DivisorDiasMes)
+	if err != nil {
+		return err
+	}
+	divisorDec := decimal.NewFromInt(int64(divisor))
+	total, dias := decimal.Zero, 0
+	for _, inc := range rc.In.Incapacidades {
+		for _, seg := range rc.In.Segmentos {
+			ini, fin, ok := interseccion(seg.Inicio, seg.Fin, inc.Desde, inc.Hasta)
+			if !ok {
+				continue
+			}
+			parte := inc
+			parte.Desde, parte.Hasta = ini, fin
+			parte.DiaSerieDesde = inc.DiaSerieDesde + int32(diasEntre(inc.Desde, ini))
+			sub, err := CalcularSubsidioIncapacidad(seg.Salario.Div(divisorDec), parte, rc.P.SubsidiosIncapacidad, divisor)
+			if err != nil {
+				return err
+			}
+			total = total.Add(sub.MontoPatronal)
+			dias += sub.Dias
+			st.incapacidades = append(st.incapacidades, sub.Desglose...)
+		}
+	}
+	if total.IsNegative() {
+		return fmt.Errorf("subsidio de incapacidad negativo (%s)", total)
+	}
+	if total.IsPositive() {
+		st.agregar(rc.Concepto, total, decimal.NewFromInt(int64(dias)))
 	}
 	return nil
 }

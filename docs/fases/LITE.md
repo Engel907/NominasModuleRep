@@ -16,7 +16,7 @@
 | L9 ⇄ | Devengos manuales (API) | 2 | — | L8 | Completada; integración verificada en MySQL |
 | **C — Reglas (una por archivo)** |||||| 
 | L10 | Salario: fuente única, días comerciales, vigencias | 3 | 000124 | L8 | Completada; golden + integración en MySQL |
-| L11 ⇄ | Incapacidades | 2 | — | L10 | Pendiente |
+| L11 ⇄ | Incapacidades | 2 | — | L10 | Completada; golden + integración en MySQL |
 | L12 | Jornada y divisor de hora extra | 2 | 000124 | L10 | Pendiente |
 | L13 ⇄ | Horas extra: autorización | 3 | 000125 | L12 | Pendiente |
 | L14 ⇄ | Horas extra: tipificación | 2 | 000126 | L13 | Pendiente |
@@ -195,3 +195,12 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - Segmento = vigencia de la versión ∩ [fecha_inicio_contrato, fecha_fin_contrato]. Convención existente de `CerrarContratoVigente`: la versión vieja cierra el mismo día en que abre la nueva → ese día es de la nueva; otro solape = error.
 - Fecha efectiva del empleado = último día con contrato (fin del período o cese). `DiasTrabajados` = Σ días de segmentos (L11 descuenta incapacidad).
 - Verificado: golden (mes completo, ingreso 10, aumento 16 con y sin frontera compartida, cese 20, febrero, quincena 16–31, redondeo único), `TestL10AumentoAMitadDePeriodoYSalarioDerivado`, L7–L9 en verde, `TestContratoSQL`.
+
+## Notas L11
+
+- Archivos: `internal/planilla/incapacidad{,_test,_integration_test}.go`, `regla_incapacidad.go`, `regla_salario.go`, `hidratador.go`, `cargador_parametros.go`, `domain.go`, `motor_calculo.go`.
+- Firmas: `IncapacidadInput{IncapacidadID, EntidadEmisoraID; Desde, Hasta; DiaSerieDesde}` (reemplaza `{EntidadEmisoraID, DiaDesde, DiasIncapacidad}`), `TramoSubsidio{…DiaHasta *int32; PctPatronal, PctEntidad}` (reemplaza `TramoSubsidioIncapacidad`; `ParametrosCalculo.SubsidiosIncapacidad` cambia de tipo), `SubsidioIncapacidad`, `CalcularSubsidioIncapacidad(salarioDiario, inc, tramos, divisor)`, `SegmentosNetos`.
+- Cargador: trae `dia_hasta` y `porcentaje_entidad` (NULL → 0), ambos convertidos a fracción con `porcentaje`.
+- `regla_salario` descuenta los días comerciales incapacitados por segmento (no se paga dos veces); `DiasTrabajados` = días con contrato − incapacidad y debe coincidir. `SUB_INCAP` = solo la parte patronal; la de CCSS/INS va a `planilla_detalle_incapacidad.monto_entidad_informativo`. Se quitó el error "aún no implementado". Boletas solapadas → error; incapacidad sin `SUB_INCAP` aplicable → error.
+- `SUPUESTOS A VALIDAR` (en `incapacidad.go`): serie por boleta (una prórroga en otra boleta reinicia la serie); cada día vale sus días comerciales; salario diario = salario del segmento ÷ divisor; cotización del subsidio según banderas de `SUB_INCAP` (hoy no afecta CCSS ni renta).
+- Verificado: golden (2 días, boleta que cruza dos períodos con serie continua, todo el período, tramo sin `dia_hasta`, sin tramo → error), motor completo, `TestL11IncapacidadEnElCalculo` (MySQL: líneas por tramo, SUB_INCAP 11 666.67, cuadre).

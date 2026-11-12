@@ -206,16 +206,23 @@ func (h *Hidratador) hidratarAsistencia(ctx context.Context, p PeriodoParaCalcul
 		return fmt.Errorf("planilla: empleado_id=%d, incapacidades: %w", empleadoID, err)
 	}
 	for _, x := range incs {
-		// SUPUESTO A VALIDAR (L11): días naturales de la boleta dentro del
-		// período; la numeración es continua desde el inicio de la boleta,
-		// aunque haya empezado en un período anterior.
-		desde, hasta := maxFecha(x.FechaInicio, p.Inicio), minFecha(x.FechaFin, p.Fin)
+		// Serie continua desde el inicio de la boleta (puede venir de un
+		// período anterior); ver supuestos en incapacidad.go.
+		desde, hasta := maxFecha(soloFecha(x.FechaInicio), p.Inicio), minFecha(soloFecha(x.FechaFin), p.Fin)
 		in.Incapacidades = append(in.Incapacidades, IncapacidadInput{
+			IncapacidadID:    x.IncapacidadID,
 			EntidadEmisoraID: x.EntidadEmisoraID,
-			DiaDesde:         int32(diasEntre(x.FechaInicio, desde)) + 1,
-			DiasIncapacidad:  decimal.NewFromInt(diasEntre(desde, hasta) + 1),
+			Desde:            desde,
+			Hasta:            hasta,
+			DiaSerieDesde:    int32(diasEntre(x.FechaInicio, desde)) + 1,
 		})
 	}
+	// Días trabajados = días con contrato menos los días incapacitados.
+	netos, err := SegmentosNetos(in.Segmentos, in.Incapacidades, p.DivisorDiasMes)
+	if err != nil {
+		return fmt.Errorf("planilla: empleado_id=%d: %w", empleadoID, err)
+	}
+	in.DiasTrabajados = decimal.NewFromInt(int64(DiasSegmentos(netos)))
 	return nil
 }
 
