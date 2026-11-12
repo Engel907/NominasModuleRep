@@ -10,7 +10,7 @@
 | L4 ⇄ | Parámetros requeridos + verificador + cargador | 2 | — | L3 | Completada; tests, vet y cargador de integración verificados; falta cargar el parámetro legal para habilitar L8 |
 | **B — Orquestador** |||||| 
 | L5 | Motor → una regla por archivo (sin cambiar comportamiento) | 1 | — | L4 | Completada; tests sin cambios de expectativas |
-| L6 ⇄ | Hidratador (lecturas) | 1 + firmas | — | L5 | Completada; unitarios ok, contrato SQL pendiente con MySQL |
+| L6 ⇄ | Hidratador (lecturas) | 1 + firmas | — | L5 | Completada; unitarios y contrato SQL verificados |
 | L7 ⇄ | Escritor de detalle (persistencia) | firmas | — | L5 | Pendiente |
 | L8 | Orquestador + cableado + prueba de punta a punta | 3 | — | L6, L7 | Pendiente |
 | L9 ⇄ | Devengos manuales (API) | 2 | — | L8 | Pendiente |
@@ -155,4 +155,4 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - Embargo: `porcentaje` de BD (0–100) pasa a fracción con `porcentaje.DesdePorcentaje`; sin porcentaje ni monto fijo → error. `TopeMensual` queda en cero (la tabla no lo trae; L16).
 - Incapacidad (`SUPUESTO A VALIDAR`, L11): días naturales de la boleta dentro del período; `DiaDesde` numerado de forma continua desde el inicio de la boleta.
 - Contrato y datos laborales se resuelven a `fecha_fin`: un cese a mitad de período da `ErrEmpleadoSinContrato` hasta L10.
-- Verificado: `go vet`, `go test ./internal/planilla/... ./internal/db/...`, `gofmt -l` limpio en archivos de L6. **No verificado contra MySQL** (Docker apagado): correr `go test -tags=integration ./internal/db -run TestContratoSQL` para validar las 2 consultas nuevas.
+- Verificado: `go vet`, `go test ./internal/planilla/... ./internal/db/...`, `gofmt -l` limpio en archivos de L6. `TestContratoSQL` y `TestVariantesDinamicasSQL` pasan contra MySQL 8 (contenedor de desarrollo, puerto 3307).
