@@ -9,7 +9,7 @@
 | L3 | Tipos de planilla (clase) + conceptos por tipo | 2 | 000122 | L1 | Implementada; migración, reversa, seeds y ENUM verificados |
 | L4 ⇄ | Parámetros requeridos + verificador + cargador | 2 | — | L3 | Completada; tests, vet y cargador de integración verificados; falta cargar el parámetro legal para habilitar L8 |
 | **B — Orquestador** |||||| 
-| L5 | Motor → una regla por archivo (sin cambiar comportamiento) | 1 | — | L4 | Pendiente |
+| L5 | Motor → una regla por archivo (sin cambiar comportamiento) | 1 | — | L4 | Completada; tests sin cambios de expectativas |
 | L6 ⇄ | Hidratador (lecturas) | 1 + firmas | — | L5 | Pendiente |
 | L7 ⇄ | Escritor de detalle (persistencia) | firmas | — | L5 | Pendiente |
 | L8 | Orquestador + cableado + prueba de punta a punta | 3 | — | L6, L7 | Pendiente |
@@ -137,3 +137,12 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - Verificación: `go vet ./cmd/jobs ./internal/parametros ./internal/planilla ./internal/config`, tests de esos paquetes, `TestMigracionesLint` e integración `Cargador` pasan. Los archivos Go de L4 quedaron formateados; `gofmt -l` aún lista archivos preexistentes de otras fases (`generales.go`, `generales_test.go`, `repositorio_sql.go`, `periodo.go`, `periodo_test.go` y `periodo_integracion_test.go`).
 - `cmd/jobs verificar-parametros` en BD temporal reportó únicamente `SALARIO_MINIMO_INEMBARGABLE` y salió con código 1, como corresponde. Esto no bloquea el cierre técnico de L4, pero sí el cálculo que requiera ese parámetro y L8 hasta cargar monto, fecha y fuente legal confirmados.
 - `git diff --check` pasa. `connectDB` duplicado en `cmd/api` y `cmd/jobs` (extraer en L27).
+
+## Notas L5
+
+- Archivos nuevos: `internal/planilla/reglas.go` (contrato `ContextoRegla`, `Regla`, `reglasPorDefecto()`, constantes `formula*`), `regla_{salario,horas_extra,incapacidad,ccss,renta,embargo,prestamo,diferida}.go`, `reglas_test.go`.
+- `motor_calculo.go` queda con tipos de acceso a datos, `evaluarConcepto`, `CalcularEmpleado`, `calcularConcepto` (captura manual/fijo + despacho a `m.reglas`) y totales. `CalcularHorasExtra` vive en `regla_horas_extra.go`; `resolverCCSS` y `ladoObrero/ladoPatronal` en `regla_ccss.go`.
+- Firmas: `MotorEmpleado` gana el campo privado `reglas map[string]Regla`; `NewMotorEmpleado(repo)` sin cambios. Tipo de fórmula desconocido sigue dando error.
+- Migración: ninguna.
+- Verificado: `go vet ./internal/planilla`, `go test ./internal/planilla/... -count=1`, `go build ./...`; archivos de L5 sin salida en `gofmt -l`. Ningún test existente cambió.
+- Pendiente: L6 (hidratador) y L7 (escritor de detalle) pueden ir en paralelo.

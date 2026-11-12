@@ -1,8 +1,8 @@
-// Fase 6d — Orquestación del cálculo de UN empleado: evaluarConcepto,
-// CalcularEmpleado y horas extra.
+// Cálculo de UN empleado: evaluarConcepto, despacho de cada concepto a su
+// Regla (reglas.go y regla_*.go) y totales.
 //
-// Este archivo NO modifica calculator.go: solo compone sus funciones puras
-// (CalcularBaseCCSS, CalcularCCSS, CalcularBaseRenta, CalcularImpuestoRenta,
+// Las reglas componen las funciones puras de calculator.go (CalcularBaseCCSS,
+// CalcularCCSS, CalcularBaseRenta, CalcularImpuestoRenta,
 // ResolverCreditosFiscales, CalcularEmbargos, CalcularPrestamos).
 //
 // Regla de diseño (igual que el resto del motor): nada de defaults
@@ -54,22 +54,7 @@ type MotorRepository interface {
 // evaluarConcepto
 // ============================================================================
 
-// Valores de expresion_formula.tipo sembrados en concepto_salarial_formula.
 const (
-	formulaReferenciaDirecta = "referencia_directa"
-	formulaHorasExtra        = "horas_extra"
-	formulaIncapacidad       = "incapacidad"
-	formulaAguinaldo         = "aguinaldo"
-	formulaSalarioEscolar    = "salario_escolar"
-	formulaVacaciones        = "vacaciones"
-	formulaCargaSocial       = "carga_social"
-	formulaRenta             = "renta"
-	formulaEmbargo           = "embargo"
-	formulaPrestamo          = "prestamo"
-
-	ladoObrero   = "obrero"
-	ladoPatronal = "patronal"
-
 	naturalezaIngreso   = "ingreso"
 	naturalezaDeduccion = "deduccion"
 
@@ -89,9 +74,14 @@ type ConceptoAplicable struct {
 }
 
 // MotorEmpleado orquesta el cálculo de un empleado.
-type MotorEmpleado struct{ repo MotorRepository }
+type MotorEmpleado struct {
+	repo   MotorRepository
+	reglas map[string]Regla // clave = expresion_formula.tipo
+}
 
-func NewMotorEmpleado(repo MotorRepository) *MotorEmpleado { return &MotorEmpleado{repo: repo} }
+func NewMotorEmpleado(repo MotorRepository) *MotorEmpleado {
+	return &MotorEmpleado{repo: repo, reglas: reglasPorDefecto()}
+}
 
 // evaluarConcepto resuelve qué conceptos aplican a un empleado en una fecha:
 //
@@ -173,49 +163,6 @@ func (m *MotorEmpleado) evaluarConcepto(ctx context.Context, empleadoID int64, f
 		return out[i].ConceptoSalarialID < out[j].ConceptoSalarialID
 	})
 	return contrato, out, nil
-}
-
-// ============================================================================
-// Horas extra
-// ============================================================================
-
-// CalcularHorasExtra: función pura. Monto =
-//
-//	salarioMensual / horasMensualesOrdinarias * Σ(horas_i * factor_i)
-//
-// factor_recargo (parametros_horas_extra) es el multiplicador total sobre la
-// hora ordinaria (1.5 = 150%); NO se hardcodea ningún factor: si falta el
-// parámetro vigente de algún tipo, error. Retorna (monto, horasTotales).
-func CalcularHorasExtra(
-	salarioMensual, horasMensualesOrdinarias decimal.Decimal,
-	horas []HoraExtraInput,
-	factores map[int64]ParametroHoraExtra,
-) (decimal.Decimal, decimal.Decimal, error) {
-	if len(horas) == 0 {
-		return decimal.Zero, decimal.Zero, nil
-	}
-	if !horasMensualesOrdinarias.IsPositive() {
-		return decimal.Zero, decimal.Zero, errors.New("planilla: horas mensuales ordinarias (divisor de la hora) no definidas para calcular horas extra")
-	}
-	if salarioMensual.IsNegative() {
-		return decimal.Zero, decimal.Zero, errors.New("planilla: salario mensual negativo al calcular horas extra")
-	}
-
-	horasPonderadas := decimal.Zero
-	horasTotales := decimal.Zero
-	for _, h := range horas {
-		if h.CantidadHoras.IsNegative() {
-			return decimal.Zero, decimal.Zero, fmt.Errorf("planilla: horas extra negativas para tipo_hora_extra_id=%d", h.TipoHoraExtraID)
-		}
-		p, ok := factores[h.TipoHoraExtraID]
-		if !ok {
-			return decimal.Zero, decimal.Zero, fmt.Errorf("planilla: no hay parametro vigente de horas extra para tipo_hora_extra_id=%d", h.TipoHoraExtraID)
-		}
-		horasPonderadas = horasPonderadas.Add(h.CantidadHoras.Mul(p.FactorRecargo))
-		horasTotales = horasTotales.Add(h.CantidadHoras)
-	}
-	monto := salarioMensual.Mul(horasPonderadas).DivRound(horasMensualesOrdinarias, 6).Round(dosDecimales)
-	return monto, horasTotales, nil
 }
 
 // ============================================================================
@@ -414,131 +361,15 @@ func (m *MotorEmpleado) calcularConcepto(
 		return nil
 	}
 
-	// tipo_calculo = formula
-	switch c.TipoFormula {
-	case formulaReferenciaDirecta: // SAL_BASE: contratos.salario_pactado
-		if !p.FraccionMensualPeriodo.IsPositive() || !p.DiasPeriodoCompleto.IsPositive() {
-			return errors.New("faltan FraccionMensualPeriodo/DiasPeriodoCompleto para prorratear el salario base")
-		}
-		if in.DiasTrabajados.IsNegative() || in.DiasTrabajados.GreaterThan(p.DiasPeriodoCompleto) {
-			return fmt.Errorf("DiasTrabajados=%s fuera de rango [0, %s]", in.DiasTrabajados, p.DiasPeriodoCompleto)
-		}
-		monto := contrato.SalarioPactado.Mul(p.FraccionMensualPeriodo).Mul(in.DiasTrabajados).
-			DivRound(p.DiasPeriodoCompleto, 6).Round(dosDecimales)
-		st.salarioBase = monto
-		st.agregar(c, monto, in.DiasTrabajados)
-
-	case formulaHorasExtra:
-		st.usados[formulaHorasExtra] = true
-		// Base: salario MENSUAL completo del contrato, no el devengo prorrateado.
-		monto, horas, err := CalcularHorasExtra(contrato.SalarioPactado, p.HorasMensualesOrdinarias, in.HorasExtra, factores)
-		if err != nil {
-			return err
-		}
-		if monto.IsPositive() {
-			st.agregar(c, monto, horas)
-		}
-
-	case formulaIncapacidad:
-		if len(in.Incapacidades) > 0 {
-			return errors.New("subsidio de incapacidad aún no implementado en este flujo (requiere parametros_subsidios_incapacidad)")
-		}
-
-	case formulaAguinaldo, formulaSalarioEscolar, formulaVacaciones:
-		// Se liquidan por su propio proceso (acumulados/liquidaciones), no en la planilla ordinaria.
-
-	case formulaCargaSocial:
-		if err := st.resolverCCSS(c, p); err != nil {
-			return err
-		}
-
-	case formulaRenta:
-		creditos, err := ResolverCreditosFiscales(in.CreditosFiscales, p.CreditosFiscales)
-		if err != nil {
-			return err
-		}
-		r, err := CalcularImpuestoRenta(CalcularBaseRenta(st.ingresos), p.TramosRenta, creditos)
-		if err != nil {
-			return err
-		}
-		st.res.ImpuestoRentaBruto = r.ImpuestoBruto
-		st.res.CreditosFiscalesAplicados = r.CreditosAplicados
-		st.rentaNeta = r.ImpuestoNeto
-		if r.CreditosAplicados.LessThan(r.CreditosSolicitados) {
-			st.res.Advertencias = append(st.res.Advertencias, fmt.Sprintf(
-				"créditos fiscales aplicados parcialmente: solicitados %s, aplicados %s",
-				r.CreditosSolicitados.StringFixed(dosDecimales), r.CreditosAplicados.StringFixed(dosDecimales)))
-		}
-		if r.ImpuestoNeto.IsPositive() {
-			st.agregar(c, r.ImpuestoNeto, decimal.Zero)
-		}
-
-	case formulaEmbargo:
-		st.usados[formulaEmbargo] = true
-		if len(in.Embargos) == 0 {
-			return nil
-		}
-		if !p.SalarioMinimoInembargable.IsPositive() {
-			return errors.New("falta SalarioMinimoInembargable vigente para calcular embargos")
-		}
-		// Salario líquido = ingresos - CCSS obrero - renta neta (lo deducido antes en el flujo).
-		ingresos := decimal.Zero
-		for _, l := range st.ingresos {
-			ingresos = ingresos.Add(l.Monto)
-		}
-		liquido := ingresos.Sub(st.ccssObrero).Sub(st.rentaNeta)
-		aplicados := CalcularEmbargos(in.Embargos, liquido, p.SalarioMinimoInembargable)
-		st.res.EmbargosAplicados = aplicados
-		suma := decimal.Zero
-		for _, e := range aplicados {
-			suma = suma.Add(e.MontoAplicado)
-			if e.SaldoPendienteInsatisfecho.IsPositive() {
-				st.res.Advertencias = append(st.res.Advertencias, fmt.Sprintf(
-					"embargo_id=%d insatisfecho por %s (límite legal / remanente)",
-					e.EmbargoID, e.SaldoPendienteInsatisfecho.StringFixed(dosDecimales)))
-			}
-		}
-		if suma.IsPositive() {
-			st.agregar(c, suma.Round(dosDecimales), decimal.Zero)
-		}
-
-	case formulaPrestamo:
-		st.usados[formulaPrestamo] = true
-		monto := CalcularPrestamos(in.Prestamos)
-		st.res.DeduccionesPrestamos = monto
-		if monto.IsPositive() {
-			st.agregar(c, monto, decimal.Zero)
-		}
-
-	default:
+	// tipo_calculo = formula: cada tipo de fórmula tiene su Regla.
+	regla, ok := m.reglas[c.TipoFormula]
+	if !ok {
 		return fmt.Errorf("tipo de fórmula desconocido %q", c.TipoFormula)
 	}
-	return nil
-}
-
-// resolverCCSS calcula obrero y patronal una sola vez sobre la base CCSS de
-// los ingresos ya calculados. La cuota obrera es una deducción del neto; la
-// patronal es informativa/contable y NO genera línea en el desglose (para
-// que la boleta no la muestre como deducción del empleado ni reste del neto).
-func (s *estadoCalculo) resolverCCSS(c ConceptoAplicable, p ParametrosCalculo) error {
-	if p.CargaSocial.PorcentajeObrero.IsZero() && p.CargaSocial.PorcentajePatronal.IsZero() {
-		return errors.New("no hay parametros_cargas_sociales vigentes (ambos porcentajes en cero)")
-	}
-	if !s.ccssHecho {
-		s.ccssObrero, s.ccssPatronal = CalcularCCSS(CalcularBaseCCSS(s.ingresos), p.CargaSocial)
-		s.ccssHecho = true
-	}
-	switch c.Lado {
-	case ladoObrero:
-		if s.ccssObrero.IsPositive() {
-			s.agregar(c, s.ccssObrero, decimal.Zero)
-		}
-	case ladoPatronal:
-		// solo informativo; ya quedó en s.ccssPatronal
-	default:
-		return fmt.Errorf("carga_social con lado desconocido %q", c.Lado)
-	}
-	return nil
+	return regla.Aplicar(&ContextoRegla{
+		Concepto: c, Contrato: contrato, In: in, P: p,
+		Manuales: manuales, Factores: factores, St: st,
+	})
 }
 
 func (c ConceptoAplicable) montoFijoRedondeado() decimal.Decimal {
