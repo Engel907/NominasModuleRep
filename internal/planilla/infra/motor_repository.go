@@ -10,7 +10,7 @@ import (
 
 type motorQueries interface {
 	ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (dto.ContratoVigenteEnFechaRow, error)
-	ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]dto.ConceptoAplicableRow, error)
+	ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]dto.ConceptoAplicableRow, error)
 	ListarParametrosHorasExtraEnFecha(ctx context.Context, fecha time.Time) ([]dto.ParametroHoraExtraRow, error)
 }
 
@@ -29,8 +29,8 @@ func (r *motorRepository) ObtenerContratoVigenteEnFecha(ctx context.Context, emp
 	return planilla.ContratoVigente(x), nil
 }
 
-func (r *motorRepository) ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]planilla.ConceptoAplicableFila, error) {
-	rows, err := r.q.ListarConceptosAplicablesEnFecha(ctx, regimenLaboralID, fecha)
+func (r *motorRepository) ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]planilla.ConceptoAplicableFila, error) {
+	rows, err := r.q.ListarConceptosAplicablesEnFecha(ctx, regimenLaboralID, tipoPlanillaID, fecha)
 	if err != nil {
 		return nil, err
 	}

@@ -53,7 +53,7 @@ VALUES (?, ?, ?, 'test-hash')`,
 	}
 
 	if _, err := db.Exec(`
-INSERT INTO tipos_planilla (codigo, nombre) VALUES ('L2_TEST', 'Integración L2')`); err != nil {
+INSERT INTO tipos_planilla (codigo, nombre, clase, fraccion_mensual) VALUES ('L2_TEST', 'Integración L2', 'regular', 1)`); err != nil {
 		t.Fatalf("crear tipo de planilla: %v", err)
 	}
 	if err := db.QueryRow(`SELECT id FROM tipos_planilla WHERE codigo = 'L2_TEST'`).Scan(&f.tipoID); err != nil {

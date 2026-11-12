@@ -19,6 +19,7 @@ import (
 	"planillas-ccdr/internal/config"
 	"planillas-ccdr/internal/contabilidad"
 	"planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/parametros"
 	"planillas-ccdr/internal/planilla"
 	"planillas-ccdr/internal/planilla/infra"
 	"planillas-ccdr/internal/prestamos"
@@ -84,6 +85,18 @@ func NewTokenMaker(authCfg config.AuthConfig) (security.TokenMaker, error) {
 func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (handlers.Deps, error) {
 	queries := dto.New(sqlDB)
 
+	// L8: cálculo del período. El orquestador corre dentro de la transacción
+	// de PeriodoService; el escritor también borra el detalle al recalcular.
+	escritor := &planilla.EscritorDetalle{}
+	orquestador := planilla.NewOrquestador(
+		planilla.NewHidratador(queries),
+		planilla.NewMotorEmpleado(infra.NewMotorRepository(queries)),
+		planilla.NewCargadorParametros(infra.NewFuenteParametros(queries),
+			parametros.NewGenerales(parametros.NewRepositorioSQL(sqlDB), cfg.Parametros.CacheTTL)),
+		escritor,
+		queries,
+	)
+
 	asistenciaSvc, err := asistencia.NewService(sqlDB, queries, asistencia.Opciones{
 		ToleranciaTardanzaMin: cfg.Asistencia.ToleranciaTardanzaMin,
 	})
@@ -119,13 +132,12 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 		Liquidacion: services.NewLiquidacionService(sqlDB, queries, infra.NewMotorRepository(queries)),
 
 		PlanillaExport:  planilla.NewExportService(infra.NewExportRepository(queries), infra.NewExportUnitOfWork(sqlDB)),
-		PlanillaPeriodo: planilla.NewPeriodoService(sqlDB, planilla.PeriodoGanchos{}),
+		PlanillaPeriodo: planilla.NewPeriodoService(sqlDB, planilla.PeriodoGanchos{Calculador: orquestador, Eliminador: escritor}),
 
 		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
 
-		// Construidos, sin rutas todavía: se usan desde F20/F24.
-		MotorEmpleado: planilla.NewMotorEmpleado(infra.NewMotorRepository(queries)),
-		Acumulados:    planilla.NewAcumuladosService(infra.NewAcumuladosRepository(queries)),
+		// Construido, sin rutas todavía: lo reemplaza L19.
+		Acumulados: planilla.NewAcumuladosService(infra.NewAcumuladosRepository(queries)),
 
 		Contabilidad: &handlers.ContabilidadDeps{
 			Servicio: contaSvc,

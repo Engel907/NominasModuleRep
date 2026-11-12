@@ -78,9 +78,10 @@ type ConceptoAplicableRow struct {
 // ListarConceptosAplicablesEnFecha resuelve, para un régimen laboral y una
 // fecha, los conceptos que aplican: (a) regimen_concepto_aplicable vigente,
 // (b) con orden de cálculo vigente (INNER: un concepto sin orden no se puede
-// calcular), (c) con su fórmula/monto vigente (LEFT: captura_manual no tiene).
+// calcular), (c) con su fórmula/monto vigente (LEFT: captura_manual no tiene),
+// (d) que el tipo de planilla calcula (tipo_planilla_concepto, D18).
 // Ordenado por orden, luego id, para que el cálculo sea determinístico.
-func (q *Queries) ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]ConceptoAplicableRow, error) {
+func (q *Queries) ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]ConceptoAplicableRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
 SELECT
     cs.id, cs.codigo, cs.naturaleza, cs.tipo_calculo, occ.orden,
@@ -91,6 +92,9 @@ FROM regimen_concepto_aplicable rca
 JOIN conceptos_salariales cs
   ON cs.id = rca.concepto_salarial_id
  AND cs.activo = 1
+JOIN tipo_planilla_concepto tpc
+  ON tpc.concepto_salarial_id = cs.id
+ AND tpc.tipo_planilla_id = ?
 JOIN orden_calculo_concepto occ
   ON occ.concepto_salarial_id = cs.id
  AND occ.fecha_inicio_vigencia <= ?
@@ -103,7 +107,7 @@ WHERE rca.regimen_laboral_id = ?
   AND rca.fecha_inicio_vigencia <= ?
   AND (rca.fecha_fin_vigencia IS NULL OR rca.fecha_fin_vigencia >= ?)
 ORDER BY occ.orden ASC, cs.id ASC`,
-		fecha, fecha, fecha, fecha, regimenLaboralID, fecha, fecha)
+		tipoPlanillaID, fecha, fecha, fecha, fecha, regimenLaboralID, fecha, fecha)
 	if err != nil {
 		return nil, err
 	}

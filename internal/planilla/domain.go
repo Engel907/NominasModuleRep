@@ -30,6 +30,10 @@ type CalculoEmpleadoInput struct {
 	EmpleadoID int64
 	PeriodoID  int64
 
+	// TipoPlanillaID filtra los conceptos que calcula el tipo de planilla
+	// (tipo_planilla_concepto, D18).
+	TipoPlanillaID int64
+
 	// FechaEfectiva es la fecha contra la cual se resuelven TODOS los
 	// parámetros vigentes (cargas sociales, tramos de renta, salario
 	// mínimo, etc.) vía el patrón fecha_inicio_vigencia/fecha_fin_vigencia
@@ -187,9 +191,12 @@ type ResultadoPeriodoOutput struct {
 	EmpleadosConError []EmpleadoErrorOutput
 }
 
+// EmpleadoErrorOutput: error de un empleado en una corrida. Codigo es estable
+// (para el cliente); Mensaje es un texto de dominio, nunca un error interno.
 type EmpleadoErrorOutput struct {
-	EmpleadoID int64
-	Error      string
+	EmpleadoID int64  `json:"empleado_id"`
+	Codigo     string `json:"codigo"`
+	Mensaje    string `json:"mensaje"`
 }
 
 // ============================================================================

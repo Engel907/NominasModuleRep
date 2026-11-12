@@ -12,7 +12,7 @@
 | L5 | Motor → una regla por archivo (sin cambiar comportamiento) | 1 | — | L4 | Completada; tests sin cambios de expectativas |
 | L6 ⇄ | Hidratador (lecturas) | 1 + firmas | — | L5 | Completada; unitarios y contrato SQL verificados |
 | L7 ⇄ | Escritor de detalle (persistencia) | firmas | — | L5 | Completada; integración verificada en MySQL |
-| L8 | Orquestador + cableado + prueba de punta a punta | 3 | — | L6, L7 | Pendiente |
+| L8 | Orquestador + cableado + prueba de punta a punta | 3 | 000123 | L6, L7 | Completada; ciclo completo verificado en MySQL |
 | L9 ⇄ | Devengos manuales (API) | 2 | — | L8 | Pendiente |
 | **C — Reglas (una por archivo)** |||||| 
 | L10 | Salario: fuente única, días comerciales, vigencias | 3 | 000123 | L8 | Pendiente |
@@ -165,3 +165,15 @@ Validación específica L0: `go test ./internal/db -run '^TestMigracionesLint$' 
 - `Escribir` replica `fn_detalle_cuadra` y los CHECK hijos en memoria antes de insertar. Los ids de `planilla_detalle_empleado` se leen de vuelta (no se asumen consecutivos). Lotes de 500 filas.
 - `planilla_detalle.go` agregado a `listaBlancaDinamicas` de `TestContratoSQL`.
 - Verificado: `TestL7*` (integración), `TestContratoSQL`, `go test ./...`.
+
+## Notas L8
+
+- **Renumeración de migraciones:** L8 necesitó una migración de datos y golang-migrate no aplica versiones menores a la última aplicada. Desde aquí: `000123` L8 · `000124` L10 · `000125` L12 · `000126` L13 · `000127` L14 · `000128` L15 · `000129` L16 · `000130` L17 · … (cada reserva del plan §3 corre +1).
+- Migración `000123_regimen_conceptos_codigo_trabajo`: **hallazgo** — `regimen_concepto_aplicable` estaba vacía y ningún empleado se podía calcular. Siembra todos los conceptos activos para `CODIGO_TRABAJO` excepto `INS_RT/BANPOP_PAT/FCL_PAT` (D6). `SUPUESTO A VALIDAR` con RR. HH.
+- Archivos: `internal/planilla/service.go` (Orquestador), `app.go` (ganchos `Calculador`/`Eliminador`), `planilla_periodo_handler.go` (`ErrCalculoConErrores` → 422 con `empleados[]`), `routes.go` (sale `Deps.MotorEmpleado`).
+- Firmas: `VersionMotor`, `NewOrquestador`, `(*Orquestador).Calcular`, `TipoPlanillaLector`, `ErrCalculoConErrores`, `ErrClaseNoSoportada`, `ErrPeriodoSinEmpleados`, `ErrParametrosIncompletos` (422 con la clave faltante). **Cambiadas:** `ListarConceptosAplicablesEnFecha(ctx, regimen, fecha)` → `(ctx, regimen, tipoPlanillaID, fecha)` (JOIN `tipo_planilla_concepto`, D18) en dto, `MotorRepository` e infra; `evaluarConcepto` recibe el tipo; `CalculoEmpleadoInput.TipoPlanillaID`; `EmpleadoErrorOutput{EmpleadoID, Error}` → `{EmpleadoID, Codigo, Mensaje}` (acumulados actualizado).
+- Errores por empleado (códigos `empleado_sin_contrato`, `empleado_sin_datos_laborales`, `datos_incompletos`, `calculo_invalido`, `detalle_no_cuadra`) se acumulan todos; errores de BD/contexto abortan con 500 sin exponer el texto (D9). Solo clase `regular` (otras → 422 hasta L19/L22).
+- Lecturas de hidratación/parámetros van por el pool (`*sql.DB`), no por la transacción: son lecturas consistentes sin bloqueo; las escrituras sí van en la transacción.
+- Verificado (MySQL): `TestL8CicloCompletoTresEmpleados` (crear→calcular→recalcular sin duplicar→aprobar→pagar, 3 usuarios, cuadre, snapshot con % en fracción, cuota patronal persistida), `TestL8EmpleadoConErrorNoPersisteNada`, `TestL8SinSalarioMinimoInembargable…`; unit `TestFallarCalculoConErrores`.
+- Suite de integración: arreglados tests rotos previos (fixture L2 sin `fraccion_mensual`, `security_integration_test` sin BD, `TestHumoAPI` sin issuer/rate-limit/body-limit y sin rol de negocio). Quedan rojos y **preexistentes**: `TestHumoAPI/crear_y_listar_empleado` (cuerpo de alta de empleado desactualizado) y `TestEnumsEstado…/prestamos.estado` (`pagado`, lo resuelve L18).
+- Sigue faltando cargar `SALARIO_MINIMO_INEMBARGABLE` real: sin él, calcular responde 422 `parametros_incompletos`.

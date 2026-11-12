@@ -46,7 +46,7 @@ type ConceptoAplicableFila struct {
 // MotorRepository: lecturas de referencia del orquestador. Sin escrituras.
 type MotorRepository interface {
 	ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (ContratoVigente, error)
-	ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID int64, fecha time.Time) ([]ConceptoAplicableFila, error)
+	ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]ConceptoAplicableFila, error)
 	ListarParametrosHorasExtraEnFecha(ctx context.Context, fecha time.Time) ([]ParametroHoraExtra, error)
 }
 
@@ -87,25 +87,26 @@ func NewMotorEmpleado(repo MotorRepository) *MotorEmpleado {
 //
 //	(a) vigencia a `fecha` de regla de aplicabilidad, orden y fórmula;
 //	(b) el concepto está en el catálogo activo y tiene orden de cálculo;
-//	(c) aplica al régimen laboral del contrato vigente a `fecha`.
+//	(c) aplica al régimen laboral del contrato vigente a `fecha`;
+//	(d) lo calcula el tipo de planilla (tipo_planilla_concepto, D18).
 //
 // Devuelve también el contrato (el salario base SAL_BASE sale de
 // contratos.salario_pactado, ver seed de concepto_salarial_formula).
 // Resultado ordenado por OrdenCalculo (luego ConceptoSalarialID).
-func (m *MotorEmpleado) evaluarConcepto(ctx context.Context, empleadoID int64, fecha time.Time) (ContratoVigente, []ConceptoAplicable, error) {
+func (m *MotorEmpleado) evaluarConcepto(ctx context.Context, empleadoID, tipoPlanillaID int64, fecha time.Time) (ContratoVigente, []ConceptoAplicable, error) {
 	contrato, err := m.repo.ObtenerContratoVigenteEnFecha(ctx, empleadoID, fecha)
 	if err != nil {
 		return ContratoVigente{}, nil, fmt.Errorf("planilla: empleado_id=%d sin contrato vigente al %s (no se asume régimen): %w",
 			empleadoID, fecha.Format("2006-01-02"), err)
 	}
 
-	filas, err := m.repo.ListarConceptosAplicablesEnFecha(ctx, contrato.RegimenLaboralID, fecha)
+	filas, err := m.repo.ListarConceptosAplicablesEnFecha(ctx, contrato.RegimenLaboralID, tipoPlanillaID, fecha)
 	if err != nil {
 		return ContratoVigente{}, nil, fmt.Errorf("planilla: error resolviendo conceptos aplicables (regimen_laboral_id=%d): %w", contrato.RegimenLaboralID, err)
 	}
 	if len(filas) == 0 {
-		return ContratoVigente{}, nil, fmt.Errorf("planilla: el régimen laboral id=%d no tiene conceptos aplicables vigentes al %s (¿falta regimen_concepto_aplicable u orden_calculo_concepto?)",
-			contrato.RegimenLaboralID, fecha.Format("2006-01-02"))
+		return ContratoVigente{}, nil, fmt.Errorf("planilla: el régimen laboral id=%d no tiene conceptos aplicables vigentes al %s para el tipo de planilla id=%d (¿falta regimen_concepto_aplicable, orden_calculo_concepto o tipo_planilla_concepto?)",
+			contrato.RegimenLaboralID, fecha.Format("2006-01-02"), tipoPlanillaID)
 	}
 
 	vistos := make(map[int64]bool, len(filas))
@@ -260,7 +261,7 @@ func (s *estadoCalculo) agregar(c ConceptoAplicable, monto, cantidad decimal.Dec
 // los ingresos ya calculados en el flujo, así que el orden sembrado
 // (ingresos < CCSS_OBR < IMP_RENTA < EMBARGO < PRESTAMO) es contractual.
 func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleadoInput, p ParametrosCalculo) (*CalculoEmpleadoDetalle, error) {
-	contrato, conceptos, err := m.evaluarConcepto(ctx, in.EmpleadoID, in.FechaEfectiva)
+	contrato, conceptos, err := m.evaluarConcepto(ctx, in.EmpleadoID, in.TipoPlanillaID, in.FechaEfectiva)
 	if err != nil {
 		return nil, err
 	}

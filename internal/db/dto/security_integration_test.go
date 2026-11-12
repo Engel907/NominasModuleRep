@@ -1,38 +1,21 @@
 package dto_test
 
-// Prueba de integración del contador atómico (F14 / S5). Se omite salvo que
-// TEST_DATABASE_URL apunte a una BD MySQL con todas las migraciones aplicadas
-// (incluida la 000114), p. ej.:
-//
-//	TEST_DATABASE_URL='user:pass@tcp(127.0.0.1:3306)/planillas_test?parseTime=true&loc=UTC&charset=utf8mb4'
-//
-// Crea un usuario propio y lo borra al terminar. Supuesto: el constructor de
-// *Queries es dto.New(db) (convención sqlc); ajustar si el proyecto usa otro.
+// Prueba de integración del contador atómico (F14 / S5) sobre una BD efímera
+// de testutil.NuevaBD (se omite sin TEST_DATABASE_URL). Crea un usuario propio.
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
-
 	"planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/testutil"
 )
 
 func TestRegistrarIntentoFallidoAtomico_DosGoroutines(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL no definida: se omite la prueba de integración")
-	}
-	sqlDB, err := sql.Open("mysql", url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqlDB.Close()
+	sqlDB := testutil.NuevaBD(t)
 	sqlDB.SetMaxOpenConns(8)
 
 	ctx := context.Background()
@@ -89,15 +72,7 @@ VALUES (?, 'Prueba contador atómico', ?, 'no-es-un-hash', 1)`,
 // umbral N, el intento N-1 no bloquea y el N sí (ver el comentario sobre el
 // orden de los SET en RegistrarIntentoFallidoAtomico).
 func TestRegistrarIntentoFallidoAtomico_BloqueaExactamenteEnElUmbral(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL no definida: se omite la prueba de integración")
-	}
-	sqlDB, err := sql.Open("mysql", url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqlDB.Close()
+	sqlDB := testutil.NuevaBD(t)
 
 	ctx := context.Background()
 	sufijo := time.Now().UnixNano()

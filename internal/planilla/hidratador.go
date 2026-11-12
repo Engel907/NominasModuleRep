@@ -120,6 +120,7 @@ func (h *Hidratador) Hidratar(ctx context.Context, p PeriodoParaCalculo, emplead
 	in := CalculoEmpleadoInput{
 		EmpleadoID:         empleadoID,
 		PeriodoID:          p.ID,
+		TipoPlanillaID:     p.TipoPlanillaID,
 		FechaEfectiva:      fecha,
 		FechaInicioPeriodo: p.Inicio,
 		FechaFinPeriodo:    p.Fin,

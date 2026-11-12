@@ -73,6 +73,15 @@ func aRespuesta(p dto.PeriodoCicloRow) periodoResponse {
 // fallar escribe los errores de dominio del ciclo; el resto se delega al
 // ErrorHandler global (c.Error).
 func fallar(c *gin.Context, err error) {
+	var conErrores *planilla.ErrCalculoConErrores
+	if errors.As(err, &conErrores) {
+		c.AbortWithStatusJSON(http.StatusUnprocessableEntity, gin.H{"error": gin.H{
+			"codigo":    "calculo_con_errores",
+			"mensaje":   "no se pudo calcular el período: hay empleados con errores y no se guardó nada",
+			"empleados": conErrores.Errores,
+		}})
+		return
+	}
 	var ec *planilla.ErrorCiclo
 	if errors.As(err, &ec) {
 		c.AbortWithStatusJSON(ec.HTTP, gin.H{"error": gin.H{"codigo": ec.Codigo, "mensaje": ec.Mensaje}})

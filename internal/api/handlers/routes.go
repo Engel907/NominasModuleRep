@@ -62,10 +62,8 @@ type Deps struct {
 	PlanillaPeriodo *planilla.PeriodoService
 	Contabilidad    *ContabilidadDeps
 
-	// MotorEmpleado y Acumulados están construidos pero aún sin rutas:
-	// se usan desde F20/F24.
-	MotorEmpleado *planilla.MotorEmpleado
-	Acumulados    *planilla.AcumuladosService
+	// Acumulados está construido pero aún sin rutas: lo reemplaza L19.
+	Acumulados *planilla.AcumuladosService
 	// F16 (S8): rate limiting. app.New los arma desde la config. Si un test arma
 	// Deps a mano y los deja nil, simplemente no se limita (en producción
 	// siempre los provee app.New).

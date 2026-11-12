@@ -150,12 +150,12 @@ func (s *AcumuladosService) EjecutarAguinaldo(ctx context.Context, anio int32, f
 		}
 		monto, err := CalcularAguinaldo(b.Total)
 		if err != nil {
-			res.Errores = append(res.Errores, EmpleadoErrorOutput{emp, err.Error()})
+			res.Errores = append(res.Errores, EmpleadoErrorOutput{EmpleadoID: emp, Codigo: "error_calculo", Mensaje: err.Error()})
 			continue
 		}
 		reg := RegistroAcumulado{EmpleadoID: emp, Anio: anio, PeriodoDesde: desde, PeriodoHasta: hasta, TotalBase: b.Total, Monto: monto, ProcesadoPor: usuarioID}
 		if err := s.repo.GuardarAguinaldo(ctx, reg); err != nil {
-			res.Errores = append(res.Errores, EmpleadoErrorOutput{emp, "al guardar: " + err.Error()})
+			res.Errores = append(res.Errores, EmpleadoErrorOutput{EmpleadoID: emp, Codigo: "error_guardado", Mensaje: "al guardar: " + err.Error()})
 			continue
 		}
 		res.Procesados = append(res.Procesados, reg)
@@ -217,12 +217,12 @@ func (s *AcumuladosService) EjecutarSalarioEscolar(ctx context.Context, anio int
 		}
 		monto, err := CalcularSalarioEscolar(b.Total, pct)
 		if err != nil {
-			res.Errores = append(res.Errores, EmpleadoErrorOutput{emp, err.Error()})
+			res.Errores = append(res.Errores, EmpleadoErrorOutput{EmpleadoID: emp, Codigo: "error_calculo", Mensaje: err.Error()})
 			continue
 		}
 		reg := RegistroAcumulado{EmpleadoID: emp, Anio: anio, PeriodoDesde: desde, PeriodoHasta: hasta, TotalBase: b.Total, Monto: monto, Porcentaje: pct, ProcesadoPor: usuarioID}
 		if err := s.repo.GuardarSalarioEscolar(ctx, reg); err != nil {
-			res.Errores = append(res.Errores, EmpleadoErrorOutput{emp, "al guardar: " + err.Error()})
+			res.Errores = append(res.Errores, EmpleadoErrorOutput{EmpleadoID: emp, Codigo: "error_guardado", Mensaje: "al guardar: " + err.Error()})
 			continue
 		}
 		res.Procesados = append(res.Procesados, reg)

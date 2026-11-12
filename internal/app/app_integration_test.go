@@ -119,9 +119,13 @@ func TestHumoAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{
-		App: config.AppConfig{Env: "test"},
+		App:       config.AppConfig{Env: "test"},
+		Server:    config.ServerConfig{MaxBodyBytes: 1 << 20},
+		RateLimit: config.RateLimitConfig{AuthPorMin: 1000, AuthBurst: 1000, UsuarioPorMin: 1000, UsuarioBurst: 1000},
 		Auth: config.AuthConfig{
 			PasetoLocalKeyHex:          strings.Repeat("ab", 32),
+			Issuer:                     "planillas-ccdr-test",
+			Audience:                   "planillas-ccdr-test",
 			AccessTokenDuration:        20 * time.Minute,
 			RefreshTokenDuration:       168 * time.Hour,
 			PasswordResetTokenDuration: 30 * time.Minute,
@@ -164,6 +168,13 @@ func TestHumoAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE usuarios SET requiere_cambio_password = 0 WHERE nombre_usuario = ?", usuario); err != nil {
+		t.Fatal(err)
+	}
+	// ADMINISTRADOR_SISTEMA no tiene permisos de negocio (segregación, F12/F17):
+	// la prueba de humo opera empleados y organización con el rol RRHH.
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO usuario_roles (usuario_id, rol_id, fecha_inicio_vigencia)
+SELECT u.id, r.id, CURRENT_DATE FROM usuarios u JOIN roles r ON r.codigo = 'RRHH' WHERE u.nombre_usuario = ?`, usuario); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

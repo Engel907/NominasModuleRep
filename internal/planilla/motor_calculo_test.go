@@ -17,7 +17,7 @@ type fakeMotorRepo struct {
 func (f fakeMotorRepo) ObtenerContratoVigenteEnFecha(context.Context, int64, time.Time) (ContratoVigente, error) {
 	return f.contrato, nil
 }
-func (f fakeMotorRepo) ListarConceptosAplicablesEnFecha(context.Context, int64, time.Time) ([]ConceptoAplicableFila, error) {
+func (f fakeMotorRepo) ListarConceptosAplicablesEnFecha(context.Context, int64, int64, time.Time) ([]ConceptoAplicableFila, error) {
 	return f.conceptos, nil
 }
 func (f fakeMotorRepo) ListarParametrosHorasExtraEnFecha(context.Context, time.Time) ([]ParametroHoraExtra, error) {
@@ -123,7 +123,7 @@ func TestCalcularEmpleado_HorasExtraSinConceptoAplicable(t *testing.T) {
 func TestEvaluarConcepto_SinConceptos(t *testing.T) {
 	repo := repoBase()
 	repo.conceptos = nil
-	if _, _, err := NewMotorEmpleado(repo).evaluarConcepto(context.Background(), 7, time.Now()); err == nil {
+	if _, _, err := NewMotorEmpleado(repo).evaluarConcepto(context.Background(), 7, 1, time.Now()); err == nil {
 		t.Fatal("esperaba error por régimen sin conceptos")
 	}
 }
