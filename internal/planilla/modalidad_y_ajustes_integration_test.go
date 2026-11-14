@@ -60,11 +60,11 @@ func TestModalidadesDeSalarioYAjustePorEmpleado(t *testing.T) {
 	mustExec(t, f.db, `UPDATE contratos SET modalidad_salario = 'diario', salario_pactado = 30000 WHERE id = ?`, f.contrato[1])
 	mustExec(t, f.db, `UPDATE contratos SET modalidad_salario = 'por_hora', salario_pactado = 4000 WHERE id = ?`, f.contrato[2])
 	mustExec(t, f.db, `
-UPDATE parametros_jornada SET fecha_fin_vigencia = '2025-12-31'
+UPDATE parametros_jornada SET fecha_fin_vigencia = '2026-02-28'
 WHERE jornada_id = (SELECT id FROM jornadas WHERE codigo = 'DIURNA') AND fecha_fin_vigencia IS NULL`)
 	mustExec(t, f.db, `
 INSERT INTO parametros_jornada (jornada_id, horas_diarias_ordinarias, divisor_horas_mensuales, fuente_legal, fecha_inicio_vigencia, creado_por)
-SELECT id, 8, 240, 'Código de Trabajo, art. 136', '2026-01-01', 1 FROM jornadas WHERE codigo = 'DIURNA'`)
+SELECT id, 8, 240, 'Código de Trabajo, art. 136', '2026-03-01', 1 FROM jornadas WHERE codigo = 'DIURNA'`)
 	f.asistir(t, f.emp[2], "8", "2026-03-02", "2026-03-03")
 	f.asistir(t, f.emp[2], "4", "2026-03-04")
 
