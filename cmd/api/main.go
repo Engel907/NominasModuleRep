@@ -1,3 +1,4 @@
+// Command api levanta el servidor HTTP de la API de planillas.
 package main
 
 import (
@@ -16,11 +17,11 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/app"
 	"planillas-ccdr/internal/config"
+	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/parametros"
 )
 
 func main() {
-	// Logger de arranque (antes de conocer LOG_LEVEL): JSON a stdout.
 	slog.SetDefault(middleware.NuevoLogger(os.Stdout, slog.LevelInfo))
 
 	cfg, err := config.LoadConfig()
@@ -28,11 +29,6 @@ func main() {
 		fatal("config", err)
 	}
 
-	// F16 (S16): logger definitivo. SetDefault también redirige el paquete
-	// estándar "log": cualquier log.Printf que quede en el código sale por
-	// slog (JSON) en vez de texto plano; conviene migrarlos igualmente
-	// (grep -rn 'log\.\(Printf\|Println\|Fatalf\)' internal) para que lleven
-	// atributos y request_id.
 	slog.SetDefault(middleware.NuevoLogger(os.Stdout, cfg.App.SlogLevel()))
 
 	if cfg.App.IsProduction() && cfg.Database.TLSMode == "required" {
@@ -49,14 +45,9 @@ func main() {
 		}
 	}()
 
-	// F18A: servicio de parámetros generales (caché con TTL de PARAMETROS_CACHE_TTL).
-	// F18B lo inyectará en app.New para que el cargador lo use; hasta entonces
-	// nadie lo consume, de ahí el "_ =".
 	generales := parametros.NewGenerales(parametros.NewRepositorioSQL(sqlDB), cfg.Parametros.CacheTTL)
 	_ = generales
 
-	// Falla rápido en el arranque: una clave PASETO mal configurada o un
-	// servicio mal armado son errores de despliegue, no del primer login.
 	tokenMaker, err := app.NewTokenMaker(cfg.Auth)
 	if err != nil {
 		fatal("security", err)
@@ -71,13 +62,13 @@ func main() {
 		Addr:              ":" + cfg.Server.Port,
 		Handler:           router,
 		ReadTimeout:       cfg.Server.ReadTimeout,
-		ReadHeaderTimeout: cfg.Server.ReadTimeout, // F16: Slowloris sobre las cabeceras
+		ReadHeaderTimeout: cfg.Server.ReadTimeout,
 		WriteTimeout:      cfg.Server.WriteTimeout,
 		IdleTimeout:       cfg.Server.IdleTimeout,
 	}
 
 	go func() {
-		slog.Info("planillas-ccdr escuchando",
+		slog.Info("API de planillas escuchando",
 			slog.String("addr", srv.Addr),
 			slog.String("env", cfg.App.Env),
 			slog.String("db_tls", cfg.Database.TLSMode),
@@ -100,31 +91,8 @@ func fatal(contexto string, err error) {
 // PingContext acotado para no colgar el arranque si la BD no responde. Si
 // DB_TLS_MODE no es disabled, registra primero la config TLS en el driver
 // (el DSN trae tls=<nombre>).
-func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) {
-	if err := dbCfg.RegistrarTLS(); err != nil {
-		return nil, err
-	}
-
-	sqlDB, err := sql.Open("mysql", dbCfg.DSN())
-	if err != nil {
-		return nil, err
-	}
-
-	sqlDB.SetMaxOpenConns(dbCfg.MaxOpenConns)
-	sqlDB.SetMaxIdleConns(dbCfg.MaxIdleConns)
-	sqlDB.SetConnMaxLifetime(dbCfg.ConnMaxLifetime)
-	sqlDB.SetConnMaxIdleTime(dbCfg.ConnMaxIdleTime)
-
-	ctx, cancel := context.WithTimeout(context.Background(), dbCfg.PingTimeout)
-	defer cancel()
-
-	if err := sqlDB.PingContext(ctx); err != nil {
-		_ = sqlDB.Close()
-		return nil, err
-	}
-
-	return sqlDB, nil
-}
+// connectDB: ver internal/db.Conectar (una sola implementación).
+func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) { return db.Conectar(dbCfg) }
 
 // waitForShutdown bloquea hasta recibir SIGINT/SIGTERM y entonces intenta un
 // apagado ordenado del servidor HTTP dentro del timeout configurado.

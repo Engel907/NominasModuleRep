@@ -1,6 +1,5 @@
-// Package seedadmin contiene la lógica del alta inicial del administrador,
-// extraída de cmd/seedadmin para poder reutilizarla en pruebas de integración.
-// Garantías (ver cmd/seedadmin): contraseña aleatoria con crypto/rand, solo se
+// Package seedadmin crea el administrador inicial: contraseña aleatoria con
+// crypto/rand, solo se
 // guarda su hash, requiere_cambio_password=1, idempotente (se niega si ya hay
 // un administrador activo) y transacción propia con @auditoria_usuario_id = NULL.
 package seedadmin
@@ -39,12 +38,10 @@ func CrearAdministrador(ctx context.Context, db *sql.DB, usuario, nombre, correo
 	}
 	defer tx.Rollback() //nolint:errcheck // tras Commit devuelve ErrTxDone; no importa
 
-	// Alta inicial sin autor previo: NULL explícito (no heredar el valor de otra sesión).
 	if _, err := tx.ExecContext(ctx, "SET @auditoria_usuario_id = NULL"); err != nil {
 		return fmt.Errorf("fijar @auditoria_usuario_id: %w", err)
 	}
 
-	// Bloquear la fila del rol serializa dos ejecuciones simultáneas.
 	var rolID int64
 	err = tx.QueryRowContext(ctx, "SELECT id FROM roles WHERE codigo = ? FOR UPDATE", RolAdministrador).Scan(&rolID)
 	if errors.Is(err, sql.ErrNoRows) {

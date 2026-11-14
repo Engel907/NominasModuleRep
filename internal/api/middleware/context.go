@@ -9,16 +9,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"planillas-ccdr/internal/security"
+	"planillas-ccdr/internal/credenciales"
 )
 
-// CtxKeyPayload es la clave bajo la cual middleware.AuthPASETO (Fase 1)
-// debe guardar el *security.Payload verificado en el gin.Context, y la
+// CtxKeyPayload es la clave bajo la cual middleware.AuthPASETO
+// debe guardar el *credenciales.Payload verificado en el gin.Context, y la
 // misma que middleware.RequirePermission y PayloadDesdeContexto leen.
-//
-// SUPUESTO A CONFIRMAR: si la implementación real de AuthPASETO (Fase 1,
-// no incluida en este contexto) ya usa otra clave, actualizarla acá — es
-// el único lugar que debería requerir cambio.
 const CtxKeyPayload = "auth_payload"
 
 var ErrEmpleadoIDNoVinculado = errors.New("middleware: el usuario autenticado no tiene empleado vinculado")
@@ -52,12 +48,12 @@ func EmpleadoIDDelUsuario(c *gin.Context, resolver EmpleadoIDResolver) (int64, e
 
 // PayloadDesdeContexto extrae el payload PASETO seteado por AuthPASETO.
 // Devuelve nil si no hay payload (ruta sin AuthPASETO, o token ausente).
-func PayloadDesdeContexto(c *gin.Context) *security.Payload {
+func PayloadDesdeContexto(c *gin.Context) *credenciales.Payload {
 	valor, existe := c.Get(CtxKeyPayload)
 	if !existe {
 		return nil
 	}
-	payload, ok := valor.(*security.Payload)
+	payload, ok := valor.(*credenciales.Payload)
 	if !ok {
 		return nil
 	}
@@ -65,19 +61,8 @@ func PayloadDesdeContexto(c *gin.Context) *security.Payload {
 }
 
 // UsuarioIDDesdeContexto extrae el usuario_id autenticado que AuthPASETO
-// dejó en el contexto (ver PayloadDesdeContexto). Devuelve (0, false) si no
+// dejó en el contexto. Devuelve (0, false) si no
 // hay payload, típicamente porque la ruta no tiene AuthPASETO montado.
-//
-// El ID es int64 de punta a punta (Payload.UsuarioID, internal/db/dto y el
-// parámetro usuarioID de db.WithAuditContext — decisión D1): sin conversiones.
-//
-// AUDITORÍA DE PRODUCCIÓN: existían DOS copias de esta misma función,
-// declaradas por separado en distintos handlers del mismo paquete
-// `handlers` — lo cual ni siquiera compila (identificador duplicado en el
-// paquete) — y ninguna de las dos leía la clave/tipo real que usa
-// AuthPASETO (una leía "authorization_payload", la otra "usuario_id" como
-// int64; la real es CtxKeyPayload="auth_payload" con *security.Payload).
-// Se unifica acá, junto a PayloadDesdeContexto.
 func UsuarioIDDesdeContexto(c *gin.Context) (int64, bool) {
 	payload := PayloadDesdeContexto(c)
 	if payload == nil {
@@ -90,27 +75,19 @@ func UsuarioIDDesdeContexto(c *gin.Context) (int64, bool) {
 // UsuarioIDDesdeContexto, para call sites que no necesitan distinguir
 // "no autenticado" de "usuario_id == 0" (asumen que AuthPASETO ya corrió
 // y ya devolvió 401 si no había payload). Devuelve 0 si no hay payload.
-//
-// AUDITORÍA DE PRODUCCIÓN: internal/asistencia/handler.go ya llamaba a
-// `middleware.UsuarioID(c)` (4 veces) sin que esta función existiera en
-// ningún lado — se agrega acá con el nombre y forma que ese archivo ya
-// esperaba, apuntando al mismo contrato real (CtxKeyPayload).
 func UsuarioID(c *gin.Context) int64 {
 	id, _ := UsuarioIDDesdeContexto(c)
 	return id
 }
 
 // ErrParametroInvalido indica que un parámetro de ruta no es válido. Lo
-// devuelve ParseIDParam SIN escribir la respuesta HTTP; ErrorHandler (vía
+// devuelve ParseIDParam sin escribir la respuesta HTTP; ErrorHandler (vía
 // traducirError) lo convierte en 400 "parametro_invalido" detectándolo con
 // errors.As:
-//
-//	var pe *ErrParametroInvalido
-//	if errors.As(err, &pe) { /* 400, pe.Nombre */ }
 type ErrParametroInvalido struct {
 	// Nombre del parámetro de ruta (p. ej. "id").
 	Nombre string
-	// Valor tal como llegó en la URL. Solo para diagnóstico interno: NO se
+	// Valor tal como llegó en la URL. Solo para diagnóstico interno: no se
 	// devuelve al cliente.
 	Valor string
 }
@@ -120,11 +97,9 @@ func (e *ErrParametroInvalido) Error() string {
 }
 
 // ParseIDParam parsea un parámetro de ruta (:id) como ID int64 estrictamente
-// positivo. NO responde ni aborta: devuelve *ErrParametroInvalido para que el
+// positivo. No responde ni aborta: devuelve *ErrParametroInvalido para que el
 // handler lo propague (RespondWithError(c, err) o c.Error(err), y return) y
 // ErrorHandler lo convierta en 400.
-//
-// Uso: id, err := ParseIDParam(c, "id").
 func ParseIDParam(c *gin.Context, nombre string) (int64, error) {
 	valor := c.Param(nombre)
 	id, err := strconv.ParseInt(valor, 10, 64)
@@ -133,8 +108,3 @@ func ParseIDParam(c *gin.Context, nombre string) (int64, error) {
 	}
 	return id, nil
 }
-
-// F16: ParseUintParam se ELIMINÓ. Escribía un 400 con c.AbortWithStatusJSON
-// y devolvía el error, con lo que el handler que lo propagaba a
-// RespondWithError terminaba escribiendo una SEGUNDA respuesta. Todo uso
-// restante debe migrar a ParseIDParam.

@@ -29,6 +29,7 @@ type fixtureCalculo struct {
 	incapID        int64
 	autorizacionHE int64
 	concepto       map[string]int64 // codigo -> conceptos_salariales.id
+	regimenCCSS    int64            // regimenes_ccss SEM
 }
 
 func mustExec(t *testing.T, db *sql.DB, q string, args ...any) int64 {
@@ -52,7 +53,7 @@ func nuevoFixtureCalculo(t *testing.T) *fixtureCalculo {
 			fmt.Sprintf("calc-%d", i), fmt.Sprintf("Usuario cálculo %d", i), fmt.Sprintf("calc-%d@example.test", i))
 	}
 	if err := db.QueryRow(`SELECT id FROM tipos_planilla WHERE clase = 'regular' AND fraccion_mensual = 1`).Scan(&f.tipoMensual); err != nil {
-		t.Fatalf("tipo mensual sembrado (L3): %v", err)
+		t.Fatalf("tipo mensual sembrado: %v", err)
 	}
 	rows, err := db.Query(`SELECT codigo, id FROM conceptos_salariales`)
 	if err != nil {
@@ -75,6 +76,9 @@ func nuevoFixtureCalculo(t *testing.T) *fixtureCalculo {
 	if err := db.QueryRow(`SELECT id FROM regimenes_laborales WHERE codigo='CODIGO_TRABAJO'`).Scan(&regimen); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.QueryRow(`SELECT id FROM regimenes_ccss WHERE codigo='SEM'`).Scan(&f.regimenCCSS); err != nil {
+		t.Fatal(err)
+	}
 	unidad := mustExec(t, db, `INSERT INTO unidades_organizativas (codigo, nombre) VALUES ('CALC', 'Unidad cálculo')`)
 	puesto := mustExec(t, db, `INSERT INTO puestos (codigo, nombre, unidad_organizativa_id) VALUES ('CALC', 'Puesto cálculo', ?)`, unidad)
 	f.programaID = mustExec(t, db, `INSERT INTO programas_presupuestarios (codigo, nombre) VALUES ('CALC', 'Programa cálculo')`)
@@ -83,16 +87,14 @@ func nuevoFixtureCalculo(t *testing.T) *fixtureCalculo {
 
 	salarios := []string{"900000.00", "800000.00", "700000.00"}
 	for i := range f.emp {
-		f.emp[i] = mustExec(t, db, `
-INSERT INTO empleados (codigo_interno, tipo_identificacion_id, numero_identificacion, nombre_completo, fecha_ingreso)
-VALUES (?, ?, ?, ?, '2020-01-01')`, fmt.Sprintf("CALC%d", i), tipoIdent, fmt.Sprintf("CALC-%04d", i), fmt.Sprintf("Empleado cálculo %d", i))
+		f.emp[i] = testutil.InsertarEmpleado(t, db, fmt.Sprintf("CALC%d", i), tipoIdent, fmt.Sprintf("CALC-%04d", i), fmt.Sprintf("Empleado cálculo %d", i), "2020-01-01")
 		f.contrato[i] = mustExec(t, db, `
-INSERT INTO contratos (empleado_id, puesto_id, regimen_laboral_id, tipo_contrato, salario_pactado, jornada,
+INSERT INTO contratos (empleado_id, puesto_id, regimen_laboral_id, tipo_contrato_id, salario_pactado, modalidad_salario, jornada_id,
                        fecha_inicio_contrato, fecha_inicio_vigencia, creado_por)
-VALUES (?, ?, ?, 'INDEFINIDO', ?, 'DIURNA', '2020-01-01', '2020-01-01', ?)`, f.emp[i], puesto, regimen, salarios[i], f.preparador)
+VALUES (?, ?, ?, (SELECT MIN(id) FROM tipos_contrato), ?, 'mensual', (SELECT id FROM jornadas WHERE codigo = 'DIURNA'), '2020-01-01', '2020-01-01', ?)`, f.emp[i], puesto, regimen, salarios[i], f.preparador)
 		mustExec(t, db, `
-INSERT INTO empleado_datos_laborales (empleado_id, puesto_id, salario_base_nominal, tipo_contrato_id, programa_presupuestario_id, fecha_inicio_vigencia)
-VALUES (?, ?, ?, ?, ?, '2020-01-01')`, f.emp[i], puesto, salarios[i], tipoContrato, f.programaID)
+INSERT INTO empleado_datos_laborales (empleado_id, puesto_id, salario_base_nominal, tipo_contrato_id, programa_presupuestario_id, regimen_ccss_id, fecha_inicio_vigencia)
+VALUES (?, ?, ?, ?, ?, ?, '2020-01-01')`, f.emp[i], puesto, salarios[i], tipoContrato, f.programaID, f.regimenCCSS)
 	}
 
 	var tipoPension int64
@@ -108,7 +110,6 @@ VALUES (?, ?, 300000, 25000, 300000, '2025-01-01')`, f.emp[1], tercero)
 	mustExec(t, db, `
 INSERT INTO asistencia_hora_extra_tipificada (empleado_id, fecha, tipo_hora_extra_id, horas)
 SELECT ?, '2026-03-10', id, 6 FROM tipos_hora_extra WHERE clase = 'diurna'`, f.emp[2])
-	// L13: sin autorización la hora extra no llega a planilla.
 	f.autorizacionHE = mustExec(t, db, `
 INSERT INTO horas_extra_autorizadas (empleado_id, fecha, horas_autorizadas, motivo, estado, solicitado_por, resuelto_por, fecha_resolucion)
 VALUES (?, '2026-03-10', 6, 'fixture', 'autorizada', ?, ?, NOW())`, f.emp[2], f.preparador, f.aprobador)

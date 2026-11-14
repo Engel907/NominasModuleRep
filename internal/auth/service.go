@@ -1,23 +1,7 @@
 // Package auth es la capa de servicio del módulo de seguridad: orquesta
-// internal/security (hashing + PASETO) y las funciones de acceso a datos de
+// internal/credenciales (hashing + PASETO) y las funciones de acceso a datos de
 // internal/db/dto (escritas a mano con database/sql) para implementar login,
 // refresh, logout, cambio/reset de contraseña y asignación/revocación de rol.
-//
-// Convenciones:
-//   - Todos los IDs son int64 de punta a punta (dto, security.Payload,
-//     handlers, middleware): decisión D1, sin conversiones intermedias.
-//   - Toda escritura sobre tablas auditadas pasa por db.WithAuditContext
-//     (ejecutarTx), que necesita el *sql.DB (de ahí que Servicio lo guarde).
-//     Dentro de una transacción el servicio habla con un Store (en producción,
-//     el *dto.Queries de la Tx) — por eso Store, y no *dto.Queries, es la
-//     interfaz que usa la lógica y la que reemplazan los tests.
-//
-// F14 — autenticación reforzada (S1, S2, S5, S6, S11):
-//   - Login: respuesta única ante usuario inexistente/inactivo/bloqueado/mala
-//     contraseña, tiempo igualado con un hash señuelo, contador atómico.
-//   - Refresh: rotación atómica con detección de reutilización por familia.
-//   - CambiarPassword / reset: política de contraseñas, un solo uso, revocación
-//     de sesiones, y claim rcp para obligar el cambio inicial.
 package auth
 
 import (
@@ -35,14 +19,13 @@ import (
 	"github.com/google/uuid"
 
 	"planillas-ccdr/internal/authz"
+	"planillas-ccdr/internal/credenciales"
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/security"
 )
 
 // Store es el subconjunto de los métodos de *dto.Queries que este servicio
-// necesita. Las firmas corresponden EXACTAMENTE (nombre y tipos) a los métodos
-// de internal/db/dto/security.go, de modo que *dto.Queries satisface Store.
+// necesita; *dto.Queries lo satisface.
 type Store interface {
 	GetUsuarioPorNombreUsuario(ctx context.Context, nombreUsuario string) (dto.Usuario, error)
 	GetUsuarioPorID(ctx context.Context, id int64) (dto.Usuario, error)
@@ -67,7 +50,7 @@ type Store interface {
 
 	GetPermisosVigentesDeUsuario(ctx context.Context, usuarioID int64) ([]string, error)
 
-	// F15: revocación efectiva de access tokens.
+	// revocación efectiva de access tokens.
 	IncrementarPermisosVersion(ctx context.Context, usuarioID int64) (uint32, error)
 	IncrementarPermisosVersionPorRol(ctx context.Context, rolID int64) error
 	SetUsuarioActivo(ctx context.Context, usuarioID int64, activo bool) (bool, error)
@@ -75,18 +58,8 @@ type Store interface {
 	ReemplazarPermisosRol(ctx context.Context, rolID int64, codigos []string) error
 }
 
-// Politica agrupa los parámetros de negocio que el ADR-000 marca
-// explícitamente como "no van en SQL, van en capa de servicio Go"
-// (fuerza bruta, punto c) más las duraciones de token.
-//
-// Los valores vienen SOLO de internal/config (config.AuthConfig); este
-// paquete no define defaults propios. El cableado (cmd/api/main.go) mapea:
-//
-//	MaxIntentosFallidos  <- cfg.Auth.MaxFailedLogins
-//	MinutosBloqueo       <- cfg.Auth.LockoutDuration
-//	DuracionAccessToken  <- cfg.Auth.AccessTokenDuration
-//	DuracionRefreshToken <- cfg.Auth.RefreshTokenDuration
-//	DuracionTokenReset   <- cfg.Auth.PasswordResetTokenDuration
+// Politica agrupa los parámetros de bloqueo por fuerza bruta y las
+// duraciones de token.
 type Politica struct {
 	MaxIntentosFallidos  int
 	MinutosBloqueo       time.Duration
@@ -98,7 +71,7 @@ type Politica struct {
 type Servicio struct {
 	sqlDB       *sql.DB
 	store       Store
-	tokenMaker  security.TokenMaker
+	tokenMaker  credenciales.TokenMaker
 	politica    Politica
 	notificador Notificador
 	logger      *slog.Logger
@@ -107,7 +80,7 @@ type Servicio struct {
 	txRunner  func(ctx context.Context, actorID int64, fn func(context.Context, Store) error) error
 	verificar func(password, hash string) (necesitaRehash bool, err error)
 
-	// Envío de correos de reset fuera del request (ver enviarResetAsync).
+	// Envío de correos de reset fuera del request.
 	envios   chan struct{}
 	enviosWG sync.WaitGroup
 }
@@ -120,10 +93,7 @@ const maxEnviosSimultaneos = 16
 // propia transacción vía db.WithAuditContext; `store` se usa para lecturas y
 // escrituras simples. Precalcula el hash señuelo de Login (cuesta ~un hash
 // argon2id) para que ningún request pague ese costo.
-//
-// El notificador del reset se inyecta con ConNotificador; sin él, el reset
-// registra un error y no envía nada (nunca falla "hacia afuera").
-func NuevoServicio(store Store, sqlDB *sql.DB, tokenMaker security.TokenMaker, politica Politica) *Servicio {
+func NuevoServicio(store Store, sqlDB *sql.DB, tokenMaker credenciales.TokenMaker, politica Politica) *Servicio {
 	hashSenuelo()
 	return &Servicio{
 		sqlDB:      sqlDB,
@@ -131,18 +101,18 @@ func NuevoServicio(store Store, sqlDB *sql.DB, tokenMaker security.TokenMaker, p
 		tokenMaker: tokenMaker,
 		politica:   politica,
 		logger:     slog.Default(),
-		verificar:  security.VerifyPassword,
+		verificar:  credenciales.VerifyPassword,
 		envios:     make(chan struct{}, maxEnviosSimultaneos),
 	}
 }
 
-// ConNotificador fija el canal de entrega del token de reset (S2).
+// ConNotificador fija el canal de entrega del token de reset.
 func (s *Servicio) ConNotificador(n Notificador) *Servicio {
 	s.notificador = n
 	return s
 }
 
-// ConLogger reemplaza el slog.Default() usado para el log interno de seguridad.
+// ConLogger reemplaza el slog.Default usado para el log interno de seguridad.
 func (s *Servicio) ConLogger(l *slog.Logger) *Servicio {
 	if l != nil {
 		s.logger = l
@@ -165,36 +135,30 @@ func (s *Servicio) ejecutarTx(ctx context.Context, actorID int64, fn func(contex
 	})
 }
 
-// ============================================================
-// LOGIN
-// ============================================================
-
-// Login (F14 / S5). Contrato:
+// Login. Contrato:
 //   - Usuario inexistente, contraseña mala, usuario inactivo y usuario
-//     bloqueado devuelven el MISMO error (ErrCredencialesInvalidas); el motivo
+//     bloqueado devuelven el mismo error (ErrCredencialesInvalidas); el motivo
 //     real solo va al log interno.
 //   - Todos esos caminos pagan una verificación argon2id (la del usuario, o
 //     la del hash señuelo si no existe) para que el tiempo no delate nada.
 //     Solo un error de infraestructura (BD caída) devuelve otro error.
 //   - El contador de fallos es atómico en SQL (RegistrarIntentoFallidoAtomico).
-//   - Un intento sobre una cuenta ya bloqueada o inactiva NO suma al contador
+//   - Un intento sobre una cuenta ya bloqueada o inactiva no suma al contador
 //     ni extiende el bloqueo: si no, cualquiera podría mantener bloqueada a una
 //     víctima indefinidamente.
 func (s *Servicio) Login(ctx context.Context, req LoginRequest) (*LoginResponse, error) {
 	usuario, err := s.store.GetUsuarioPorNombreUsuario(ctx, req.NombreUsuario)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err // fallo de infraestructura: no se enmascara como credenciales inválidas
+			return nil, err
 		}
-		_, _ = s.verificar(req.Password, hashSenuelo()) // igualar tiempo
+		_, _ = s.verificar(req.Password, hashSenuelo())
 		s.logFalloLogin(ctx, "usuario_inexistente", 0, req.NombreUsuario, req.Origen)
 		return nil, ErrCredencialesInvalidas
 	}
 
 	necesitaRehash, verr := s.verificar(req.Password, usuario.PasswordHash)
-	if verr != nil && !errors.Is(verr, security.ErrPasswordInvalida) {
-		// Hash con formato desconocido o corrupto: es un problema de datos que
-		// hay que ver en los logs, pero hacia el cliente es "credenciales inválidas".
+	if verr != nil && !errors.Is(verr, credenciales.ErrPasswordInvalida) {
 		s.logger.ErrorContext(ctx, "auth: no se pudo verificar el hash del usuario",
 			"usuario_id", usuario.ID, "error", verr)
 	}
@@ -212,15 +176,10 @@ func (s *Servicio) Login(ctx context.Context, req LoginRequest) (*LoginResponse,
 		return nil, ErrCredencialesInvalidas
 	}
 
-	// Login exitoso: resetear contador de intentos fallidos.
 	if err := s.store.ResetearIntentosFallidos(ctx, usuario.ID); err != nil {
 		return nil, err
 	}
 
-	// Re-hash perezoso bcrypt→argon2id. No bloquea ni falla el login, pero un
-	// error SÍ se registra. Usa RehashPasswordHash, que no toca
-	// requiere_cambio_password: antes, este re-hash borraba el flag por efecto
-	// colateral y un usuario obligado a cambiar la clave quedaba libre.
 	if necesitaRehash {
 		s.rehashPerezoso(ctx, usuario, req.Password)
 	}
@@ -230,7 +189,6 @@ func (s *Servicio) Login(ctx context.Context, req LoginRequest) (*LoginResponse,
 		return nil, err
 	}
 
-	// Cada login abre una familia de refresh tokens nueva.
 	return s.emitirParDeTokens(ctx, s.store, usuario.ID, usuario.NombreUsuario, permisos,
 		usuario.RequiereCambioPassword, usuario.PermisosVersion, uuid.NewString(), req.Origen)
 }
@@ -240,7 +198,7 @@ func estaBloqueado(u dto.Usuario) bool {
 }
 
 func (s *Servicio) rehashPerezoso(ctx context.Context, usuario dto.Usuario, passwordPlano string) {
-	nuevoHash, err := security.HashPassword(passwordPlano)
+	nuevoHash, err := credenciales.HashPassword(passwordPlano)
 	if err != nil {
 		s.logger.WarnContext(ctx, "auth: no se pudo calcular el re-hash argon2id", "usuario_id", usuario.ID, "error", err)
 		return
@@ -290,8 +248,8 @@ func truncar(s string, max int) string {
 	return string([]rune(s)[:max])
 }
 
-// El hash señuelo se calcula UNA vez por proceso, con los mismos parámetros
-// argon2id que un hash real (security.HashPassword), y lo usa Login cuando el
+// El hash señuelo se calcula una vez por proceso, con los mismos parámetros
+// argon2id que un hash real (credenciales.HashPassword), y lo usa Login cuando el
 // usuario no existe para gastar el mismo tiempo que con un usuario real.
 var (
 	senueloOnce sync.Once
@@ -304,7 +262,7 @@ func hashSenuelo() string {
 		if _, err := rand.Read(buf); err != nil {
 			panic("auth: no se pudo generar el secreto del hash señuelo: " + err.Error())
 		}
-		h, err := security.HashPassword(hex.EncodeToString(buf))
+		h, err := credenciales.HashPassword(hex.EncodeToString(buf))
 		if err != nil {
 			panic("auth: no se pudo precalcular el hash señuelo: " + err.Error())
 		}
@@ -313,22 +271,18 @@ func hashSenuelo() string {
 	return senueloHash
 }
 
-// ============================================================
-// REFRESH
-// ============================================================
-
-// Refresh (F14 / S6) rota el refresh token:
-//   - La revocación del token usado y el alta del nuevo ocurren en UNA
+// Refresh rota el refresh token:
+//   - La revocación del token usado y el alta del nuevo ocurren en una
 //     transacción, y la revocación es condicional (revocado = 0) con
 //     verificación de filas afectadas: de dos refresh concurrentes con el
 //     mismo token, solo uno gana.
 //   - Un token ya revocado que reaparece (o el perdedor de esa carrera) es una
-//     reutilización: se revoca TODA su familia de sesiones y se registra el
+//     reutilización: se revoca toda su familia de sesiones y se registra el
 //     evento; el cliente solo ve ErrRefreshTokenInvalido.
 //   - Se verifica que la fila pertenezca al usuario del payload y que el
 //     usuario siga activo.
 func (s *Servicio) Refresh(ctx context.Context, req RefreshRequest) (*RefreshResponse, error) {
-	payload, err := s.tokenMaker.VerificarToken(req.RefreshToken, security.TipoTokenRefresco)
+	payload, err := s.tokenMaker.VerificarToken(req.RefreshToken, credenciales.TipoTokenRefresco)
 	if err != nil {
 		return nil, ErrRefreshTokenInvalido
 	}
@@ -366,14 +320,12 @@ func (s *Servicio) Refresh(ctx context.Context, req RefreshRequest) (*RefreshRes
 		return nil, ErrRefreshTokenInvalido
 	}
 
-	// Permisos re-resueltos contra BD (no se copian del access token vencido)
-	// para que un refresh sí refleje cambios de rol recientes.
 	permisos, err := s.store.GetPermisosVigentesDeUsuario(ctx, usuario.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	familia := uuid.NewString() // sesiones previas a 000114 (familia NULL) arrancan una familia
+	familia := uuid.NewString()
 	if fila.FamiliaID.Valid && fila.FamiliaID.String != "" {
 		familia = fila.FamiliaID.String
 	}
@@ -385,14 +337,13 @@ func (s *Servicio) Refresh(ctx context.Context, req RefreshRequest) (*RefreshRes
 			return err
 		}
 		if !gano {
-			return errReutilizacionRefresh // otro request lo revocó entre la lectura y acá
+			return errReutilizacionRefresh
 		}
 		tokens, err = s.emitirParDeTokens(ctx, st, usuario.ID, usuario.NombreUsuario, permisos,
 			usuario.RequiereCambioPassword, usuario.PermisosVersion, familia, req.Origen)
 		return err
 	})
 	if errors.Is(err, errReutilizacionRefresh) {
-		// La Tx ya hizo rollback; la revocación de la familia va en la suya.
 		s.manejarReutilizacion(ctx, fila, req.Origen)
 		return nil, ErrRefreshTokenInvalido
 	}
@@ -437,28 +388,16 @@ func (s *Servicio) manejarReutilizacion(ctx context.Context, fila dto.RefreshTok
 	)
 }
 
-// ============================================================
-// LOGOUT
-// ============================================================
-
 // Logout revoca únicamente la sesión (refresh token) presentada.
-//
-// Logout es público (no exige access token) y no comprueba que el refresh
-// token pertenezca a quien llama; basta con poseerlo. Los access tokens
-// siguen válidos hasta expirar o hasta que cambie permisos_version.
 func (s *Servicio) Logout(ctx context.Context, req LogoutRequest) error {
-	if _, err := s.tokenMaker.VerificarToken(req.RefreshToken, security.TipoTokenRefresco); err != nil {
-		// Un token ya inválido/expirado no necesita revocación explícita.
+	if _, err := s.tokenMaker.VerificarToken(req.RefreshToken, credenciales.TipoTokenRefresco); err != nil {
 		return nil
 	}
 	return s.store.RevocarRefreshTokenPorHash(ctx, hashToken(req.RefreshToken))
 }
 
-// LogoutTodasLasSesiones revoca TODAS las sesiones del usuario — usada tras
+// LogoutTodasLasSesiones revoca todas las sesiones del usuario — usada tras
 // un reset de contraseña o por un administrador.
-//
-// F15: además de los refresh tokens sube permisos_version, de modo que los
-// access tokens vivos de ese usuario dejan de valer en <= AUTH_CACHE_TTL.
 func (s *Servicio) LogoutTodasLasSesiones(ctx context.Context, usuarioID int64) error {
 	return s.RevocarSesionesUsuario(ctx, usuarioID, usuarioID)
 }
@@ -475,22 +414,10 @@ func (s *Servicio) RevocarSesionesUsuario(ctx context.Context, usuarioID, actorI
 	})
 }
 
-// ============================================================
-// CAMBIO DE CONTRASEÑA (autenticado)
-// ============================================================
-
-// CambiarPassword (F14 / S1): valida la contraseña actual, aplica la política
+// CambiarPassword: valida la contraseña actual, aplica la política
 // a la nueva, guarda el hash argon2id (limpia requiere_cambio_password y
 // actualiza fecha_ultimo_cambio_password), limpia el bloqueo, REVOCA todas las
 // sesiones del usuario y todo en una transacción con auditoría.
-//
-// Devuelve un par de tokens NUEVO (rcp=false, familia nueva): la sesión que
-// hizo el cambio se revoca junto con las demás, y así el cliente no queda
-// deslogueado ni con el access token restringido (rcp=true) del primer login.
-//
-// Una contraseña actual incorrecta cuenta como intento fallido (misma política
-// de bloqueo que el login): si no, un access token robado serviría para
-// adivinar la contraseña sin límite.
 func (s *Servicio) CambiarPassword(ctx context.Context, usuarioID int64, req CambiarPasswordRequest) (*LoginResponse, error) {
 	usuario, err := s.store.GetUsuarioPorID(ctx, usuarioID)
 	if err != nil {
@@ -504,7 +431,7 @@ func (s *Servicio) CambiarPassword(ctx context.Context, usuarioID int64, req Cam
 	}
 
 	if _, err := s.verificar(req.PasswordActual, usuario.PasswordHash); err != nil {
-		if errors.Is(err, security.ErrPasswordInvalida) {
+		if errors.Is(err, credenciales.ErrPasswordInvalida) {
 			s.registrarIntentoFallido(ctx, usuario, req.Origen, "cambio_password_actual_incorrecta")
 			return nil, ErrPasswordActualIncorrecta
 		}
@@ -514,11 +441,11 @@ func (s *Servicio) CambiarPassword(ctx context.Context, usuarioID int64, req Cam
 	if err := ValidarPassword(req.NuevaPassword, usuario.NombreUsuario, usuario.Correo); err != nil {
 		return nil, err
 	}
-	if req.NuevaPassword == req.PasswordActual { // la actual ya quedó verificada arriba
+	if req.NuevaPassword == req.PasswordActual {
 		return nil, errPolitica(MotivoIgualActual, "La nueva contraseña debe ser distinta de la actual.")
 	}
 
-	nuevoHash, err := security.HashPassword(req.NuevaPassword)
+	nuevoHash, err := credenciales.HashPassword(req.NuevaPassword)
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +465,6 @@ func (s *Servicio) CambiarPassword(ctx context.Context, usuarioID int64, req Cam
 		if err := st.RevocarTodosLosRefreshTokensDeUsuario(ctx, usuario.ID); err != nil {
 			return err
 		}
-		// F15: invalida los access tokens emitidos antes del cambio (otras sesiones).
 		pv, err := st.IncrementarPermisosVersion(ctx, usuario.ID)
 		if err != nil {
 			return err
@@ -552,10 +478,6 @@ func (s *Servicio) CambiarPassword(ctx context.Context, usuarioID int64, req Cam
 	}
 	return tokens, nil
 }
-
-// ============================================================
-// ASIGNACIÓN / REVOCACIÓN DE ROL (usuario_roles versionada — ADR-000 §2)
-// ============================================================
 
 // CambiarEstadoUsuario cambia el estado de una cuenta e invalida los tokens
 // existentes dentro de la misma transacción auditada.
@@ -617,11 +539,7 @@ func (s *Servicio) ReemplazarPermisosRol(ctx context.Context, rolID int64, codig
 
 // AsignarRol implementa la transacción de 2 pasos sobre usuario_roles.
 // db.WithAuditContext envuelve la Tx para que los triggers de auditoría
-// registren `creadoPor` como actor, en vez del defecto registro_id=0
-// documentado en ADR-000 §1.
-//
-// Devuelve ErrRolYaVigente si el usuario ya tiene ese rol vigente (el
-// handler lo traduce a 409); la verificación corre DENTRO de la misma Tx.
+// registren `creadoPor` como actor.
 func (s *Servicio) AsignarRol(ctx context.Context, usuarioID int64, req AsignarRolRequest, creadoPor int64) error {
 	rol, err := s.store.GetRolPorID(ctx, req.RolID)
 	if err != nil {
@@ -647,24 +565,12 @@ func (s *Servicio) AsignarRol(ctx context.Context, usuarioID int64, req AsignarR
 			}
 		}
 
-		// Paso 1: cierra la fila vigente anterior para el mismo (usuario,
-		// rol), si existe. Tras la verificación de arriba normalmente
-		// afecta 0 filas (no es error); se conserva para respetar el patrón
-		// de 2 pasos de ADR-000 §2.
 		if err := q.CerrarUsuarioRolVigente(ctx, usuarioID, req.RolID, fechaEfectiva); err != nil {
 			return err
 		}
-		// Paso 2: abre la nueva fila vigente.
-		//
-		// F14: verificar-y-luego-insertar no es atómico: dos asignaciones
-		// concurrentes podrían pasar ambas la verificación; en ese caso
-		// ganaría la restricción única (usuario_id, rol_id, es_vigente) y
-		// el segundo INSERT fallaría con error de duplicado (1062) en vez
-		// de ErrRolYaVigente.
 		if _, err = q.InsertarUsuarioRolVigente(ctx, usuarioID, req.RolID, fechaEfectiva, sql.NullInt64{Int64: creadoPor, Valid: true}); err != nil {
 			return err
 		}
-		// F15 (S7): en la misma Tx, para que el cambio de permisos rija en <= AUTH_CACHE_TTL.
 		_, err = q.IncrementarPermisosVersion(ctx, usuarioID)
 		return err
 	})
@@ -676,19 +582,8 @@ func (s *Servicio) RevocarRol(ctx context.Context, usuarioID int64, req RevocarR
 	return s.RevocarRolSeguro(ctx, usuarioID, req, revocadoPor)
 }
 
-// ============================================================
-// RESET DE CONTRASEÑA (ADR-000 punto d; F14 / S2)
-// ============================================================
-
-// SolicitarResetPassword genera un token de un solo uso, persiste SOLO su
+// SolicitarResetPassword genera un token de un solo uso, persiste solo su
 // hash SHA-256 y lo entrega al correo del usuario vía Notificador.
-//
-// Devuelve nil exista o no el usuario, esté activo o no, y también ante
-// errores internos (se registran en el log): el handler responde 202 con el
-// mismo mensaje en todos los casos, sin revelar si la cuenta existe. El envío
-// del correo corre en segundo plano para que su latencia (SMTP) no distinga
-// "existe" de "no existe"; queda una diferencia de pocos ms por las escrituras
-// en BD, que solo el rate limiting (pendiente) cierra del todo.
 func (s *Servicio) SolicitarResetPassword(ctx context.Context, req SolicitarResetPasswordRequest) error {
 	usuario, err := s.store.GetUsuarioPorNombreUsuario(ctx, req.NombreUsuario)
 	if err != nil {
@@ -713,8 +608,6 @@ func (s *Servicio) SolicitarResetPassword(ctx context.Context, req SolicitarRese
 	}
 	expira := time.Now().Add(s.politica.DuracionTokenReset)
 
-	// Invalidar los pendientes y crear el nuevo, en una sola transacción:
-	// o queda exactamente un token vigente o queda el anterior intacto.
 	err = s.ejecutarTx(ctx, usuario.ID, func(ctx context.Context, st Store) error {
 		if err := st.InvalidarTokensResetPasswordPendientesDeUsuario(ctx, usuario.ID); err != nil {
 			return err
@@ -749,7 +642,6 @@ func (s *Servicio) enviarResetAsync(correo, nombre, token string, expira time.Ti
 			}
 		}()
 
-		// El contexto del request ya se canceló cuando se respondió el 202.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := s.notificador.EnviarResetPassword(ctx, correo, nombre, token, expira); err != nil {
@@ -759,12 +651,9 @@ func (s *Servicio) enviarResetAsync(correo, nombre, token string, expira time.Ti
 }
 
 // ConfirmarResetPassword valida el token, aplica la política de contraseñas y,
-// en UNA transacción: consume el token (condicional: gana solo una de varias
+// en una transacción: consume el token (condicional: gana solo una de varias
 // confirmaciones concurrentes), guarda el nuevo hash, limpia el bloqueo por
 // intentos fallidos y revoca todas las sesiones del usuario.
-//
-// La política se valida ANTES de consumir el token: una contraseña rechazada
-// no lo quema, el usuario puede reintentar con el mismo enlace.
 func (s *Servicio) ConfirmarResetPassword(ctx context.Context, req ConfirmarResetPasswordRequest) error {
 	fila, err := s.store.GetTokenResetPasswordPorHash(ctx, hashToken(req.Token))
 	if err != nil {
@@ -791,7 +680,7 @@ func (s *Servicio) ConfirmarResetPassword(ctx context.Context, req ConfirmarRese
 	if err := ValidarPassword(req.NuevaPassword, usuario.NombreUsuario, usuario.Correo); err != nil {
 		return err
 	}
-	nuevoHash, err := security.HashPassword(req.NuevaPassword)
+	nuevoHash, err := credenciales.HashPassword(req.NuevaPassword)
 	if err != nil {
 		return err
 	}
@@ -813,14 +702,10 @@ func (s *Servicio) ConfirmarResetPassword(ctx context.Context, req ConfirmarRese
 		if err := st.RevocarTodosLosRefreshTokensDeUsuario(ctx, usuario.ID); err != nil {
 			return err
 		}
-		_, err = st.IncrementarPermisosVersion(ctx, usuario.ID) // F15: corta access tokens vivos
+		_, err = st.IncrementarPermisosVersion(ctx, usuario.ID)
 		return err
 	})
 }
-
-// ============================================================
-// Helpers internos
-// ============================================================
 
 // emitirParDeTokens crea el par access/refresh y persiste el refresh dentro de
 // `familiaID`. `st` es s.store (login) o el Store de una transacción (rotación,
@@ -849,8 +734,7 @@ func (s *Servicio) emitirParDeTokens(ctx context.Context, st Store, usuarioID in
 	}, nil
 }
 
-// hashToken es SHA-256 en hex — nunca se persiste un token en claro
-// (ADR-000 punto b, mismo criterio para tokens_reset_password).
+// hashToken es SHA-256 en hex; nunca se persiste un token en claro.
 func hashToken(token string) string {
 	suma := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(suma[:])

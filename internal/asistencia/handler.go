@@ -10,13 +10,10 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/db"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
-// Handler expone las rutas HTTP de Fase 4 para turnos, calendario y asistencia.
-// Deliberadamente delgado: toda la lógica vive en Service; el handler solo
-// parsea input, valida forma y traduce errores a códigos HTTP. Cada rama
-// responde UNA sola vez y hace return inmediatamente después.
+// Handler expone las rutas HTTP de turnos, calendario y asistencia.
 type Handler struct {
 	service *Service
 }
@@ -25,10 +22,7 @@ func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
-// RegisterRoutes cablea las rutas bajo el grupo /api/v1 ya existente en
-// cmd/api. La autorización usa RequirePermission con las constantes de
-// internal/authz (asistencia, calendario e incapacidades); los códigos los
-// siembran las migraciones 000003 y 000112.
+// RegisterRoutes registra las rutas del módulo, cada una con su permiso.
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	turnos := rg.Group("/turnos")
 	turnos.POST("", middleware.RequirePermission(authz.PermCalendarioAdministrar), h.crearTurno)
@@ -39,6 +33,9 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	calendario := rg.Group("/calendario")
 	calendario.POST("/generar/:anio", middleware.RequirePermission(authz.PermCalendarioAdministrar), h.generarCalendario)
 	calendario.GET("", middleware.RequirePermission(authz.PermAsistenciaVer), h.listarCalendario)
+	calendario.GET("/feriados-catalogo", middleware.RequirePermission(authz.PermAsistenciaVer), h.listarFeriadosCatalogo)
+	calendario.POST("/feriados-catalogo", middleware.RequirePermission(authz.PermCalendarioAdministrar), h.crearFeriadoCatalogo)
+	calendario.PUT("/feriados-catalogo/:id", middleware.RequirePermission(authz.PermCalendarioAdministrar), h.actualizarFeriadoCatalogo)
 
 	asistenciaGrp := rg.Group("/asistencia")
 	asistenciaGrp.POST("", middleware.RequirePermission(authz.PermAsistenciaCrear), h.registrarAsistencia)
@@ -56,21 +53,24 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 // `return` justo después.
 func responderError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, ErrTurnoNoEncontrado):
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrTurnoNoEncontrado), errors.Is(err, ErrFeriadoCatalogoNoEncontrado):
+		middleware.Fail(c, http.StatusNotFound, "not_found", err.Error(), nil)
 	case errors.Is(err, ErrTurnoConAsignacionesVigentes):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		middleware.Fail(c, http.StatusConflict, "conflict", err.Error(), nil)
 	case errors.Is(err, ErrRegistroAsistenciaInvalido),
 		errors.Is(err, ErrTurnoInvalido),
 		errors.Is(err, ErrAnioFueraDeRango):
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 	case errors.Is(err, ErrFranjaNocturnaNoVigente),
 		errors.Is(err, ErrCalendarioNoGenerado),
-		errors.Is(err, ErrSinJornadaContrato):
-		// L14: falta un dato para tipificar las horas extra (mensaje de dominio).
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+		errors.Is(err, ErrSinJornadaContrato),
+		errors.Is(err, ErrFeriadoCatalogoInvalido),
+		errors.Is(err, ErrCatalogoFeriadosVacio),
+		errors.Is(err, ErrDiasLaboralesNoConfigurados),
+		errors.Is(err, ErrDiasLaboralesInvalidos):
+		middleware.Fail(c, http.StatusUnprocessableEntity, "unprocessable_entity", err.Error(), nil)
 	case errors.Is(err, db.ErrNilUserID):
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "usuario no autenticado"})
+		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "usuario no autenticado", nil)
 	default:
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
 	}
@@ -103,28 +103,25 @@ func parseHoraOpcional(s *string) (*time.Time, error) {
 	return &t, nil
 }
 
-// --- Turnos ------------------------------------------------------------
-
 type crearTurnoRequest struct {
 	Codigo                    string `json:"codigo" binding:"required,max=20"`
 	Nombre                    string `json:"nombre" binding:"required,max=100"`
-	HoraEntrada               string `json:"hora_entrada" binding:"required"` // "HH:MM"
+	HoraEntrada               string `json:"hora_entrada" binding:"required"`
 	HoraSalida                string `json:"hora_salida" binding:"required"`
-	DiasLaborables            string `json:"dias_laborables" binding:"required"` // "1,2,3,4,5"
-	ToleranciaTardanzaMinutos int16  `json:"tolerancia_tardanza_minutos"`
+	ToleranciaTardanzaMinutos *int   `json:"tolerancia_tardanza_minutos" binding:"required"`
 }
 
 func (h *Handler) crearTurno(c *gin.Context) {
 	var req crearTurnoRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.RespondWithError(c, err)
 		return
 	}
 
 	horaEntrada, err1 := parseHora(req.HoraEntrada)
 	horaSalida, err2 := parseHora(req.HoraSalida)
 	if err1 != nil || err2 != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "hora_entrada/hora_salida deben tener formato HH:MM"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "hora_entrada/hora_salida deben tener formato HH:MM", nil)
 		return
 	}
 
@@ -133,8 +130,7 @@ func (h *Handler) crearTurno(c *gin.Context) {
 		Nombre:                    req.Nombre,
 		HoraEntrada:               horaEntrada,
 		HoraSalida:                horaSalida,
-		DiasLaborables:            req.DiasLaborables,
-		ToleranciaTardanzaMinutos: req.ToleranciaTardanzaMinutos,
+		ToleranciaTardanzaMinutos: *req.ToleranciaTardanzaMinutos,
 	}, middleware.UsuarioID(c))
 	if err != nil {
 		responderError(c, err)
@@ -144,7 +140,7 @@ func (h *Handler) crearTurno(c *gin.Context) {
 }
 
 func (h *Handler) listarTurnos(c *gin.Context) {
-	p := pagination.Desde(c)
+	p := paginacion.Desde(c)
 	filtro := turnosFiltro(c, p)
 	turnos, err := h.service.ListarTurnos(c.Request.Context(), filtro)
 	if err != nil {
@@ -156,13 +152,14 @@ func (h *Handler) listarTurnos(c *gin.Context) {
 		responderError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": turnos, "meta": pagination.NuevaMeta(p, total)})
+	c.JSON(http.StatusOK, gin.H{"data": turnos, "meta": paginacion.NuevaMeta(p, total)})
 }
 
 type actualizarTurnoRequest struct {
-	Nombre      string `json:"nombre" binding:"required,max=100"`
-	HoraEntrada string `json:"hora_entrada" binding:"required"` // "HH:MM"
-	HoraSalida  string `json:"hora_salida" binding:"required"`
+	Nombre                    string `json:"nombre" binding:"required,max=100"`
+	HoraEntrada               string `json:"hora_entrada" binding:"required"`
+	HoraSalida                string `json:"hora_salida" binding:"required"`
+	ToleranciaTardanzaMinutos *int   `json:"tolerancia_tardanza_minutos" binding:"required"`
 }
 
 // actualizarTurno: PUT /turnos/:id. 404 si el turno no existe; 409 si se
@@ -175,21 +172,22 @@ func (h *Handler) actualizarTurno(c *gin.Context) {
 	}
 	var req actualizarTurnoRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.RespondWithError(c, err)
 		return
 	}
 	horaEntrada, err1 := parseHora(req.HoraEntrada)
 	horaSalida, err2 := parseHora(req.HoraSalida)
 	if err1 != nil || err2 != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "hora_entrada/hora_salida deben tener formato HH:MM"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "hora_entrada/hora_salida deben tener formato HH:MM", nil)
 		return
 	}
 
 	turno, err := h.service.ActualizarTurno(c.Request.Context(), ActualizarTurnoInput{
-		ID:          id,
-		Nombre:      req.Nombre,
-		HoraEntrada: horaEntrada,
-		HoraSalida:  horaSalida,
+		ID:                        id,
+		Nombre:                    req.Nombre,
+		HoraEntrada:               horaEntrada,
+		HoraSalida:                horaSalida,
+		ToleranciaTardanzaMinutos: *req.ToleranciaTardanzaMinutos,
 	}, middleware.UsuarioID(c))
 	if err != nil {
 		responderError(c, err)
@@ -207,12 +205,12 @@ type asignarTurnoRequest struct {
 func (h *Handler) asignarTurno(c *gin.Context) {
 	var req asignarTurnoRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.RespondWithError(c, err)
 		return
 	}
 	fecha, err := time.Parse("2006-01-02", req.FechaEfectiva)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "fecha_efectiva debe tener formato YYYY-MM-DD"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "fecha_efectiva debe tener formato YYYY-MM-DD", nil)
 		return
 	}
 
@@ -223,8 +221,6 @@ func (h *Handler) asignarTurno(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, asignacion)
 }
-
-// --- Calendario ----------------------------------------------------------
 
 func (h *Handler) generarCalendario(c *gin.Context) {
 	anio, ok := idParam(c, "anio")
@@ -242,7 +238,7 @@ func (h *Handler) listarCalendario(c *gin.Context) {
 	desde, err1 := time.Parse("2006-01-02", c.Query("desde"))
 	hasta, err2 := time.Parse("2006-01-02", c.Query("hasta"))
 	if err1 != nil || err2 != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "parámetros 'desde' y 'hasta' son requeridos (YYYY-MM-DD)"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "parámetros 'desde' y 'hasta' son requeridos (YYYY-MM-DD)", nil)
 		return
 	}
 	dias, err := h.service.ListarCalendario(c.Request.Context(), desde, hasta)
@@ -252,8 +248,6 @@ func (h *Handler) listarCalendario(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"data": dias})
 }
-
-// --- Asistencia ------------------------------------------------------------
 
 type registrarAsistenciaRequest struct {
 	EmpleadoID      int64   `json:"empleado_id" binding:"required"`
@@ -269,22 +263,22 @@ type registrarAsistenciaRequest struct {
 func (h *Handler) registrarAsistencia(c *gin.Context) {
 	var req registrarAsistenciaRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.RespondWithError(c, err)
 		return
 	}
 	fecha, err := time.Parse("2006-01-02", req.Fecha)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "fecha debe tener formato YYYY-MM-DD"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "fecha debe tener formato YYYY-MM-DD", nil)
 		return
 	}
 	horaEntrada, err := parseHoraOpcional(req.HoraEntradaReal)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "hora_entrada_real debe tener formato HH:MM"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "hora_entrada_real debe tener formato HH:MM", nil)
 		return
 	}
 	horaSalida, err := parseHoraOpcional(req.HoraSalidaReal)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "hora_salida_real debe tener formato HH:MM"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "hora_salida_real debe tener formato HH:MM", nil)
 		return
 	}
 
@@ -311,7 +305,7 @@ func (h *Handler) listarAsistenciaEmpleado(c *gin.Context) {
 	if !ok {
 		return
 	}
-	p := pagination.Desde(c)
+	p := paginacion.Desde(c)
 	registros, err := h.service.ListarAsistenciaEmpleado(c.Request.Context(), asistenciaFiltro(c, empleadoID, p))
 	if err != nil {
 		responderError(c, err)
@@ -322,14 +316,12 @@ func (h *Handler) listarAsistenciaEmpleado(c *gin.Context) {
 		responderError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": registros, "meta": pagination.NuevaMeta(p, total)})
+	c.JSON(http.StatusOK, gin.H{"data": registros, "meta": paginacion.NuevaMeta(p, total)})
 }
-
-// --- Incapacidades -----------------------------------------------------
 
 type registrarIncapacidadRequest struct {
 	EmpleadoID        int64  `json:"empleado_id" binding:"required"`
-	EntidadEmisora    string `json:"entidad_emisora" binding:"required,oneof=CCSS INS"`
+	EntidadEmisora    string `json:"entidad_emisora" binding:"required,max=20"`
 	NumeroBoleta      string `json:"numero_boleta" binding:"required"`
 	FechaInicio       string `json:"fecha_inicio" binding:"required"`
 	FechaFin          string `json:"fecha_fin" binding:"required"`
@@ -340,13 +332,13 @@ type registrarIncapacidadRequest struct {
 func (h *Handler) registrarIncapacidad(c *gin.Context) {
 	var req registrarIncapacidadRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.RespondWithError(c, err)
 		return
 	}
 	fechaInicio, err1 := time.Parse("2006-01-02", req.FechaInicio)
 	fechaFin, err2 := time.Parse("2006-01-02", req.FechaFin)
 	if err1 != nil || err2 != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "fecha_inicio/fecha_fin deben tener formato YYYY-MM-DD"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "fecha_inicio/fecha_fin deben tener formato YYYY-MM-DD", nil)
 		return
 	}
 
@@ -372,7 +364,7 @@ func (h *Handler) listarIncapacidadesEmpleado(c *gin.Context) {
 	if !ok {
 		return
 	}
-	p := pagination.Desde(c)
+	p := paginacion.Desde(c)
 	var entidadPtr *string
 	if entidad := c.Query("entidad_emisora"); entidad != "" {
 		entidadPtr = &entidad

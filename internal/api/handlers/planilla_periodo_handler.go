@@ -12,11 +12,11 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 	"planillas-ccdr/internal/planilla"
 )
 
-// PlanillaPeriodoHandler expone el ciclo de vida del período (F19).
+// PlanillaPeriodoHandler expone el ciclo de vida del período.
 type PlanillaPeriodoHandler struct {
 	svc *planilla.PeriodoService
 }
@@ -26,7 +26,7 @@ func NewPlanillaPeriodoHandler(svc *planilla.PeriodoService) *PlanillaPeriodoHan
 }
 
 // RegisterRoutes monta las rutas sobre el grupo /planillas (ya protegido).
-// No registra /:id/contabilizar (F28) ni /:id/exportar/* ni /:id/boleta/* (F09).
+// No registra /:id/contabilizar ni /:id/exportar/* ni /:id/boleta/*.
 func (h *PlanillaPeriodoHandler) RegisterRoutes(g *gin.RouterGroup) {
 	g.POST("", middleware.RequirePermission(authz.PermPlanillaCrear), h.Crear)
 	g.GET("", middleware.RequirePermission(authz.PermPlanillaVer), h.Listar)
@@ -75,29 +75,27 @@ func aRespuesta(p dto.PeriodoCicloRow) periodoResponse {
 func fallar(c *gin.Context, err error) {
 	var conErrores *planilla.ErrCalculoConErrores
 	if errors.As(err, &conErrores) {
-		c.AbortWithStatusJSON(http.StatusUnprocessableEntity, gin.H{"error": gin.H{
-			"codigo":    "calculo_con_errores",
-			"mensaje":   "no se pudo calcular el período: hay empleados con errores y no se guardó nada",
-			"empleados": conErrores.Errores,
-		}})
+		middleware.Fail(c, http.StatusUnprocessableEntity, "calculo_con_errores",
+			"no se pudo calcular el período: hay empleados con errores y no se guardó nada",
+			gin.H{"empleados": conErrores.Errores})
 		return
 	}
 	var ec *planilla.ErrorCiclo
 	if errors.As(err, &ec) {
-		c.AbortWithStatusJSON(ec.HTTP, gin.H{"error": gin.H{"codigo": ec.Codigo, "mensaje": ec.Mensaje}})
+		middleware.Fail(c, ec.HTTP, ec.Codigo, ec.Mensaje, nil)
 		return
 	}
 	_ = c.Error(err)
 }
 
 func solicitudInvalida(c *gin.Context, mensaje string) {
-	c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"codigo": "solicitud_invalida", "mensaje": mensaje}})
+	middleware.Fail(c, http.StatusBadRequest, "solicitud_invalida", mensaje, nil)
 }
 
 func usuarioActual(c *gin.Context) (int64, bool) {
 	id, ok := middleware.UsuarioIDDesdeContexto(c)
 	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"codigo": "no_autenticado", "mensaje": "se requiere autenticación"}})
+		middleware.Fail(c, http.StatusUnauthorized, "no_autenticado", "se requiere autenticación", nil)
 	}
 	return id, ok
 }
@@ -173,7 +171,7 @@ func (h *PlanillaPeriodoHandler) Listar(c *gin.Context) {
 			*destino = &t
 		}
 	}
-	pag := pagination.Desde(c)
+	pag := paginacion.Desde(c)
 	filas, total, err := h.svc.Listar(c.Request.Context(), f, pag)
 	if err != nil {
 		fallar(c, err)
@@ -183,7 +181,7 @@ func (h *PlanillaPeriodoHandler) Listar(c *gin.Context) {
 	for i, p := range filas {
 		datos[i] = aRespuesta(p)
 	}
-	c.JSON(http.StatusOK, gin.H{"data": datos, "meta": pagination.NuevaMeta(pag, total)})
+	c.JSON(http.StatusOK, gin.H{"data": datos, "meta": paginacion.NuevaMeta(pag, total)})
 }
 
 // accion adapta una operación del servicio (usuario, período) a un handler.

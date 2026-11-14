@@ -1,15 +1,5 @@
--- L10 — Salario: fuente única (D5) y tipo de contrato por catálogo.
---
--- 1) contratos.tipo_contrato_id (FK a tipos_contrato) reemplaza al texto
---    contratos.tipo_contrato, que queda DEPRECADO (no se elimina). Backfill por
---    coincidencia de código o nombre. Informe de los que no calzan (no borra):
---      SELECT id, tipo_contrato FROM contratos WHERE tipo_contrato_id IS NULL;
--- 2) empleado_datos_laborales.salario_base_nominal pasa a ser COPIA DERIVADA
---    de contratos.salario_pactado del contrato vigente, mantenida por la BD.
---    El cálculo de planilla nunca la lee (L10: segmentos de contrato).
--- 3) contratos no tenía auditoría: se crea con todas sus columnas.
 ALTER TABLE contratos
-  ADD COLUMN tipo_contrato_id BIGINT UNSIGNED NULL COMMENT 'FK a tipos_contrato; reemplaza tipo_contrato (texto, deprecado)',
+  ADD COLUMN tipo_contrato_id BIGINT UNSIGNED NULL COMMENT 'FK a tipos_contrato',
   ADD CONSTRAINT fk_contratos_tipo FOREIGN KEY (tipo_contrato_id) REFERENCES tipos_contrato(id);
 
 UPDATE contratos c
@@ -17,7 +7,6 @@ JOIN tipos_contrato t ON UPPER(t.codigo) = UPPER(c.tipo_contrato) OR UPPER(t.nom
    SET c.tipo_contrato_id = t.id
  WHERE c.tipo_contrato_id IS NULL;
 
--- Copia derivada al crear datos laborales: toma el salario del contrato vigente.
 CREATE TRIGGER trg_edl_salario_derivado_bi BEFORE INSERT ON empleado_datos_laborales
 FOR EACH ROW
 BEGIN
@@ -30,7 +19,6 @@ BEGIN
   END IF;
 END;
 
--- Copia derivada al abrir una versión de contrato vigente.
 CREATE TRIGGER trg_contratos_sync_salario_ai AFTER INSERT ON contratos
 FOR EACH ROW
 BEGIN
@@ -40,7 +28,6 @@ BEGIN
   END IF;
 END;
 
--- Auditoría de contratos (scripts/gen_auditoria.sh).
 DROP TRIGGER IF EXISTS trg_aud_contratos_ins;
 CREATE TRIGGER trg_aud_contratos_ins AFTER INSERT ON contratos
 FOR EACH ROW

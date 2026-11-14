@@ -11,15 +11,15 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// SesionVerificador (F15 / S7) responde, por usuario, si la cuenta sigue activa
+// SesionVerificador responde, por usuario, si la cuenta sigue activa
 // y cuál es su versión de permisos vigente. AuthPASETO compara contra el "pv"
 // del token: si el usuario está inactivo o pv difiere, la sesión es inválida.
 type SesionVerificador interface {
 	EstadoSesion(ctx context.Context, usuarioID int64) (activo bool, permisosVersion uint32, err error)
 }
 
-// FuenteEstadoSesion es la lectura a BD (la implementa *dto.Queries adaptado,
-// ver app.go). Debe devolver sql.ErrNoRows si el usuario no existe.
+// FuenteEstadoSesion lee el estado de sesión del usuario. Devuelve
+// sql.ErrNoRows si el usuario no existe.
 type FuenteEstadoSesion func(ctx context.Context, usuarioID int64) (activo bool, permisosVersion uint32, err error)
 
 type entradaSesion struct {
@@ -30,7 +30,7 @@ type entradaSesion struct {
 
 // SesionCache es un SesionVerificador con caché en memoria de TTL corto y
 // singleflight: N requests concurrentes del mismo usuario con la caché vencida
-// provocan UNA consulta a BD. La revocación tarda como máximo `ttl` en notarse
+// provocan una consulta a BD. La revocación tarda como máximo `ttl` en notarse
 // (por proceso; con varias instancias, cada una tiene su propia caché).
 type SesionCache struct {
 	fuente FuenteEstadoSesion
@@ -61,17 +61,15 @@ func (c *SesionCache) EstadoSesion(ctx context.Context, usuarioID int64) (bool, 
 		}
 	}
 
-	// La consulta compartida no depende del contexto de un request concreto:
-	// si ese cliente cancela, los demás que esperan no deben fallar.
 	v, err, _ := c.sf.Do(fmt.Sprint(usuarioID), func() (any, error) {
 		qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeoutConsultaBD)
 		defer cancel()
 		activo, pv, err := c.fuente(qctx, usuarioID)
 		if errors.Is(err, sql.ErrNoRows) {
-			activo, pv, err = false, 0, nil // usuario inexistente = sesión inválida
+			activo, pv, err = false, 0, nil
 		}
 		if err != nil {
-			return nil, err // no se cachean errores
+			return nil, err
 		}
 		e := entradaSesion{activo: activo, pv: pv, expira: c.ahora().Add(c.ttl)}
 		if c.ttl > 0 {
@@ -96,7 +94,7 @@ func (c *SesionCache) guardar(id int64, e entradaSesion) {
 				delete(c.entradas, k)
 			}
 		}
-		if len(c.entradas) >= maxEntradasCache { // todo vigente: vaciar, es solo caché
+		if len(c.entradas) >= maxEntradasCache {
 			c.entradas = make(map[int64]entradaSesion)
 		}
 	}

@@ -18,17 +18,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"planillas-ccdr/internal/api/middleware"
-	"planillas-ccdr/internal/security"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/credenciales"
+	"planillas-ccdr/internal/rrhh"
 )
-
-// ---------------------------------------------------------------- helpers
 
 func nuevoRouter(extra ...gin.HandlerFunc) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	middleware.ConfigurarValidador()
 	r := gin.New()
-	_ = r.SetTrustedProxies(nil) // como en producción sin TRUSTED_PROXIES
+	_ = r.SetTrustedProxies(nil)
 	r.Use(middleware.RequestID(), middleware.ErrorHandler())
 	r.Use(extra...)
 	return r
@@ -36,8 +34,6 @@ func nuevoRouter(extra ...gin.HandlerFunc) *gin.Engine {
 
 func peticion(r http.Handler, metodo, ruta, cuerpo string, cab map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(metodo, ruta, strings.NewReader(cuerpo))
-	// request_id fijo por defecto: los UUID aleatorios podrían contener por azar
-	// una subcadena que un NotContains busca (p. ej. "abc").
 	req.Header.Set("X-Request-ID", "test-req-0001")
 	for k, v := range cab {
 		req.Header.Set(k, v)
@@ -47,7 +43,7 @@ func peticion(r http.Handler, metodo, ruta, cuerpo string, cab map[string]string
 	return w
 }
 
-// unicoJSON verifica que el cuerpo sea EXACTAMENTE un objeto JSON (una doble
+// unicoJSON verifica que el cuerpo sea exactamente un objeto JSON (una doble
 // escritura dejaría dos objetos concatenados) y lo decodifica.
 func unicoJSON(t *testing.T, w *httptest.ResponseRecorder) middleware.ErrorResponse {
 	t.Helper()
@@ -73,8 +69,6 @@ func rutaBind(r *gin.Engine) {
 		c.Status(http.StatusNoContent)
 	})
 }
-
-// ---------------------------------------------------------------- C3: binding
 
 func TestBindingInvalido_400DatosInvalidos(t *testing.T) {
 	r := nuevoRouter()
@@ -108,7 +102,6 @@ func TestBindingInvalido_400DatosInvalidos(t *testing.T) {
 			if tc.campo != "" {
 				assert.Equal(t, tc.campo, campos[0].(map[string]any)["campo"])
 			}
-			// El mensaje nunca debe traer el texto crudo del decoder ni el valor recibido.
 			assert.NotContains(t, w.Body.String(), "invalid character")
 			assert.NotContains(t, w.Body.String(), "abc")
 			assert.NotContains(t, w.Body.String(), "json:")
@@ -141,7 +134,7 @@ func TestErrorInterno_500GenericoSinFiltrar(t *testing.T) {
 func TestErrSalarioInferiorAlMinimo_MensajeFijo(t *testing.T) {
 	r := nuevoRouter()
 	r.GET("/s", func(c *gin.Context) {
-		middleware.RespondWithError(c, fmt.Errorf("%w: ₡123456 < ₡999999 (detalle interno)", services.ErrSalarioInferiorAlMinimo))
+		middleware.RespondWithError(c, fmt.Errorf("%w: ₡123456 < ₡999999 (detalle interno)", rrhh.ErrSalarioInferiorAlMinimo))
 	})
 	w := peticion(r, http.MethodGet, "/s", "", nil)
 
@@ -164,7 +157,7 @@ func TestParseIDParam_Invalido_400SinDobleRespuesta(t *testing.T) {
 	r.GET("/e/:id", func(c *gin.Context) {
 		id, err := middleware.ParseIDParam(c, "id")
 		if err != nil {
-			_ = c.Error(err) // patrón documentado: propagar y retornar
+			_ = c.Error(err)
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"id": id})
@@ -174,7 +167,7 @@ func TestParseIDParam_Invalido_400SinDobleRespuesta(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	resp := unicoJSON(t, w)
 	assert.Equal(t, "parametro_invalido", resp.Error.Code)
-	assert.NotContains(t, w.Body.String(), "abc") // el valor crudo no se devuelve
+	assert.NotContains(t, w.Body.String(), "abc")
 
 	assert.Equal(t, http.StatusBadRequest, peticion(r, http.MethodGet, "/e/-3", "", nil).Code)
 	assert.Equal(t, http.StatusOK, peticion(r, http.MethodGet, "/e/7", "", nil).Code)
@@ -190,8 +183,6 @@ func TestHandlerQueYaEscribio_NoSeEscribeSegundaRespuesta(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.JSONEq(t, `{"ok":true}`, w.Body.String())
 }
-
-// ---------------------------------------------------------------- cuerpo (413)
 
 func TestLimiteDeCuerpo_413(t *testing.T) {
 	r := nuevoRouter(middleware.LimitarCuerpo(1024))
@@ -219,8 +210,6 @@ func TestLimiteDeCuerpo_413(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------- rate limit (429)
-
 func TestRateLimitPorIP_429ConRetryAfter(t *testing.T) {
 	lim, err := middleware.NuevoLimitador(60, 2)
 	require.NoError(t, err)
@@ -243,7 +232,6 @@ func TestRateLimitPorIP_429ConRetryAfter(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, desde("/auth/login", "203.0.113.5", "").Code)
 	assert.Equal(t, http.StatusNoContent, desde("/auth/login", "203.0.113.5", "").Code)
 
-	// Tercera: rechazada. Falsificar X-Forwarded-For NO ayuda (sin proxies de confianza).
 	w := desde("/auth/login", "203.0.113.5", "1.2.3.4")
 	require.Equal(t, http.StatusTooManyRequests, w.Code)
 	assert.Equal(t, "demasiadas_solicitudes", unicoJSON(t, w).Error.Code)
@@ -251,7 +239,6 @@ func TestRateLimitPorIP_429ConRetryAfter(t *testing.T) {
 	require.NotEmpty(t, seg)
 	assert.NotEqual(t, "0", seg)
 
-	// Otra ruta de la misma IP y otra IP en la misma ruta tienen su propio cupo.
 	assert.Equal(t, http.StatusNoContent, desde("/auth/refresh", "203.0.113.5", "").Code)
 	assert.Equal(t, http.StatusNoContent, desde("/auth/login", "198.51.100.9", "").Code)
 }
@@ -260,10 +247,10 @@ func TestRateLimitPorUsuario(t *testing.T) {
 	lim, err := middleware.NuevoLimitador(60, 1)
 	require.NoError(t, err)
 
-	r := nuevoRouter(func(c *gin.Context) { // simula AuthPASETO
+	r := nuevoRouter(func(c *gin.Context) {
 		var id int64
 		fmt.Sscan(c.GetHeader("X-Test-Usuario"), &id)
-		c.Set(middleware.CtxKeyPayload, &security.Payload{UsuarioID: id})
+		c.Set(middleware.CtxKeyPayload, &credenciales.Payload{UsuarioID: id})
 		c.Next()
 	}, middleware.LimitarPorUsuario(lim))
 	r.GET("/p", func(c *gin.Context) { c.Status(http.StatusNoContent) })
@@ -273,7 +260,7 @@ func TestRateLimitPorUsuario(t *testing.T) {
 	}
 	assert.Equal(t, http.StatusNoContent, con("1"))
 	assert.Equal(t, http.StatusTooManyRequests, con("1"))
-	assert.Equal(t, http.StatusNoContent, con("2")) // otro usuario, otro cupo
+	assert.Equal(t, http.StatusNoContent, con("2"))
 }
 
 func TestLimitador_RellenoYPurga(t *testing.T) {
@@ -285,7 +272,7 @@ func TestLimitador_RellenoYPurga(t *testing.T) {
 	assert.True(t, ok)
 	ok, espera := lim.Permitir("a")
 	assert.False(t, ok)
-	assert.InDelta(t, 1.0, espera.Seconds(), 0.01) // 60/min = 1 ficha por segundo
+	assert.InDelta(t, 1.0, espera.Seconds(), 0.01)
 
 	ahora = ahora.Add(1100 * time.Millisecond)
 	ok, _ = lim.Permitir("a")
@@ -294,7 +281,7 @@ func TestLimitador_RellenoYPurga(t *testing.T) {
 	lim.Permitir("b")
 	require.Equal(t, 2, lim.Tamano())
 	ahora = ahora.Add(10 * time.Minute)
-	lim.Permitir("c") // dispara la purga de las inactivas
+	lim.Permitir("c")
 	assert.Equal(t, 1, lim.Tamano(), "a y b se purgan; queda c")
 }
 
@@ -304,8 +291,6 @@ func TestNuevoLimitador_RechazaCero(t *testing.T) {
 	_, err = middleware.NuevoLimitador(5, 0)
 	assert.Error(t, err)
 }
-
-// ---------------------------------------------------------------- CORS
 
 func TestCORS(t *testing.T) {
 	const ok = "https://planillas.ccdrliberia.go.cr"
@@ -358,15 +343,13 @@ func TestCORS(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------- cabeceras
-
 func TestCabecerasDeSeguridad(t *testing.T) {
 	for _, prod := range []bool{false, true} {
 		r := gin.New()
 		r.Use(middleware.SecurityHeaders(prod))
 		r.GET("/h", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
-		for _, ruta := range []string{"/h", "/no-existe"} { // también en el 404
+		for _, ruta := range []string{"/h", "/no-existe"} {
 			w := peticion(r, http.MethodGet, ruta, "", nil)
 			h := w.Header()
 			assert.Equal(t, "nosniff", h.Get("X-Content-Type-Options"))
@@ -382,8 +365,6 @@ func TestCabecerasDeSeguridad(t *testing.T) {
 		}
 	}
 }
-
-// ---------------------------------------------------------------- logging
 
 func routerConLog(buf *bytes.Buffer) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -443,7 +424,7 @@ func TestRequestID_EcoYValidacion(t *testing.T) {
 	w = peticion(r, http.MethodGet, "/r", "", map[string]string{"X-Request-ID": `mal "id"` + "\n{x}"})
 	generado := w.Header().Get("X-Request-ID")
 	assert.NotContains(t, generado, `"`)
-	assert.Len(t, generado, 36) // UUID
+	assert.Len(t, generado, 36)
 
 	assert.Contains(t, buf.String(), `"request_id":"abc-12345"`)
 }

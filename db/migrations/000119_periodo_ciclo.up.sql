@@ -1,6 +1,3 @@
--- F19: ciclo de vida del período y segregación de funciones.
--- Sin DELIMITER (mismo estilo que las migraciones con triggers existentes).
-
 ALTER TABLE periodos_planilla
   ADD COLUMN calculado_por_usuario_id      BIGINT UNSIGNED NULL COMMENT 'Usuario que ejecutó el último cálculo',
   ADD COLUMN fecha_calculo                 DATETIME NULL COMMENT 'Fecha/hora del último cálculo',
@@ -13,11 +10,6 @@ ALTER TABLE periodos_planilla
   ADD CONSTRAINT fk_pp_pagador         FOREIGN KEY (pagado_por_usuario_id)        REFERENCES usuarios(id),
   ADD CONSTRAINT fk_pp_contabilizador  FOREIGN KEY (contabilizado_por_usuario_id) REFERENCES usuarios(id);
 
--- ---------------------------------------------------------------------------
--- periodos_planilla: transiciones válidas + segregación + inmutabilidad
--- Los mensajes empiezan con un prefijo que el servicio Go traduce a errores
--- de dominio: periodo_inmutable | transicion_invalida | segregacion_funciones
--- ---------------------------------------------------------------------------
 CREATE TRIGGER trg_pp_ciclo_bu BEFORE UPDATE ON periodos_planilla
 FOR EACH ROW
 BEGIN
@@ -76,8 +68,6 @@ BEGIN
       END IF;
     END IF;
 
-    -- contabilizada: el NULL se tolera hasta F28 (el endpoint /contabilizar ya
-    -- existe y aun no llena contabilizado_por_usuario_id). F28 debe exigirlo.
     IF NEW.estado = 'contabilizada' THEN
       IF NEW.contabilizado_por_usuario_id <=> NEW.pagado_por_usuario_id
          AND NEW.contabilizado_por_usuario_id IS NOT NULL THEN
@@ -95,11 +85,6 @@ BEGIN
   END IF;
 END;
 
--- ---------------------------------------------------------------------------
--- planilla_detalle_empleado: inmutable desde aprobada (solo cambia `estado`,
--- y solo al valor que corresponde al estado del período)
--- LOCK IN SHARE MODE: evita leer un estado obsoleto del período (snapshot).
--- ---------------------------------------------------------------------------
 CREATE TRIGGER trg_pde_inmutable_bi BEFORE INSERT ON planilla_detalle_empleado
 FOR EACH ROW
 BEGIN
@@ -146,9 +131,6 @@ BEGIN
   END IF;
 END;
 
--- ---------------------------------------------------------------------------
--- planilla_detalle_concepto: inmutable desde aprobada
--- ---------------------------------------------------------------------------
 CREATE TRIGGER trg_pdc_inmutable_bi BEFORE INSERT ON planilla_detalle_concepto
 FOR EACH ROW
 BEGIN

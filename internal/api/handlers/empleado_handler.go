@@ -1,8 +1,3 @@
-// api/handlers/empleado_handler.go
-//
-// Fase 3 — Handlers delgados de Empleados. Solo bind de DTOs, llamada a la
-// capa de servicio y traducción de errores vía middleware.RespondWithError.
-// Toda la lógica de negocio vive en services/empleado_service.go.
 package handlers
 
 import (
@@ -11,35 +6,31 @@ import (
 
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
-	"planillas-ccdr/internal/pagination"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/paginacion"
+	"planillas-ccdr/internal/rrhh"
 
 	"github.com/gin-gonic/gin"
 )
 
 type EmpleadoHandler struct {
-	service services.EmpleadoService
+	service rrhh.EmpleadoService
 }
 
-func NewEmpleadoHandler(service services.EmpleadoService) *EmpleadoHandler {
+func NewEmpleadoHandler(service rrhh.EmpleadoService) *EmpleadoHandler {
 	return &EmpleadoHandler{service: service}
 }
 
 // usuarioIDDesdeContexto y parseIDParam son helpers compartidos por todos los
 // handlers del paquete `handlers` (contratos y organización también los usan).
-//
-// usuarioIDDesdeContexto devuelve el usuario autenticado como int64 (D1),
-// leyendo el payload que AuthPASETO deja en el contexto (middleware.UsuarioID
-// devuelve 0 si no hay payload). (0, false) => el handler responde 401.
 func usuarioIDDesdeContexto(c *gin.Context) (int64, bool) {
 	id := middleware.UsuarioID(c)
 	return id, id > 0
 }
 
 // parseIDParam lee el parámetro de ruta como ID int64 estrictamente positivo
-// con middleware.ParseIDParam. Si es inválido responde 400 UNA sola vez y
+// con middleware.ParseIDParam. Si es inválido responde 400 una sola vez y
 // devuelve (0, false): el handler solo debe hacer `return`. (ParseIDParam no
-// escribe la respuesta; aquí NO se llama además a c.Error, para no duplicarla
+// escribe la respuesta; aquí no se llama además a c.Error, para no duplicarla
 // con ErrorHandler.)
 func parseIDParam(c *gin.Context, nombre string) (int64, bool) {
 	id, err := middleware.ParseIDParam(c, nombre)
@@ -57,6 +48,7 @@ func (h *EmpleadoHandler) RegisterRoutes(rg *gin.RouterGroup) {
 		empleados.POST("", middleware.RequirePermission(authz.PermEmpleadosCrear), h.CrearExpediente)
 		empleados.GET("", middleware.RequirePermission(authz.PermEmpleadosLeer), h.ListarEmpleados)
 		empleados.GET("/:id", middleware.RequirePermission(authz.PermEmpleadosLeer), h.GetEmpleado)
+		empleados.GET("/:id/datos-sensibles", middleware.RequirePermission(authz.PermEmpleadosLeer), h.DatosSensibles)
 
 		empleados.PUT("/:id/datos-personales", middleware.RequirePermission(authz.PermEmpleadosActualizar), h.ActualizarDatosPersonales)
 		empleados.PUT("/:id/datos-laborales", middleware.RequirePermission(authz.PermEmpleadosActualizar), h.ActualizarDatosLaborales)
@@ -75,7 +67,7 @@ func (h *EmpleadoHandler) CrearExpediente(c *gin.Context) {
 		return
 	}
 
-	var req services.CrearEmpleadoRequest
+	var req rrhh.CrearEmpleadoRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -90,12 +82,12 @@ func (h *EmpleadoHandler) CrearExpediente(c *gin.Context) {
 }
 
 func (h *EmpleadoHandler) ListarEmpleados(c *gin.Context) {
-	var req services.ListarEmpleadosRequest
+	var req rrhh.ListarEmpleadosRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
 		responderErrorBind(c, "parámetros de consulta inválidos", err)
 		return
 	}
-	req.Paginacion = pagination.Desde(c)
+	req.Paginacion = paginacion.Desde(c)
 
 	resp, err := h.service.ListarEmpleados(c.Request.Context(), req)
 	if err != nil {
@@ -112,7 +104,7 @@ func (h *EmpleadoHandler) GetEmpleado(c *gin.Context) {
 	}
 
 	resp, err := h.service.GetEmpleado(c.Request.Context(), empleadoID)
-	if errors.Is(err, services.ErrEmpleadoNoEncontrado) {
+	if errors.Is(err, rrhh.ErrEmpleadoNoEncontrado) {
 		middleware.Fail(c, http.StatusNotFound, "not_found", "empleado no encontrado", nil)
 		return
 	}
@@ -120,6 +112,37 @@ func (h *EmpleadoHandler) GetEmpleado(c *gin.Context) {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al obtener empleado", err)
 		return
 	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// DatosSensibles maneja GET /empleados/:id/datos-sensibles.
+func (h *EmpleadoHandler) DatosSensibles(c *gin.Context) {
+	empleadoID, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	usuarioID, ok := usuarioIDDesdeContexto(c)
+	if !ok {
+		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "Token de autenticación requerido", nil)
+		return
+	}
+	verSensible := false
+	if p := middleware.PayloadDesdeContexto(c); p != nil {
+		verSensible = tienePermiso(p.Permisos, authz.PermDatosPersonalesVerSensible)
+	}
+	resp, err := h.service.DatosSensibles(c.Request.Context(), rrhh.SolicitudDatosSensibles{
+		UsuarioID: usuarioID, VerSensible: verSensible, Recurso: "GET /empleados/:id/datos-sensibles",
+		IP: c.ClientIP(), RequestID: middleware.RequestIDDesdeGin(c),
+	}, empleadoID)
+	if errors.Is(err, rrhh.ErrEmpleadoNoEncontrado) {
+		middleware.Fail(c, http.StatusNotFound, "not_found", "empleado no encontrado", nil)
+		return
+	}
+	if err != nil {
+		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al leer datos del empleado", err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -134,7 +157,7 @@ func (h *EmpleadoHandler) ActualizarDatosPersonales(c *gin.Context) {
 		return
 	}
 
-	var in services.DatosPersonalesInput
+	var in rrhh.DatosPersonalesInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -158,7 +181,7 @@ func (h *EmpleadoHandler) ActualizarDatosLaborales(c *gin.Context) {
 		return
 	}
 
-	var in services.DatosLaboralesInput
+	var in rrhh.DatosLaboralesInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -182,7 +205,7 @@ func (h *EmpleadoHandler) ActualizarDatosBancarios(c *gin.Context) {
 		return
 	}
 
-	var in services.DatosBancariosInput
+	var in rrhh.DatosBancariosInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -206,7 +229,7 @@ func (h *EmpleadoHandler) AgregarFamiliar(c *gin.Context) {
 		return
 	}
 
-	var in services.DatosFamiliarInput
+	var in rrhh.DatosFamiliarInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -230,7 +253,7 @@ func (h *EmpleadoHandler) ActualizarFamiliar(c *gin.Context) {
 		return
 	}
 
-	var in services.DatosFamiliarInput
+	var in rrhh.DatosFamiliarInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return

@@ -1,9 +1,3 @@
-// api/handlers/contrato_handler.go
-//
-// Fase 3 — Handlers delgados de Contratos. La validación de salario mínimo
-// y la regla de vigencia 2-pasos viven en services/contrato_service.go;
-// aquí solo se traducen los errores de negocio a códigos HTTP
-// (ver rrhh_errores.go en este paquete).
 package handlers
 
 import (
@@ -12,22 +6,22 @@ import (
 
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
-	"planillas-ccdr/internal/pagination"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/paginacion"
+	"planillas-ccdr/internal/rrhh"
 
 	"github.com/gin-gonic/gin"
 )
 
 type ContratoHandler struct {
-	service services.ContratoService
+	service rrhh.ContratoService
 }
 
 type contratoResponseSegura struct {
-	services.ContratoResponse
+	rrhh.ContratoResponse
 	SalarioPactado any `json:"salario_pactado"`
 }
 
-func NewContratoHandler(service services.ContratoService) *ContratoHandler {
+func NewContratoHandler(service rrhh.ContratoService) *ContratoHandler {
 	return &ContratoHandler{service: service}
 }
 
@@ -38,8 +32,6 @@ func (h *ContratoHandler) RegisterRoutes(rg *gin.RouterGroup) {
 		contratos.GET("", middleware.RequirePermission(authz.PermContratosLeer), h.ListarContratos)
 	}
 
-	// Anidados bajo empleados, por legibilidad de la URL (mismo grupo raíz
-	// que api/handlers/empleado_handler.go).
 	empleados := rg.Group("/empleados")
 	{
 		empleados.PUT("/:id/contrato", middleware.RequirePermission(authz.PermContratosActualizar), h.ActualizarContrato)
@@ -55,7 +47,7 @@ func (h *ContratoHandler) CrearContrato(c *gin.Context) {
 		return
 	}
 
-	var req services.CrearContratoRequest
+	var req rrhh.CrearContratoRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -80,7 +72,7 @@ func (h *ContratoHandler) ActualizarContrato(c *gin.Context) {
 		return
 	}
 
-	var req services.ActualizarContratoRequest
+	var req rrhh.ActualizarContratoRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -101,7 +93,7 @@ func (h *ContratoHandler) GetContratoVigente(c *gin.Context) {
 	}
 
 	resp, err := h.service.GetContratoVigente(c.Request.Context(), empleadoID)
-	if errors.Is(err, services.ErrContratoNoEncontrado) {
+	if errors.Is(err, rrhh.ErrContratoNoEncontrado) {
 		middleware.Fail(c, http.StatusNotFound, "not_found", "el empleado no tiene contrato vigente", nil)
 		return
 	}
@@ -117,9 +109,9 @@ func (h *ContratoHandler) ListarHistoricoPorEmpleado(c *gin.Context) {
 	if !ok {
 		return
 	}
-	paginacion := pagination.Desde(c)
+	pag := paginacion.Desde(c)
 
-	items, resumenPaginacion, err := h.service.ListarHistoricoPorEmpleado(c.Request.Context(), empleadoID, paginacion)
+	items, resumenPaginacion, err := h.service.ListarHistoricoPorEmpleado(c.Request.Context(), empleadoID, pag)
 	if err != nil {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al listar histórico de contratos", err)
 		return
@@ -132,12 +124,12 @@ func (h *ContratoHandler) ListarHistoricoPorEmpleado(c *gin.Context) {
 }
 
 func (h *ContratoHandler) ListarContratos(c *gin.Context) {
-	var req services.ListarContratosRequest
+	var req rrhh.ListarContratosRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
 		responderErrorBind(c, "parámetros de consulta inválidos", err)
 		return
 	}
-	req.Paginacion = pagination.Desde(c)
+	req.Paginacion = paginacion.Desde(c)
 
 	resp, err := h.service.ListarContratos(c.Request.Context(), req)
 	if err != nil {
@@ -151,7 +143,7 @@ func (h *ContratoHandler) ListarContratos(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"contratos": contratos, "paginacion": resp.Paginacion})
 }
 
-func contratoSeguro(c *gin.Context, contrato services.ContratoResponse) contratoResponseSegura {
+func contratoSeguro(c *gin.Context, contrato rrhh.ContratoResponse) contratoResponseSegura {
 	salario := any(contrato.SalarioPactado)
 	payload := middleware.PayloadDesdeContexto(c)
 	if payload == nil || !tienePermiso(payload.Permisos, authz.PermDatosPersonalesVerSensible) {

@@ -1,7 +1,3 @@
-// L13 — Autorización previa de horas extra. Una hora extra registrada en
-// asistencia solo se paga si el día tiene una autorización 'autorizada'
-// (dto.SumarHorasExtraPeriodo aplica el tope). Quien solicita no puede
-// resolver (segregación: 403 aquí y CHECK chk_hea_segregacion en la BD).
 package asistencia
 
 import (
@@ -16,7 +12,7 @@ import (
 
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
 // ErrorHorasExtra: error de dominio con código estable, mensaje seguro y HTTP.
@@ -97,7 +93,7 @@ func (s *HorasExtraService) Solicitar(ctx context.Context, usuarioID int64, in S
 			TipoHoraExtraID: in.TipoHoraExtraID, Motivo: motivo, SolicitadoPor: usuarioID,
 		})
 		var me *mysql.MySQLError
-		if errors.As(err, &me) && me.Number == 1062 { // uk_hea (empleado, fecha)
+		if errors.As(err, &me) && me.Number == 1062 {
 			return ErrAutorizacionDuplicada
 		}
 		if err != nil {
@@ -151,7 +147,7 @@ func (s *HorasExtraService) resolver(ctx context.Context, usuarioID, id int64, e
 	return out, err
 }
 
-func (s *HorasExtraService) Listar(ctx context.Context, f dto.FiltroHorasExtraAutorizaciones, pag pagination.Parametros) ([]dto.HoraExtraAutorizacionRow, int64, error) {
+func (s *HorasExtraService) Listar(ctx context.Context, f dto.FiltroHorasExtraAutorizaciones, pag paginacion.Parametros) ([]dto.HoraExtraAutorizacionRow, int64, error) {
 	q := dto.New(s.db)
 	total, err := q.ContarHorasExtraAutorizaciones(ctx, f)
 	if err != nil {

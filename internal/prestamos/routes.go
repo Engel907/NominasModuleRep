@@ -7,14 +7,7 @@ import (
 	"planillas-ccdr/internal/authz"
 )
 
-// RegisterRoutes monta los endpoints del módulo bajo el grupo recibido
-// (normalmente /api/v1). Cada ruta está protegida por AuthMiddleware
-// (ya aplicado al grupo raíz por el caller) y por RequirePermission con
-// el código de permiso atómico correspondiente — nunca por rol directo,
-// según la regla de autorización de ADR-000 sección 3.
-//
-// Los códigos son las constantes de internal/authz (prestamos.*, embargos.* y
-// terceros.*) y los siembra la migración 000112.
+// RegisterRoutes monta los endpoints del módulo; cada ruta exige su permiso.
 func RegisterRoutes(rg *gin.RouterGroup, h *Handler) {
 	terceros := rg.Group("/terceros")
 	{

@@ -1,10 +1,5 @@
 package handlers_test
 
-// Tests de coherencia de autorización (F12, tests a y c).
-//
-// Usa el PasetoMaker real de internal/security: el token de prueba es un access
-// token válido de un usuario SIN ningún permiso, y pasa por AuthPASETO de verdad.
-
 import (
 	"context"
 	"net/http"
@@ -19,7 +14,7 @@ import (
 	"planillas-ccdr/internal/api/handlers"
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
-	"planillas-ccdr/internal/security"
+	"planillas-ccdr/internal/credenciales"
 )
 
 // claveDePrueba cumple el largo exacto de 32 bytes que exige NuevoPasetoMaker.
@@ -27,9 +22,9 @@ const claveDePrueba = "0123456789abcdef0123456789abcdef"
 
 // tokenSinPermisos emite un access token válido de un usuario autenticado con
 // la lista de permisos vacía.
-func tokenSinPermisos(t *testing.T) (security.TokenMaker, string) {
+func tokenSinPermisos(t *testing.T) (credenciales.TokenMaker, string) {
 	t.Helper()
-	maker, err := security.NuevoPasetoMaker(security.ConfigPaseto{
+	maker, err := credenciales.NuevoPasetoMaker(credenciales.ConfigPaseto{
 		Claves:    map[string][]byte{"k1": []byte(claveDePrueba)},
 		KIDActivo: "k1",
 		Issuer:    "planillas-test",
@@ -101,7 +96,7 @@ func TestPermisosExigidosPorLasRutasEstanEnAuthz(t *testing.T) {
 }
 
 // (c) Toda ruta de /api/v1 fuera de la lista blanca responde 403 a un usuario
-// autenticado sin permisos. Una ruta protegida SIN RequirePermission llegaría
+// autenticado sin permisos. Una ruta protegida sin RequirePermission llegaría
 // al handler (con dependencias nil): responderá otra cosa o entrará en pánico
 // (gin.Recovery => 500) y el test falla señalando la ruta.
 func TestRutasProtegidasExigenPermiso(t *testing.T) {
@@ -121,7 +116,6 @@ func TestRutasProtegidasExigenPermiso(t *testing.T) {
 		t.Fatal("no hay rutas protegidas que probar: el router no se montó como se esperaba")
 	}
 
-	// La lista blanca no debe pudrirse: cada entrada tiene que existir.
 	var obsoletas []string
 	for clave := range rutasSinPermiso {
 		if !existentes[clave] {

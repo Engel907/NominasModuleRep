@@ -2,7 +2,7 @@
 // desde variables de entorno o .env. Antes vivía como paquete "utils" en la
 // raíz del módulo; se renombró y se movió bajo internal/ para que el nombre
 // del paquete describa su contenido y quede protegido de imports externos
-// como el resto de la app (ver ORGANIZACION.md).
+// como el resto de la app.
 package config
 
 import (
@@ -21,6 +21,8 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/viper"
+
+	"planillas-ccdr/internal/cripto"
 )
 
 // Config es la configuración completa de la aplicación, cargada desde
@@ -32,9 +34,9 @@ type Config struct {
 	Database   DatabaseConfig
 	Auth       AuthConfig
 	SMTP       SMTPConfig
-	Asistencia AsistenciaConfig
 	RateLimit  RateLimitConfig
 	Parametros ParametrosConfig
+	Datos      DatosConfig
 }
 
 type AppConfig struct {
@@ -46,7 +48,7 @@ func (a AppConfig) IsProduction() bool {
 	return a.Env == "production"
 }
 
-// SlogLevel traduce LOG_LEVEL (debug|info|warn|error) a slog.Level. validate()
+// SlogLevel traduce LOG_LEVEL (debug|info|warn|error) a slog.Level. validate
 // ya rechaza valores inválidos; ante uno desconocido devuelve Info.
 func (a AppConfig) SlogLevel() slog.Level {
 	var l slog.Level
@@ -63,18 +65,22 @@ type ServerConfig struct {
 	IdleTimeout     time.Duration
 	ShutdownTimeout time.Duration
 
-	// F16 (S8/S15). MaxBodyBytes acota el cuerpo de toda petición.
+	// (S8/S15). MaxBodyBytes acota el cuerpo de toda petición.
 	// TrustedProxies son las IP/CIDR de los proxies que SÍ pueden informar la IP
 	// real vía X-Forwarded-For (vacío = ninguno). CORSAllowedOrigins es la lista
 	// blanca exacta de orígenes (vacía = ninguno; "*" no se admite).
 	MaxBodyBytes       int64
 	TrustedProxies     []string
 	CORSAllowedOrigins []string
+
+	// MetricsToken: Bearer exigido por /metrics; vacío = métricas
+	// deshabilitadas (404). Mínimo 32 caracteres.
+	MetricsToken string
 }
 
-// RateLimitConfig (F16/S8): límites por minuto y ráfaga. NO tienen valor por
+// RateLimitConfig: límites por minuto y ráfaga. No tienen valor por
 // defecto: un default inseguro (o un "0 = sin límite") pasaría desapercibido,
-// así que deben declararse y ser > 0 (ver .env.example).
+// así que deben declararse y ser > 0.
 type RateLimitConfig struct {
 	// Por IP y ruta, en login, refresh, logout y reset de contraseña.
 	AuthPorMin int
@@ -98,9 +104,9 @@ type DatabaseConfig struct {
 	ConnectTimeout  time.Duration
 	PingTimeout     time.Duration
 
-	// F16 (S9). TLSMode: disabled | required | verify-full.
+	// TLSMode: disabled | required | verify-full.
 	//   disabled    sin TLS (prohibido con APP_ENV=production).
-	//   required    TLS obligatorio, cifra el canal pero NO verifica el
+	//   required    TLS obligatorio, cifra el canal pero no verifica el
 	//               certificado del servidor (no protege contra un MITM activo).
 	//   verify-full TLS verificando la cadena (TLSCAFile o raíces del sistema) y
 	//               que el certificado corresponda a Host.
@@ -119,9 +125,6 @@ func (d DatabaseConfig) TLSConfig() (*tls.Config, error) {
 	case "", "disabled":
 		return nil, nil
 	case "required":
-		// Cifrado sin verificación de certificado: es exactamente lo que
-		// significa "required" (ver arriba); se documenta y se advierte al
-		// arrancar en producción.
 		return &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}, nil // #nosec G402
 	case "verify-full":
 		cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: d.Host}
@@ -142,7 +145,7 @@ func (d DatabaseConfig) TLSConfig() (*tls.Config, error) {
 }
 
 // RegistrarTLS registra la config TLS en el driver MySQL bajo el nombre que
-// usa DSN(). Debe llamarse ANTES de sql.Open. No hace nada si TLSMode=disabled.
+// usa DSN. Debe llamarse antes de sql.Open. No hace nada si TLSMode=disabled.
 func (d DatabaseConfig) RegistrarTLS() error {
 	cfg, err := d.TLSConfig()
 	if err != nil {
@@ -170,7 +173,7 @@ func (d DatabaseConfig) DSN() string {
 	return dsn
 }
 
-// SMTPConfig es el canal de correo del reset de contraseña (F14 / S2).
+// SMTPConfig es el canal de correo del reset de contraseña.
 // Con Host vacío no hay SMTP: solo se permite en APP_ENV=development, donde
 // auth.LogNotificador registra el token en el log.
 type SMTPConfig struct {
@@ -178,32 +181,44 @@ type SMTPConfig struct {
 	Port string // 465 = TLS implícito; cualquier otro = STARTTLS obligatorio
 	User string
 	Pass string
-	From string // p.ej. "Planillas CCDR <no-responder@ccdrliberia.go.cr>"
+	From string // p.ej. "Planillas <no-responder@ejemplo.cr>"
 	// URLBaseReset es la URL del frontend a la que se agrega ?token=...
 	URLBaseReset string
+	// NombreSistema: cómo se nombra el sistema en los correos (p. ej. el de
+	// la organización). Obligatorio cuando hay SMTP.
+	NombreSistema string
 }
 
-type AsistenciaConfig struct {
-	ToleranciaTardanzaMin int
-}
-
-// ParametrosConfig (F18A): caché en memoria del servicio parametros.Generales.
+// ParametrosConfig: caché en memoria del servicio parametros.Generales.
 // CacheTTL es la latencia máxima con la que un cambio en parametros_generales
-// se ve en un proceso que no llamó a Invalidar() (0 = sin caché).
+// se ve en un proceso que no llamó a Invalidar (0 = sin caché).
 type ParametrosConfig struct {
 	CacheTTL time.Duration
 }
 
+// DatosConfig (Ley 8968): llavero de cifrado de datos personales en
+// reposo (AES-256-GCM) y llave HMAC de búsqueda. Ver internal/cripto.
+type DatosConfig struct {
+	LlavesHex string // DATA_KEYS_HEX = "kid:hex,kid:hex"
+	KidActivo string // DATA_ACTIVE_KID
+	HMACHex   string // DATA_HMAC_KEY_HEX (no rota con las de cifrado)
+}
+
+// Llavero construye y valida el llavero de datos.
+func (d DatosConfig) Llavero() (*cripto.Llavero, error) {
+	return cripto.NuevoLlavero(d.LlavesHex, d.KidActivo, d.HMACHex)
+}
+
 type AuthConfig struct {
-	// PasetoLocalKeyHex (LEGADO, F15): una sola clave v4.local en hex (64
+	// PasetoLocalKeyHex (LEGADO): una sola clave v4.local en hex (64
 	// caracteres). Se acepta solo si PasetoLocalKeysHex está vacío; equivale a
 	// una clave con kid "k1". Preferir PasetoLocalKeysHex.
 	PasetoLocalKeyHex string
-	// PasetoLocalKeysHex (F15): llavero "kid1:hex,kid2:hex". Se firma con
+	// PasetoLocalKeysHex: llavero "kid1:hex,kid2:hex". Se firma con
 	// PasetoActiveKID y se valida con cualquiera de la lista (rotación).
 	PasetoLocalKeysHex string
 	PasetoActiveKID    string
-	// CacheTTL (F15): vigencia de la caché del verificador de sesión. Es la
+	// CacheTTL: vigencia de la caché del verificador de sesión. Es la
 	// cota superior de latencia de una revocación (0 = sin caché).
 	CacheTTL            time.Duration
 	AccessTokenDuration time.Duration
@@ -244,7 +259,6 @@ func cargarConfig(validar func(*Config) error) (*Config, error) {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return nil, fmt.Errorf("config: error leyendo .env: %w", err)
 		}
-		// .env no encontrado: seguimos solo con env vars + defaults.
 	}
 
 	cfg := &Config{
@@ -261,6 +275,7 @@ func cargarConfig(validar func(*Config) error) (*Config, error) {
 
 			MaxBodyBytes:       v.GetInt64("MAX_BODY_BYTES"),
 			TrustedProxies:     listaCSV(v.GetString("TRUSTED_PROXIES")),
+			MetricsToken:       v.GetString("METRICS_TOKEN"),
 			CORSAllowedOrigins: listaCSV(v.GetString("CORS_ALLOWED_ORIGINS")),
 		},
 		Database: DatabaseConfig{
@@ -285,15 +300,20 @@ func cargarConfig(validar func(*Config) error) (*Config, error) {
 			UsuarioPorMin: v.GetInt("RATE_LIMIT_USER_PER_MIN"),
 			UsuarioBurst:  v.GetInt("RATE_LIMIT_USER_BURST"),
 		},
-		Asistencia: AsistenciaConfig{ToleranciaTardanzaMin: v.GetInt("ASISTENCIA_TOLERANCIA_TARDANZA_MIN")},
 		Parametros: ParametrosConfig{CacheTTL: v.GetDuration("PARAMETROS_CACHE_TTL")},
+		Datos: DatosConfig{
+			LlavesHex: v.GetString("DATA_KEYS_HEX"),
+			KidActivo: v.GetString("DATA_ACTIVE_KID"),
+			HMACHex:   v.GetString("DATA_HMAC_KEY_HEX"),
+		},
 		SMTP: SMTPConfig{
-			Host:         v.GetString("SMTP_HOST"),
-			Port:         v.GetString("SMTP_PORT"),
-			User:         v.GetString("SMTP_USER"),
-			Pass:         v.GetString("SMTP_PASS"),
-			From:         v.GetString("SMTP_FROM"),
-			URLBaseReset: v.GetString("URL_BASE_RESET"),
+			Host:          v.GetString("SMTP_HOST"),
+			Port:          v.GetString("SMTP_PORT"),
+			User:          v.GetString("SMTP_USER"),
+			Pass:          v.GetString("SMTP_PASS"),
+			From:          v.GetString("SMTP_FROM"),
+			URLBaseReset:  v.GetString("URL_BASE_RESET"),
+			NombreSistema: strings.TrimSpace(v.GetString("NOMBRE_SISTEMA")),
 		},
 		Auth: AuthConfig{
 			PasetoLocalKeyHex:   v.GetString("PASETO_LOCAL_KEY_HEX"),
@@ -337,21 +357,19 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("DB_CONN_MAX_IDLE_TIME_MINUTES", 2)
 	v.SetDefault("DB_CONNECT_TIMEOUT_SECONDS", 5)
 	v.SetDefault("DB_PING_TIMEOUT_SECONDS", 5)
-	v.SetDefault("DB_TLS_MODE", "disabled") // con APP_ENV=production validate() lo rechaza
+	v.SetDefault("DB_TLS_MODE", "disabled")
 
-	v.SetDefault("MAX_BODY_BYTES", 1<<20) // 1 MiB
-	// RATE_LIMIT_*: sin default a propósito (ver RateLimitConfig).
+	v.SetDefault("MAX_BODY_BYTES", 1<<20)
 
 	v.SetDefault("PASETO_ACCESS_TOKEN_MINUTES", 20)
 	v.SetDefault("AUTH_CACHE_TTL", "5s")
-	v.SetDefault("PASETO_ISSUER", "planillas-ccdr")
-	v.SetDefault("PASETO_AUDIENCE", "planillas-ccdr-api")
+	v.SetDefault("PASETO_ISSUER", "planillas")
+	v.SetDefault("PASETO_AUDIENCE", "planillas-api")
 
-	v.SetDefault("AUTH_REFRESH_TOKEN_HOURS", 168) // 7 días
+	v.SetDefault("AUTH_REFRESH_TOKEN_HOURS", 168)
 	v.SetDefault("AUTH_PASSWORD_RESET_TOKEN_MINUTES", 30)
 	v.SetDefault("AUTH_MAX_FAILED_LOGINS", 5)
 	v.SetDefault("AUTH_LOCKOUT_MINUTES", 15)
-	v.SetDefault("ASISTENCIA_TOLERANCIA_TARDANZA_MIN", 0)
 	v.SetDefault("PARAMETROS_CACHE_TTL", "30s")
 
 	v.SetDefault("SMTP_PORT", "587")
@@ -368,7 +386,6 @@ func (c *Config) validate() error {
 	if c.Database.Name == "" {
 		missing = append(missing, "DB_NAME")
 	}
-	// F15: llavero PASETO (validado completo; falla en el arranque).
 	if c.Auth.PasetoLocalKeysHex == "" && c.Auth.PasetoLocalKeyHex == "" {
 		missing = append(missing, "PASETO_LOCAL_KEYS_HEX")
 	} else {
@@ -400,15 +417,15 @@ func (c *Config) validate() error {
 		missing = append(missing, "DB_PASSWORD")
 	}
 
-	// Reset de contraseña por correo (F14). En producción SMTP no es opcional:
-	// sin él el flujo de reset no entregaría el token a nadie. Fuera de
-	// producción, SMTP_HOST vacío se acepta solo en development (LogNotificador).
 	if c.App.IsProduction() {
 		if c.SMTP.Host == "" {
 			missing = append(missing, "SMTP_HOST")
 		}
 		if c.SMTP.From == "" {
 			missing = append(missing, "SMTP_FROM")
+		}
+		if c.SMTP.NombreSistema == "" {
+			missing = append(missing, "NOMBRE_SISTEMA")
 		}
 		if c.SMTP.URLBaseReset == "" {
 			missing = append(missing, "URL_BASE_RESET")
@@ -418,6 +435,9 @@ func (c *Config) validate() error {
 	} else if c.SMTP.Host != "" {
 		if c.SMTP.From == "" {
 			missing = append(missing, "SMTP_FROM")
+		}
+		if c.SMTP.NombreSistema == "" {
+			missing = append(missing, "NOMBRE_SISTEMA")
 		}
 		if c.SMTP.URLBaseReset == "" {
 			missing = append(missing, "URL_BASE_RESET")
@@ -446,6 +466,23 @@ func (c *Config) validate() error {
 		return err
 	}
 
+	if t := c.Server.MetricsToken; t != "" && len(t) < 32 {
+		return fmt.Errorf("config: METRICS_TOKEN debe tener al menos 32 caracteres (o quedar vacío para deshabilitar /metrics)")
+	}
+
+	if strings.TrimSpace(c.Datos.LlavesHex) == "" {
+		missing = append(missing, "DATA_KEYS_HEX")
+	} else if strings.TrimSpace(c.Datos.HMACHex) == "" {
+		missing = append(missing, "DATA_HMAC_KEY_HEX")
+	} else {
+		if _, err := c.Datos.Llavero(); err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
+		if c.App.IsProduction() && (strings.Contains(c.Datos.LlavesHex, strings.Repeat("0", 64)) || strings.Trim(c.Datos.HMACHex, "0") == "") {
+			return fmt.Errorf("config: llaves de datos de ejemplo (todo ceros); no se permiten con APP_ENV=production")
+		}
+	}
+
 	if len(missing) > 0 {
 		return fmt.Errorf("config: faltan variables de entorno requeridas: %v", missing)
 	}
@@ -453,7 +490,7 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validarEndurecimientoHTTP valida lo agregado en F16: logging, límite de
+// validarEndurecimientoHTTP valida lo agregado en logging, límite de
 // cuerpo, rate limiting, CORS, proxies de confianza y TLS a la BD.
 func (c *Config) validarEndurecimientoHTTP(missing *[]string) error {
 	prod := c.App.IsProduction()
@@ -482,7 +519,6 @@ func (c *Config) validarEndurecimientoHTTP(missing *[]string) error {
 		}
 	}
 
-	// CORS: lista blanca exacta. Nunca "*".
 	for _, o := range c.Server.CORSAllowedOrigins {
 		if o == "*" {
 			return fmt.Errorf("config: CORS_ALLOWED_ORIGINS no admite \"*\"; liste los orígenes explícitos")
@@ -497,8 +533,6 @@ func (c *Config) validarEndurecimientoHTTP(missing *[]string) error {
 		}
 	}
 
-	// Proxies de confianza: IP o CIDR. En producción no se admite confiar en
-	// todo Internet (permitiría falsificar X-Forwarded-For y evadir el rate limit).
 	for _, p := range c.Server.TrustedProxies {
 		if net.ParseIP(p) != nil {
 			continue
@@ -512,7 +546,6 @@ func (c *Config) validarEndurecimientoHTTP(missing *[]string) error {
 		}
 	}
 
-	// TLS a la BD (S9).
 	switch c.Database.TLSMode {
 	case "disabled", "required", "verify-full":
 	default:

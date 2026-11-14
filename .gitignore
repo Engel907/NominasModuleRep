@@ -29,5 +29,6 @@ coverage.html
 # Editores y sistema operativo
 .idea/
 .vscode/
+.claude/
 .DS_Store
 Thumbs.db

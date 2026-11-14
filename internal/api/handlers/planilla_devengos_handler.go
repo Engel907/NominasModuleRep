@@ -11,11 +11,11 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 	"planillas-ccdr/internal/planilla"
 )
 
-// PlanillaDevengosHandler expone los devengos manuales del período (L9).
+// PlanillaDevengosHandler expone los devengos manuales del período.
 type PlanillaDevengosHandler struct {
 	svc *planilla.DevengosService
 }
@@ -103,7 +103,7 @@ func (h *PlanillaDevengosHandler) Listar(c *gin.Context) {
 		}
 		empleadoID = &id
 	}
-	pag := pagination.Desde(c)
+	pag := paginacion.Desde(c)
 	filas, total, err := h.svc.Listar(c.Request.Context(), periodoID, empleadoID, pag)
 	if err != nil {
 		fallar(c, err)
@@ -113,7 +113,7 @@ func (h *PlanillaDevengosHandler) Listar(c *gin.Context) {
 	for i, r := range filas {
 		datos[i] = aDevengoResponse(r)
 	}
-	c.JSON(http.StatusOK, gin.H{"data": datos, "meta": pagination.NuevaMeta(pag, total)})
+	c.JSON(http.StatusOK, gin.H{"data": datos, "meta": paginacion.NuevaMeta(pag, total)})
 }
 
 func (h *PlanillaDevengosHandler) Eliminar(c *gin.Context) {

@@ -35,7 +35,6 @@ func (c *Config) validarJobs() error {
 		return fmt.Errorf("config: PARAMETROS_CACHE_TTL debe estar entre 0 y 5m")
 	}
 
-	// TLS a la BD: mismas reglas que validarEndurecimientoHTTP (S9).
 	switch c.Database.TLSMode {
 	case "disabled", "required", "verify-full":
 	default:

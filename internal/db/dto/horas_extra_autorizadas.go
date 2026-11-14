@@ -1,6 +1,3 @@
-// internal/db/dto/horas_extra_autorizadas.go
-//
-// L13 — Autorización previa de horas extra (horas_extra_autorizadas).
 package dto
 
 import (
@@ -76,7 +73,7 @@ func (q *Queries) ObtenerHoraExtraAutorizacionParaActualizar(ctx context.Context
 }
 
 // ResolverHoraExtraAutorizacion: pendiente -> autorizada|rechazada. Devuelve
-// filas afectadas (0 = ya no estaba pendiente).
+// filas afectadas (0 = no estaba pendiente).
 func (q *Queries) ResolverHoraExtraAutorizacion(ctx context.Context, id int64, estado string, resueltoPor int64, motivo *string) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
 UPDATE horas_extra_autorizadas
@@ -133,7 +130,7 @@ type HoraExtraCandidataRow struct {
 	HorasRegistradas decimal.Decimal
 }
 
-// ListarHorasExtraCandidatas: días con horas extra tipificadas (L14) y SIN
+// ListarHorasExtraCandidatas: días con horas extra tipificadas y sin
 // autorización (ni pendiente, ni resuelta). Son las que no llegarán a planilla
 // si nadie las solicita.
 func (q *Queries) ListarHorasExtraCandidatas(ctx context.Context, empleadoID *int64, desde, hasta time.Time) ([]HoraExtraCandidataRow, error) {

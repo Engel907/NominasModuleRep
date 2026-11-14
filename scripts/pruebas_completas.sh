@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# run_full_test_suite.sh  (raíz del proyecto)
 #
 # Verificación completa de planillas-ccdr. Sirve igual en CI que en la
 # máquina de un desarrollador antes de abrir un PR.
 #
 # Uso (desde la raíz del proyecto):
-#   ./run_full_test_suite.sh
-#   RUN_INTEGRATION=1 ./run_full_test_suite.sh
+#   ./scripts/pruebas_completas.sh
+#   RUN_INTEGRATION=1 ./scripts/pruebas_completas.sh
 #
-# Integración (F13): con RUN_INTEGRATION=1 corre `go test -tags=integration`.
+# Integración: con RUN_INTEGRATION=1 corre `go test -tags=integration`.
 #   - Si TEST_DATABASE_URL ya está definida, la usa tal cual (MySQL 8 con un
 #     usuario que pueda CREATE/DROP DATABASE y crear triggers).
 #   - Si no, levanta el servicio mysql_test de docker-compose.yml (puerto 3307,
@@ -19,7 +18,7 @@
 set -euo pipefail
 
 # Se ejecuta siempre desde la raíz del proyecto, sin importar desde dónde se llame.
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 RUN_INTEGRATION="${RUN_INTEGRATION:-0}"
 

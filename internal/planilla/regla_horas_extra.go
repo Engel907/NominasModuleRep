@@ -7,9 +7,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// reglaHorasExtra (horas_extra): la base es el salario MENSUAL completo del
-// contrato vigente a la fecha efectiva, y el divisor de la hora ordinaria es
-// el de la JORNADA del contrato (parametros_jornada, L12).
+// reglaHorasExtra (horas_extra): la hora ordinaria sale del contrato vigente a
+// la fecha efectiva: salario mensual ÷ horas mensuales de la JORNADA
+// (parametros_jornada), salario diario ÷ horas diarias de la jornada, o la
+// tarifa por hora (valorHoraOrdinaria).
 type reglaHorasExtra struct{}
 
 func (reglaHorasExtra) Aplicar(rc *ContextoRegla) error {
@@ -17,14 +18,11 @@ func (reglaHorasExtra) Aplicar(rc *ContextoRegla) error {
 	if len(rc.In.HorasExtra) == 0 {
 		return nil
 	}
-	if rc.Contrato.JornadaID == nil {
-		return fmt.Errorf("el contrato %d no tiene jornada del catálogo (jornada %q)", rc.Contrato.ContratoID, rc.Contrato.Jornada)
+	salario, divisor, err := valorHoraOrdinaria(rc.Contrato, rc.P)
+	if err != nil {
+		return fmt.Errorf("horas extra: %w", err)
 	}
-	divisor, ok := rc.P.DivisorPorJornada[*rc.Contrato.JornadaID]
-	if !ok {
-		return fmt.Errorf("la jornada %q (id %d) no tiene parametros_jornada vigente para calcular horas extra", rc.Contrato.Jornada, *rc.Contrato.JornadaID)
-	}
-	monto, horas, err := CalcularHorasExtra(rc.Contrato.SalarioPactado, divisor, rc.In.HorasExtra, rc.Factores)
+	monto, horas, err := CalcularHorasExtra(salario, divisor, rc.In.HorasExtra, rc.Factores)
 	if err != nil {
 		return err
 	}
@@ -34,13 +32,8 @@ func (reglaHorasExtra) Aplicar(rc *ContextoRegla) error {
 	return nil
 }
 
-// CalcularHorasExtra: función pura. Monto =
-//
-//	salarioMensual / horasMensualesOrdinarias * Σ(horas_i * factor_i)
-//
-// factor_recargo (parametros_horas_extra) es el multiplicador total sobre la
-// hora ordinaria (1.5 = 150%); NO se hardcodea ningún factor: si falta el
-// parámetro vigente de algún tipo, error. Retorna (monto, horasTotales).
+// CalcularHorasExtra: función pura. Monto = salario × Σ(horas × factor) ÷
+// divisor de la hora (horas del mes, del día, o 1 si el salario es por hora).
 func CalcularHorasExtra(
 	salarioMensual, horasMensualesOrdinarias decimal.Decimal,
 	horas []HoraExtraInput,

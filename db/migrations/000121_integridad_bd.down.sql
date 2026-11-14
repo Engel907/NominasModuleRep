@@ -1,4 +1,3 @@
--- 000121 (L2) down
 DROP VIEW IF EXISTS v_planilla_resumen_periodo;
 DROP TRIGGER IF EXISTS trg_parametros_embargo_escala_inmut_bd;
 DROP TRIGGER IF EXISTS trg_parametros_embargo_escala_inmut_bu;

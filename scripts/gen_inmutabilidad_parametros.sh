@@ -52,7 +52,6 @@ for c in "${cols[@]}"; do
 done
 
 cat <<SQL
--- ${tabla}: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER ${nombre_bu} BEFORE UPDATE ON ${tabla}
 FOR EACH ROW
 BEGIN

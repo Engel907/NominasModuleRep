@@ -10,7 +10,7 @@ import "errors"
 var (
 	ErrCredencialesInvalidas = errors.New("auth: usuario o contraseña incorrectos")
 
-	// F14 / S5: Login YA NO devuelve ErrUsuarioInactivo ni ErrUsuarioBloqueado
+	// / S5: Login YA no devuelve ErrUsuarioInactivo ni ErrUsuarioBloqueado
 	// (revelaban el estado de la cuenta). Siguen declarados porque el motivo
 	// real se registra en el log interno con estos mismos textos, y para no
 	// romper código que los referencie.

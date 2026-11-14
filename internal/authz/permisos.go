@@ -1,15 +1,8 @@
-// Package authz es la ÚNICA fuente de verdad de los códigos de permiso del
+// Package authz es la única fuente de verdad de los códigos de permiso del
 // sistema. Ningún otro paquete debe escribir un literal de permiso: las rutas
 // usan estas constantes (middleware.RequirePermission(authz.PermXxx)) y la
-// migración que siembra la tabla `permisos` se verifica contra Todos() en los
-// tests de coherencia (ver migraciones_test.go y handlers/permisos_coherencia_test.go).
-//
-// Este paquete NO debe importar middleware ni handlers (lo importan ellos).
-//
-// Estado de cada código (comentario al final de la constante):
-//   - "ruta"      : lo exige hoy alguna ruta de /api/v1.
-//   - "reservado" : definido para fases futuras; evita choques de nombres entre
-//     fases. Ninguna ruta lo exige todavía.
+// migración que siembra la tabla `permisos` se verifica contra Todos en los
+// tests de coherencia.
 package authz
 
 import "regexp"
@@ -25,7 +18,6 @@ type Permiso struct {
 // en minúsculas, con guion bajo permitido. Máximo 60 caracteres (permisos.codigo).
 var FormatoCodigo = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
 
-// --- Empleados, contratos y organización -----------------------------------
 const (
 	PermEmpleadosCrear             = "empleados.crear"               // ruta
 	PermEmpleadosLeer              = "empleados.leer"                // ruta
@@ -36,10 +28,9 @@ const (
 	PermOrganizacionCrear          = "organizacion.crear"            // ruta
 	PermOrganizacionLeer           = "organizacion.leer"             // ruta
 	PermOrganizacionActualizar     = "organizacion.actualizar"       // ruta
-	PermDatosPersonalesVerSensible = "datos_personales.ver_sensible" // reservado
+	PermDatosPersonalesVerSensible = "datos_personales.ver_sensible" // ruta
 )
 
-// --- Asistencia, calendario y vacaciones -----------------------------------
 const (
 	PermAsistenciaCrear             = "asistencia.crear"              // ruta
 	PermAsistenciaVer               = "asistencia.ver"                // ruta
@@ -55,7 +46,6 @@ const (
 	PermHorasExtraAutorizar         = "horas_extra.autorizar"         // ruta
 )
 
-// --- Préstamos, embargos, terceros y liquidaciones -------------------------
 const (
 	PermPrestamosCrear         = "prestamos.crear"         // ruta
 	PermPrestamosVer           = "prestamos.ver"           // ruta
@@ -70,7 +60,6 @@ const (
 	PermLiquidacionesProcesar  = "liquidaciones.procesar"  // ruta
 )
 
-// --- Planilla, aguinaldo, salario escolar y dashboard ----------------------
 const (
 	PermPlanillaCrear            = "planilla.crear"             // ruta
 	PermPlanillaCalcular         = "planilla.calcular"          // ruta
@@ -79,29 +68,30 @@ const (
 	PermPlanillaPagar            = "planilla.pagar"             // ruta
 	PermPlanillaExportarBancario = "planilla.exportar_bancario" // ruta
 	PermPlanillaVerBoleta        = "planilla.ver_boleta"        // ruta
-	PermPlanillaVerBoletaPropia  = "planilla.ver_boleta_propia" // reservado
-	PermAguinaldoEjecutar        = "aguinaldo.ejecutar"         // reservado
-	PermSalarioEscolarEjecutar   = "salario_escolar.ejecutar"   // reservado
+	PermPlanillaVerBoletaPropia  = "planilla.ver_boleta_propia" // ruta
+	PermAguinaldoEjecutar        = "aguinaldo.ejecutar"         // POST /aguinaldo/:anio/ejecutar
+	PermSalarioEscolarEjecutar   = "salario_escolar.ejecutar"   // POST /salario-escolar/:anio/ejecutar
 	PermDashboardVer             = "dashboard.ver"              // ruta
 )
 
-// --- Parámetros ------------------------------------------------------------
 const (
-	PermParametrosVer      = "parametros.ver"      // reservado
-	PermParametrosProponer = "parametros.proponer" // reservado
-	PermParametrosAprobar  = "parametros.aprobar"  // reservado
+	PermParametrosVer      = "parametros.ver"      // ruta
+	PermParametrosProponer = "parametros.proponer" // ruta
+	PermParametrosAprobar  = "parametros.aprobar"  // ruta
+
+	PermConfiguracionVer         = "configuracion.ver"
+	PermConfiguracionAdministrar = "configuracion.administrar"
 )
 
-// --- Contabilización y reportes --------------------------------------------
 const (
 	PermAsientosContablesGenerar = "asientos_contables.generar" // ruta
 	PermAsientosContablesVer     = "asientos_contables.ver"     // ruta
-	PermReportesCcss             = "reportes.ccss"              // reservado
-	PermReportesIns              = "reportes.ins"               // reservado
-	PermReportesHacienda         = "reportes.hacienda"          // reservado
+	PermReportesCcss             = "reportes.ccss"              // ruta
+	PermReportesIns              = "reportes.ins"               // ruta
+	PermReportesHacienda         = "reportes.hacienda"          // ruta
+	PermReportesGestion          = "reportes.gestion"           // ruta
 )
 
-// --- Usuarios y auditoría --------------------------------------------------
 const (
 	PermUsuariosAsignarRol        = "usuarios.asignar_rol"        // ruta
 	PermUsuariosGestionarSesiones = "usuarios.gestionar_sesiones" // ruta
@@ -164,11 +154,14 @@ func Todos() []Permiso {
 		{Codigo: PermParametrosVer, Nombre: "Consultar parámetros de planilla", Modulo: "parametros"},
 		{Codigo: PermParametrosProponer, Nombre: "Proponer cambios a parámetros de planilla", Modulo: "parametros"},
 		{Codigo: PermParametrosAprobar, Nombre: "Aprobar cambios a parámetros de planilla", Modulo: "parametros"},
+		{Codigo: PermConfiguracionVer, Nombre: "Consultar los catálogos de configuración de la planilla", Modulo: "parametros"},
+		{Codigo: PermConfiguracionAdministrar, Nombre: "Administrar los catálogos de configuración de la planilla", Modulo: "parametros"},
 		{Codigo: PermAsientosContablesGenerar, Nombre: "Generar los asientos contables de un período de planilla", Modulo: "contabilizacion"},
 		{Codigo: PermAsientosContablesVer, Nombre: "Consultar asientos contables generados", Modulo: "contabilizacion"},
 		{Codigo: PermReportesCcss, Nombre: "Generar reportes para la CCSS", Modulo: "integraciones"},
 		{Codigo: PermReportesIns, Nombre: "Generar reportes para el INS", Modulo: "integraciones"},
 		{Codigo: PermReportesHacienda, Nombre: "Generar reportes para Hacienda", Modulo: "integraciones"},
+		{Codigo: PermReportesGestion, Nombre: "Consultar los reportes de gestión de la planilla", Modulo: "integraciones"},
 		{Codigo: PermUsuariosAsignarRol, Nombre: "Asignar y revocar roles de usuarios", Modulo: "auditoria"},
 		{Codigo: PermUsuariosGestionarSesiones, Nombre: "Cerrar todas las sesiones activas", Modulo: "auditoria"},
 		{Codigo: PermUsuariosCrear, Nombre: "Crear usuarios del sistema", Modulo: "auditoria"},
@@ -180,7 +173,7 @@ func Todos() []Permiso {
 	}
 }
 
-// Codigos devuelve solo los códigos de Todos().
+// Codigos devuelve solo los códigos de Todos.
 func Codigos() []string {
 	todos := Todos()
 	out := make([]string, len(todos))

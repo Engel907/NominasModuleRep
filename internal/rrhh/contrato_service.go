@@ -1,26 +1,4 @@
-// services/contrato_service.go
-//
-// Fase 3 — Contratos.
-//
-// `contratos` no está en la lista de 19 tablas versionadas del ADR-000, pero
-// se trata con el mismo patrón de vigencia 2-pasos por consistencia.
-//
-// F03 (esta revisión):
-//   - Firma real de db.WithAuditContext (callback con ctx, usuarioID int64);
-//     IDs int64 en toda la capa; paginación en internal/pagination.
-//   - ValidarSalarioMinimo (exportada) lee SIEMPRE el parámetro vigente de
-//     parametros_salario_minimo y devuelve errores tipados (D8):
-//     *SalarioInferiorError (incumplimiento) y *SalarioMinimoNoParametrizadoError
-//     (no hay parámetro: el alta/cambio se rechaza, no se asume un default).
-//     Se eliminó la "advertencia" por prefijo de string (frágil) y el parche
-//     parche de import no usado de helpers de fecha.
-//   - CrearContrato/ActualizarContrato bloquean la fila del empleado
-//     (FOR UPDATE) antes de leer el contrato vigente, para eliminar la
-//     condición de carrera leer-vigente → cerrar → insertar.
-//   - Validaciones: salario > 0 (escala DECIMAL(14,2)), fin de contrato >=
-//     inicio, fecha efectiva posterior al inicio de la vigencia que se cierra,
-//     puesto existente y activo.
-package services
+package rrhh
 
 import (
 	"context"
@@ -32,7 +10,9 @@ import (
 
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
+	"planillas-ccdr/internal/parametros"
+	"planillas-ccdr/internal/planilla"
 
 	"github.com/shopspring/decimal"
 )
@@ -46,15 +26,16 @@ var ErrSalarioInferiorAlMinimo = errors.New("el salario pactado es inferior al s
 // para el empleado consultado.
 var ErrContratoNoEncontrado = errors.New("el empleado no tiene un contrato vigente")
 
-// ----------------------------- DTOs -----------------------------------------
-
 type CrearContratoRequest struct {
-	EmpleadoID          int64           `json:"empleado_id" binding:"required,gt=0"`
-	PuestoID            int64           `json:"puesto_id" binding:"required,gt=0"`
-	RegimenLaboralID    int64           `json:"regimen_laboral_id" binding:"required,gt=0"`
-	TipoContrato        string          `json:"tipo_contrato" binding:"required,max=30"` // ej. indefinido, plazo_fijo, interino
-	SalarioPactado      decimal.Decimal `json:"salario_pactado"`                         // validado en el servicio (> 0)
-	Jornada             string          `json:"jornada" binding:"required,max=30"`
+	EmpleadoID       int64 `json:"empleado_id" binding:"required,gt=0"`
+	PuestoID         int64 `json:"puesto_id" binding:"required,gt=0"`
+	RegimenLaboralID int64 `json:"regimen_laboral_id" binding:"required,gt=0"`
+	TipoContratoID   int64 `json:"tipo_contrato_id" binding:"required,gt=0"` // catálogo tipos_contrato
+	// SalarioPactado va en la unidad de ModalidadSalario (mes, día u hora
+	// ordinaria); validado en el servicio (> 0).
+	SalarioPactado      decimal.Decimal `json:"salario_pactado"`
+	ModalidadSalario    string          `json:"modalidad_salario" binding:"required"`     // mensual | diario | por_hora
+	JornadaID           int64           `json:"jornada_id" binding:"required,gt=0"`       // catálogo jornadas
 	FechaInicioContrato string          `json:"fecha_inicio_contrato" binding:"required"` // YYYY-MM-DD
 	FechaFinContrato    *string         `json:"fecha_fin_contrato"`                       // opcional (plazo fijo)
 	FechaEfectiva       string          `json:"fecha_efectiva" binding:"required"`        // fecha_inicio_vigencia
@@ -63,21 +44,27 @@ type CrearContratoRequest struct {
 type ActualizarContratoRequest struct {
 	PuestoID            int64           `json:"puesto_id" binding:"required,gt=0"`
 	RegimenLaboralID    int64           `json:"regimen_laboral_id" binding:"required,gt=0"`
-	TipoContrato        string          `json:"tipo_contrato" binding:"required,max=30"`
+	TipoContratoID      int64           `json:"tipo_contrato_id" binding:"required,gt=0"`
 	SalarioPactado      decimal.Decimal `json:"salario_pactado"`
-	Jornada             string          `json:"jornada" binding:"required,max=30"`
+	ModalidadSalario    string          `json:"modalidad_salario" binding:"required"`
+	JornadaID           int64           `json:"jornada_id" binding:"required,gt=0"`
 	FechaInicioContrato string          `json:"fecha_inicio_contrato" binding:"required"`
 	FechaFinContrato    *string         `json:"fecha_fin_contrato"`
 	FechaEfectiva       string          `json:"fecha_efectiva" binding:"required"`
 }
 
+// ContratoResponse: tipo_contrato y jornada son los códigos de sus catálogos
+// (solo lectura); se escriben por id.
 type ContratoResponse struct {
 	ID                  int64           `json:"id"`
 	EmpleadoID          int64           `json:"empleado_id"`
 	PuestoID            int64           `json:"puesto_id"`
 	RegimenLaboralID    int64           `json:"regimen_laboral_id"`
+	TipoContratoID      int64           `json:"tipo_contrato_id"`
 	TipoContrato        string          `json:"tipo_contrato"`
 	SalarioPactado      decimal.Decimal `json:"salario_pactado"`
+	ModalidadSalario    string          `json:"modalidad_salario"`
+	JornadaID           int64           `json:"jornada_id"`
 	Jornada             string          `json:"jornada"`
 	FechaInicioContrato string          `json:"fecha_inicio_contrato"`
 	FechaFinContrato    *string         `json:"fecha_fin_contrato,omitempty"`
@@ -86,25 +73,23 @@ type ContratoResponse struct {
 }
 
 type ListarContratosRequest struct {
-	// Paginacion NO se bindea con gin: el handler la llena con pagination.Desde(c).
-	Paginacion   pagination.Parametros `form:"-"`
-	EsVigente    *bool                 `form:"es_vigente"`
-	PuestoID     *int64                `form:"puesto_id"`
-	TipoContrato *string               `form:"tipo_contrato"`
+	// Paginacion no se bindea con gin: el handler la llena con paginacion.Desde(c).
+	Paginacion     paginacion.Parametros `form:"-"`
+	EsVigente      *bool                 `form:"es_vigente"`
+	PuestoID       *int64                `form:"puesto_id"`
+	TipoContratoID *int64                `form:"tipo_contrato_id"`
 }
 
 type ListarContratosResponse struct {
 	Contratos  []ContratoResponse `json:"contratos"`
-	Paginacion pagination.Meta    `json:"paginacion"`
+	Paginacion paginacion.Meta    `json:"paginacion"`
 }
-
-// ----------------------------- Servicio -------------------------------------
 
 type ContratoService interface {
 	CrearContrato(ctx context.Context, usuarioID int64, req CrearContratoRequest) (*ContratoResponse, error)
 	ActualizarContrato(ctx context.Context, usuarioID, empleadoID int64, req ActualizarContratoRequest) (*ContratoResponse, error)
 	GetContratoVigente(ctx context.Context, empleadoID int64) (*ContratoResponse, error)
-	ListarHistoricoPorEmpleado(ctx context.Context, empleadoID int64, paginacion pagination.Parametros) ([]ContratoResponse, pagination.Meta, error)
+	ListarHistoricoPorEmpleado(ctx context.Context, empleadoID int64, params paginacion.Parametros) ([]ContratoResponse, paginacion.Meta, error)
 	ListarContratos(ctx context.Context, req ListarContratosRequest) (*ListarContratosResponse, error)
 }
 
@@ -116,21 +101,15 @@ func NewContratoService(sqlDB *sql.DB) ContratoService {
 	return &contratoService{sqlDB: sqlDB}
 }
 
-// ValidarSalarioMinimo valida `salario` contra el salario mínimo VIGENTE
-// (parametros_salario_minimo.es_vigente = 1) de la clasificación del puesto.
-// NUNCA hardcodea el monto (ADR-000 sección 4/5). Debe llamarse con el
-// *dto.Queries de la Tx en curso.
-//
-// Errores (todos tipados, D8):
-//   - ErrPuestoNoEncontrado / ErrPuestoInactivo
-//   - *SalarioMinimoNoParametrizadoError (errors.Is ErrSalarioMinimoNoParametrizado):
-//     el puesto no tiene clasificación o no hay parámetro vigente. No se
-//     devuelve ningún valor por defecto ni se deja pasar el salario.
-//   - *SalarioInferiorError (errors.Is ErrSalarioInferiorAlMinimo)
-//
-// El salario mínimo se compara contra el salario mensual completo; no se
-// prorratea por jornada (ver informe F03, punto dudoso).
-func ValidarSalarioMinimo(ctx context.Context, q *dto.Queries, puestoID int64, salario decimal.Decimal) error {
+// ValidarSalarioMinimo valida `salario` (en la unidad de `modalidad`) contra
+// el salario mínimo VIGENTE (parametros_salario_minimo.es_vigente = 1) de la
+// clasificación del puesto. El mínimo es mensual: un salario diario se lleva
+// al mes con DIVISOR_DIAS_MES y uno por hora con el divisor de horas
+// mensuales de la jornada (parametros_jornada), los mismos con los que la
+// planilla valora el día y la hora. Debe llamarse con el *dto.Queries de la
+// Tx en curso.
+func ValidarSalarioMinimo(ctx context.Context, q *dto.Queries, empleadoID, puestoID int64, salario decimal.Decimal,
+	modalidad string, jornadaID int64, fecha time.Time) error {
 	puesto, err := q.GetPuestoByID(ctx, puestoID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrPuestoNoEncontrado
@@ -154,10 +133,47 @@ func ValidarSalarioMinimo(ctx context.Context, q *dto.Queries, puestoID int64, s
 		return fmt.Errorf("consultar salario mínimo vigente: %w", err)
 	}
 
-	if salario.LessThan(minimo.MontoMensual) {
-		return &SalarioInferiorError{PuestoID: puestoID, Pactado: salario, Minimo: minimo.MontoMensual}
+	mensual, err := equivalenteMensual(ctx, q, empleadoID, salario, modalidad, jornadaID, fecha)
+	if err != nil {
+		return err
+	}
+	if mensual.LessThan(minimo.MontoMensual) {
+		return &SalarioInferiorError{PuestoID: puestoID, Pactado: salario, Modalidad: modalidad,
+			EquivalenteMensual: mensual, Minimo: minimo.MontoMensual}
 	}
 	return nil
+}
+
+// equivalenteMensual: el salario pactado llevado al mes.
+func equivalenteMensual(ctx context.Context, q *dto.Queries, empleadoID int64, salario decimal.Decimal,
+	modalidad string, jornadaID int64, fecha time.Time) (decimal.Decimal, error) {
+	switch modalidad {
+	case planilla.ModalidadMensual:
+		return salario, nil
+	case planilla.ModalidadDiario:
+		v, err := q.ValorParametroGeneralEmpleado(ctx, empleadoID, parametros.ClaveDivisorDiasMes, fecha)
+		if errors.Is(err, sql.ErrNoRows) {
+			return decimal.Zero, validacion("modalidad_salario", parametros.ClaveDivisorDiasMes+" no está vigente; no se puede llevar el salario diario al mes")
+		}
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("leer %s: %w", parametros.ClaveDivisorDiasMes, err)
+		}
+		div, err := decimal.NewFromString(v)
+		if err != nil || !div.IsPositive() {
+			return decimal.Zero, fmt.Errorf("%s inválido (%q)", parametros.ClaveDivisorDiasMes, v)
+		}
+		return salario.Mul(div), nil
+	case planilla.ModalidadPorHora:
+		pj, err := q.ObtenerParametroJornadaEnFecha(ctx, jornadaID, fecha)
+		if errors.Is(err, sql.ErrNoRows) {
+			return decimal.Zero, validacion("jornada_id", "la jornada no tiene parametros_jornada vigente; no se puede llevar el salario por hora al mes")
+		}
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("leer parametros_jornada: %w", err)
+		}
+		return salario.Mul(pj.DivisorHorasMensuales), nil
+	}
+	return decimal.Zero, validacion("modalidad_salario", "debe ser mensual, diario o por_hora")
 }
 
 // parseFechasContrato parsea y valida las fechas comunes de crear/actualizar.
@@ -187,20 +203,13 @@ func parseFechasContrato(inicioContrato string, finContrato *string, efectiva st
 }
 
 func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, req CrearContratoRequest) (*ContratoResponse, error) {
-	tipoContrato, err := noVacio("tipo_contrato", req.TipoContrato)
-	if err != nil {
-		return nil, err
-	}
-	jornada, err := noVacio("jornada", req.Jornada)
-	if err != nil {
-		return nil, err
+	if !planilla.ModalidadSalarioValida(req.ModalidadSalario) {
+		return nil, validacion("modalidad_salario", "debe ser mensual, diario o por_hora")
 	}
 	fechaInicioContrato, fechaEfectiva, fechaFinContrato, err := parseFechasContrato(req.FechaInicioContrato, req.FechaFinContrato, req.FechaEfectiva)
 	if err != nil {
 		return nil, err
 	}
-	// salario_pactado es la fuente única de salario (D5); la BD copia el valor
-	// a empleado_datos_laborales.salario_base_nominal (000124).
 	if err := validarMontoSalario("salario_pactado", req.SalarioPactado); err != nil {
 		return nil, err
 	}
@@ -208,21 +217,17 @@ func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, re
 	var respuesta ContratoResponse
 
 	err = db.WithAuditContext(ctx, s.sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
-		// Serializa contra otras escrituras del mismo empleado y valida que exista.
 		if err := bloquearEmpleado(ctx, q, req.EmpleadoID); err != nil {
 			return err
 		}
 
-		if err := ValidarSalarioMinimo(ctx, q, req.PuestoID, req.SalarioPactado); err != nil {
+		if err := validarCatalogosContrato(ctx, q, req.TipoContratoID, req.JornadaID); err != nil {
 			return err
 		}
-		if err := validarJornada(ctx, q, jornada); err != nil {
+		if err := ValidarSalarioMinimo(ctx, q, req.EmpleadoID, req.PuestoID, req.SalarioPactado, req.ModalidadSalario, req.JornadaID, fechaEfectiva); err != nil {
 			return err
 		}
 
-		// Un "crear" no debe pisar silenciosamente un contrato vigente: eso es
-		// ActualizarContrato (2 pasos explícitos). Con el lock del empleado esta
-		// lectura ya no compite con otra Tx.
 		if _, err := q.GetContratoVigente(ctx, req.EmpleadoID); err == nil {
 			return ErrContratoVigenteExiste
 		} else if !errors.Is(err, sql.ErrNoRows) {
@@ -230,7 +235,7 @@ func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, re
 		}
 
 		contratoID, err := q.CrearVersionContrato(ctx, req.EmpleadoID, req.PuestoID, req.RegimenLaboralID,
-			tipoContrato, req.SalarioPactado, jornada, fechaInicioContrato, fechaFinContrato,
+			req.TipoContratoID, req.SalarioPactado, req.ModalidadSalario, req.JornadaID, fechaInicioContrato, fechaFinContrato,
 			fechaEfectiva, usuarioID)
 		if err != nil {
 			return traducirErrorBD(err, "crear contrato")
@@ -250,20 +255,13 @@ func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, re
 }
 
 func (s *contratoService) ActualizarContrato(ctx context.Context, usuarioID, empleadoID int64, req ActualizarContratoRequest) (*ContratoResponse, error) {
-	tipoContrato, err := noVacio("tipo_contrato", req.TipoContrato)
-	if err != nil {
-		return nil, err
-	}
-	jornada, err := noVacio("jornada", req.Jornada)
-	if err != nil {
-		return nil, err
+	if !planilla.ModalidadSalarioValida(req.ModalidadSalario) {
+		return nil, validacion("modalidad_salario", "debe ser mensual, diario o por_hora")
 	}
 	fechaInicioContrato, fechaEfectiva, fechaFinContrato, err := parseFechasContrato(req.FechaInicioContrato, req.FechaFinContrato, req.FechaEfectiva)
 	if err != nil {
 		return nil, err
 	}
-	// salario_pactado es la fuente única de salario (D5); la BD copia el valor
-	// a empleado_datos_laborales.salario_base_nominal (000124).
 	if err := validarMontoSalario("salario_pactado", req.SalarioPactado); err != nil {
 		return nil, err
 	}
@@ -275,10 +273,10 @@ func (s *contratoService) ActualizarContrato(ctx context.Context, usuarioID, emp
 			return err
 		}
 
-		if err := ValidarSalarioMinimo(ctx, q, req.PuestoID, req.SalarioPactado); err != nil {
+		if err := validarCatalogosContrato(ctx, q, req.TipoContratoID, req.JornadaID); err != nil {
 			return err
 		}
-		if err := validarJornada(ctx, q, jornada); err != nil {
+		if err := ValidarSalarioMinimo(ctx, q, empleadoID, req.PuestoID, req.SalarioPactado, req.ModalidadSalario, req.JornadaID, fechaEfectiva); err != nil {
 			return err
 		}
 
@@ -293,14 +291,12 @@ func (s *contratoService) ActualizarContrato(ctx context.Context, usuarioID, emp
 			return err
 		}
 
-		// Paso 1: cerrar el contrato vigente actual.
 		if err := q.CerrarContratoVigente(ctx, empleadoID, fechaEfectiva); err != nil {
 			return fmt.Errorf("cerrar contrato vigente: %w", err)
 		}
 
-		// Paso 2: abrir la nueva versión vigente.
 		contratoID, err := q.CrearVersionContrato(ctx, empleadoID, req.PuestoID, req.RegimenLaboralID,
-			tipoContrato, req.SalarioPactado, jornada, fechaInicioContrato, fechaFinContrato,
+			req.TipoContratoID, req.SalarioPactado, req.ModalidadSalario, req.JornadaID, fechaInicioContrato, fechaFinContrato,
 			fechaEfectiva, usuarioID)
 		if err != nil {
 			return traducirErrorBD(err, "crear nueva version de contrato")
@@ -332,32 +328,32 @@ func (s *contratoService) GetContratoVigente(ctx context.Context, empleadoID int
 	return &r, nil
 }
 
-func (s *contratoService) ListarHistoricoPorEmpleado(ctx context.Context, empleadoID int64, paginacion pagination.Parametros) ([]ContratoResponse, pagination.Meta, error) {
-	pag := paginacion.Normalizado()
+func (s *contratoService) ListarHistoricoPorEmpleado(ctx context.Context, empleadoID int64, params paginacion.Parametros) ([]ContratoResponse, paginacion.Meta, error) {
+	pag := params.Normalizado()
 	q := dto.New(s.sqlDB)
 	rows, err := q.ListContratosHistoricoPorEmpleado(ctx, empleadoID, pag.Limit32(), pag.Offset32())
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("listar histórico de contratos: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("listar histórico de contratos: %w", err)
 	}
 	total, err := q.CountContratosHistoricoPorEmpleado(ctx, empleadoID)
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("contar histórico de contratos: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("contar histórico de contratos: %w", err)
 	}
 	out := make([]ContratoResponse, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, contratoRespuestaDesdeRow(r))
 	}
-	return out, pagination.NuevaMeta(pag, total), nil
+	return out, paginacion.NuevaMeta(pag, total), nil
 }
 
 func (s *contratoService) ListarContratos(ctx context.Context, req ListarContratosRequest) (*ListarContratosResponse, error) {
 	pag := req.Paginacion.Normalizado()
 	q := dto.New(s.sqlDB)
-	rows, err := q.ListContratos(ctx, req.EsVigente, req.PuestoID, req.TipoContrato, pag.Limit32(), pag.Offset32())
+	rows, err := q.ListContratos(ctx, req.EsVigente, req.PuestoID, req.TipoContratoID, pag.Limit32(), pag.Offset32())
 	if err != nil {
 		return nil, fmt.Errorf("listar contratos: %w", err)
 	}
-	total, err := q.CountContratos(ctx, req.EsVigente, req.PuestoID, req.TipoContrato)
+	total, err := q.CountContratos(ctx, req.EsVigente, req.PuestoID, req.TipoContratoID)
 	if err != nil {
 		return nil, fmt.Errorf("contar contratos: %w", err)
 	}
@@ -365,10 +361,8 @@ func (s *contratoService) ListarContratos(ctx context.Context, req ListarContrat
 	for _, r := range rows {
 		out = append(out, contratoRespuestaDesdeRow(r))
 	}
-	return &ListarContratosResponse{Contratos: out, Paginacion: pagination.NuevaMeta(pag, total)}, nil
+	return &ListarContratosResponse{Contratos: out, Paginacion: paginacion.NuevaMeta(pag, total)}, nil
 }
-
-// ----------------------------- helpers de mapeo ------------------------------
 
 func contratoRespuestaDesdeRow(c dto.Contrato) ContratoResponse {
 	r := ContratoResponse{
@@ -376,8 +370,11 @@ func contratoRespuestaDesdeRow(c dto.Contrato) ContratoResponse {
 		EmpleadoID:          c.EmpleadoID,
 		PuestoID:            c.PuestoID,
 		RegimenLaboralID:    c.RegimenLaboralID,
+		TipoContratoID:      c.TipoContratoID,
 		TipoContrato:        c.TipoContrato,
 		SalarioPactado:      c.SalarioPactado,
+		ModalidadSalario:    c.ModalidadSalario,
+		JornadaID:           c.JornadaID,
 		Jornada:             c.Jornada,
 		FechaInicioContrato: c.FechaInicioContrato.Format(layoutFecha),
 		FechaInicioVigencia: c.FechaInicioVigencia.Format(layoutFecha),
@@ -390,16 +387,22 @@ func contratoRespuestaDesdeRow(c dto.Contrato) ContratoResponse {
 	return r
 }
 
-// validarJornada (L12): la jornada debe existir en el catálogo `jornadas`; la
-// BD resuelve contratos.jornada_id a partir de ese código (000125) y el
-// divisor de la hora extra depende de ella.
-func validarJornada(ctx context.Context, q *dto.Queries, jornada string) error {
-	ok, err := q.ExisteJornada(ctx, jornada)
+// validarCatalogosContrato: el tipo de contrato debe existir y la jornada
+// estar activa (el divisor de la hora depende de ella).
+func validarCatalogosContrato(ctx context.Context, q *dto.Queries, tipoContratoID, jornadaID int64) error {
+	ok, err := q.ExisteTipoContrato(ctx, tipoContratoID)
+	if err != nil {
+		return fmt.Errorf("validar tipo de contrato: %w", err)
+	}
+	if !ok {
+		return validacion("tipo_contrato_id", "no existe en el catálogo de tipos de contrato")
+	}
+	ok, err = q.ExisteJornadaActiva(ctx, jornadaID)
 	if err != nil {
 		return fmt.Errorf("validar jornada: %w", err)
 	}
 	if !ok {
-		return validacion("jornada", "no existe en el catálogo de jornadas (DIURNA, MIXTA, NOCTURNA)")
+		return validacion("jornada_id", "no existe o no está activa en el catálogo de jornadas")
 	}
 	return nil
 }

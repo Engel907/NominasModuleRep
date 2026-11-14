@@ -1,9 +1,3 @@
-// internal/db/dto/planilla_detalle.go
-//
-// Persistencia del resultado del cálculo de un período: inserciones por lote
-// en las 6 tablas planilla_detalle_*, borrado en orden de FK y snapshot de
-// parámetros. Solo lo usa planilla.EscritorDetalle, dentro de la transacción
-// del cálculo.
 package dto
 
 import (
@@ -40,10 +34,6 @@ func (q *Queries) insertarLote(ctx context.Context, tabla string, cols []string,
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// planilla_detalle_empleado
-// ---------------------------------------------------------------------------
-
 type DetalleEmpleadoInsert struct {
 	EmpleadoID                int64
 	ProgramaPresupuestarioID  int64
@@ -57,6 +47,7 @@ type DetalleEmpleadoInsert struct {
 	BaseAguinaldo             decimal.Decimal
 	BaseCesantia              decimal.Decimal
 	BaseVacaciones            decimal.Decimal
+	BaseEmbargo               decimal.Decimal
 	CuotaObreraCCSS           decimal.Decimal
 	CuotaPatronalCCSS         decimal.Decimal
 	RentaBruta                decimal.Decimal
@@ -68,7 +59,7 @@ type DetalleEmpleadoInsert struct {
 var colsDetalleEmpleado = []string{
 	"periodo_planilla_id", "empleado_id", "programa_presupuestario_id", "contrato_id",
 	"salario_base_periodo", "total_ingresos", "total_deducciones", "neto_pagado",
-	"base_ccss", "base_renta", "base_aguinaldo", "base_cesantia", "base_vacaciones",
+	"base_ccss", "base_renta", "base_aguinaldo", "base_cesantia", "base_vacaciones", "base_embargo",
 	"cuota_obrera_ccss", "cuota_patronal_ccss", "renta_bruta", "creditos_fiscales_aplicados",
 	"renta_neta", "advertencias",
 }
@@ -86,7 +77,7 @@ func (q *Queries) InsertarDetallesEmpleado(ctx context.Context, periodoID int64,
 		vals = append(vals, []any{
 			periodoID, f.EmpleadoID, f.ProgramaPresupuestarioID, f.ContratoID,
 			f.SalarioBasePeriodo, f.TotalIngresos, f.TotalDeducciones, f.NetoPagado,
-			f.BaseCCSS, f.BaseRenta, f.BaseAguinaldo, f.BaseCesantia, f.BaseVacaciones,
+			f.BaseCCSS, f.BaseRenta, f.BaseAguinaldo, f.BaseCesantia, f.BaseVacaciones, f.BaseEmbargo,
 			f.CuotaObreraCCSS, f.CuotaPatronalCCSS, f.RentaBruta, f.CreditosFiscalesAplicados,
 			f.RentaNeta, adv,
 		})
@@ -112,14 +103,11 @@ func (q *Queries) InsertarDetallesEmpleado(ctx context.Context, periodoID int64,
 	return out, rows.Err()
 }
 
-// ---------------------------------------------------------------------------
-// Hijos de planilla_detalle_empleado
-// ---------------------------------------------------------------------------
-
 type DetalleConceptoInsert struct {
 	DetalleEmpleadoID  int64
 	ConceptoSalarialID int64
 	FormulaID          *int64           // concepto_salarial_formula_id
+	FormulaEmpleadoID  *int64           // empleado_concepto_formula_id (excluye FormulaID)
 	Cantidad           *decimal.Decimal // NULL = no aplica
 	Monto              decimal.Decimal
 }
@@ -127,10 +115,10 @@ type DetalleConceptoInsert struct {
 func (q *Queries) InsertarDetallesConcepto(ctx context.Context, filas []DetalleConceptoInsert) error {
 	vals := make([][]any, 0, len(filas))
 	for _, f := range filas {
-		vals = append(vals, []any{f.DetalleEmpleadoID, f.ConceptoSalarialID, f.FormulaID, f.Cantidad, f.Monto})
+		vals = append(vals, []any{f.DetalleEmpleadoID, f.ConceptoSalarialID, f.FormulaID, f.FormulaEmpleadoID, f.Cantidad, f.Monto})
 	}
 	return q.insertarLote(ctx, "planilla_detalle_concepto",
-		[]string{"planilla_detalle_empleado_id", "concepto_salarial_id", "concepto_salarial_formula_id", "cantidad", "monto"}, vals)
+		[]string{"planilla_detalle_empleado_id", "concepto_salarial_id", "concepto_salarial_formula_id", "empleado_concepto_formula_id", "cantidad", "monto"}, vals)
 }
 
 type DetallePatronalInsert struct {
@@ -202,10 +190,6 @@ func (q *Queries) InsertarDetallesPrestamo(ctx context.Context, filas []DetalleP
 	return q.insertarLote(ctx, "planilla_detalle_prestamo",
 		[]string{"planilla_detalle_empleado_id", "prestamo_id", "cuota_calculada", "monto_retenido"}, vals)
 }
-
-// ---------------------------------------------------------------------------
-// Borrado y snapshot
-// ---------------------------------------------------------------------------
 
 // EliminarDetallePeriodo borra el detalle del período en orden de FK
 // (hijos primero; en planilla_detalle_concepto, primero los ajustes que

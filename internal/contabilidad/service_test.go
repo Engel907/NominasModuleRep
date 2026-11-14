@@ -22,7 +22,7 @@ const (
 )
 
 func cfg() ConfigGeneracion {
-	return ConfigGeneracion{ConceptoAnclaNeto: "SAL_BASE", ConceptoCuotaPatronalCCSS: "CCSS_PAT"}
+	return ConfigGeneracion{ConceptoAnclaNeto: "SAL_BASE", TipoAsientoPago: "PAGO_PLANILLA"}
 }
 
 func m(conceptoID int64, cod string, tipo int64, cuenta int64, mov string) MapeoConceptoCuenta {
@@ -34,17 +34,16 @@ func m(conceptoID int64, cod string, tipo int64, cuenta int64, mov string) Mapeo
 		TipoAsientoID: tipo, TipoAsientoCodigo: tc, CuentaContableID: cuenta, TipoMovimiento: mov, Proyecto: "99"}
 }
 
-// Réplica de la forma del seed de mapeo_concepto_cuenta (5101-5106 / 2101-2106).
 func mapeosSeed() []MapeoConceptoCuenta {
 	return []MapeoConceptoCuenta{
 		m(cSalBase, "SAL_BASE", tGasto, 5101, MovimientoDebe),
 		m(cHrsExtra, "HRS_EXTRA", tGasto, 5102, MovimientoDebe),
 		m(cCcssPat, "CCSS_PAT", tGasto, 5106, MovimientoDebe),
-		m(cInsRT, "INS_RT", tGasto, 5106, MovimientoDebe), // sin contrapartida 'haber' en el seed
+		m(cInsRT, "INS_RT", tGasto, 5106, MovimientoDebe),
 		m(cCcssObr, "CCSS_OBR", tPasivo, 2101, MovimientoHaber),
 		m(cCcssPat, "CCSS_PAT", tPasivo, 2101, MovimientoHaber),
 		m(cRenta, "IMP_RENTA", tPasivo, 2102, MovimientoHaber),
-		m(cSalBase, "SAL_BASE", tPasivo, 2106, MovimientoHaber), // neto
+		m(cSalBase, "SAL_BASE", tPasivo, 2106, MovimientoHaber),
 	}
 }
 
@@ -52,7 +51,6 @@ func linea(id int64, cod, monto string) planilla.ConceptoCalculadoOutput {
 	return planilla.ConceptoCalculadoOutput{ConceptoSalarialID: id, Codigo: cod, Monto: d(monto)}
 }
 
-// Mismos números que TestCalcularEmpleado_FlujoCompleto de motor_calculo_test.go.
 func detalleEjemplo(emp int64) DetallePlanilla {
 	return DetallePlanilla{ProgramaPresupuestarioID: prog, Calculo: &planilla.CalculoEmpleadoDetalle{
 		ResultadoEmpleadoOutput: planilla.ResultadoEmpleadoOutput{
@@ -63,7 +61,9 @@ func detalleEjemplo(emp int64) DetallePlanilla {
 				linea(cSalBase, "SAL_BASE", "1000000"), linea(cHrsExtra, "HRS_EXTRA", "62500"),
 				linea(cCcssObr, "CCSS_OBR", "115068.75"), linea(cRenta, "IMP_RENTA", "14450"),
 			},
-		}}}
+		},
+		Patronal: []planilla.LineaPatronal{{ConceptoSalarialID: cCcssPat, Monto: d("285068.75")}},
+	}}
 }
 
 func TestGenerarAsientos_CuadraYAgrupa(t *testing.T) {
@@ -74,14 +74,12 @@ func TestGenerarAsientos_CuadraYAgrupa(t *testing.T) {
 	if len(as) != 2 || as[0].TipoAsientoID != tGasto || as[1].TipoAsientoID != tPasivo {
 		t.Fatalf("se esperaban 2 asientos (gasto, pasivo): %+v", as)
 	}
-	// Por empleado: gasto = 1.062.500 + 285.068,75 = 1.347.568,75 ; x2 empleados
 	if !as[0].TotalDebe().Equal(d("2695137.50")) || !as[0].TotalHaber().IsZero() {
 		t.Errorf("gasto debe=%s haber=%s", as[0].TotalDebe(), as[0].TotalHaber())
 	}
 	if !as[1].TotalHaber().Equal(d("2695137.50")) || !as[1].TotalDebe().IsZero() {
 		t.Errorf("pasivo debe=%s haber=%s", as[1].TotalDebe(), as[1].TotalHaber())
 	}
-	// Consolidado: 3 líneas de gasto (5101, 5102, 5106) y 4 de pasivo (CCSS_OBR y CCSS_PAT en 2101 como conceptos distintos, 2102, 2106)
 	if len(as[0].Lineas) != 3 || len(as[1].Lineas) != 4 {
 		t.Errorf("líneas gasto=%d pasivo=%d", len(as[0].Lineas), len(as[1].Lineas))
 	}
@@ -93,7 +91,6 @@ func TestGenerarAsientos_CuadraYAgrupa(t *testing.T) {
 			t.Errorf("las líneas consolidadas deben llevar empleado_id NULL")
 		}
 	}
-	// SAL_BASE en el desglose NO debe duplicar la línea de neto 2106.
 	if err := ValidarPartidaDoble(as); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +106,6 @@ func TestGenerarAsientos_MapeoFaltanteFalla(t *testing.T) {
 }
 
 func TestGenerarAsientos_ConceptoSinContrapartidaDescuadra(t *testing.T) {
-	// INS_RT (patronal manual) solo tiene mapeo 'debe' en el seed: debe fallar, no ajustarse.
 	det := detalleEjemplo(7)
 	det.Calculo.DesglosePorConcepto = append(det.Calculo.DesglosePorConcepto, linea(cInsRT, "INS_RT", "5000"))
 	_, err := GenerarAsientos(5, []DetallePlanilla{det}, mapeosSeed(), cfg())
@@ -169,7 +165,6 @@ func TestValidarPartidaDoble(t *testing.T) {
 	if err := ValidarPartidaDoble(desc); !errors.Is(err, ErrDescuadre) {
 		t.Errorf("descuadre de 0.01 no detectado: %v", err)
 	}
-	// Cuadra en total pero no por programa
 	porProg := []AsientoContable{
 		{TipoAsientoID: 1, Lineas: []AsientoContableDetalle{{ProgramaPresupuestarioID: 1, MontoDebe: d("10")}}},
 		{TipoAsientoID: 2, Lineas: []AsientoContableDetalle{{ProgramaPresupuestarioID: 2, MontoHaber: d("10")}}},
@@ -177,16 +172,11 @@ func TestValidarPartidaDoble(t *testing.T) {
 	if err := ValidarPartidaDoble(porProg); !errors.Is(err, ErrDescuadre) {
 		t.Errorf("descuadre por programa no detectado: %v", err)
 	}
-	// Línea que violaría el CHECK de la BD
 	ambas := []AsientoContable{{TipoAsientoID: 1, Lineas: []AsientoContableDetalle{{ProgramaPresupuestarioID: 1, MontoDebe: d("5"), MontoHaber: d("5")}}}}
 	if err := ValidarPartidaDoble(ambas); !errors.Is(err, ErrMontoNegativoOInvalido) {
 		t.Errorf("línea debe+haber no detectada: %v", err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Servicio con repositorio fake (verifica que un fallo no persiste nada)
-// ---------------------------------------------------------------------------
 
 type fakeRepo struct {
 	periodo    PeriodoContable
@@ -195,6 +185,7 @@ type fakeRepo struct {
 	guardados  []AsientoContable
 	marcado    bool
 	marcadoDe  string // estado desde el que se marcó
+	marcadoPor int64  // usuario que contabilizó
 	usuarioTx  int64  // usuario con el que se abrió la tx auditada
 	txAbiertas int
 }
@@ -203,7 +194,7 @@ func (f *fakeRepo) EjecutarEnTx(ctx context.Context, usuarioID int64, fn func(Re
 	f.txAbiertas++
 	f.usuarioTx = usuarioID
 	if err := fn(f); err != nil {
-		f.guardados, f.marcado = nil, false // simula rollback
+		f.guardados, f.marcado = nil, false
 		return err
 	}
 	return nil
@@ -211,7 +202,7 @@ func (f *fakeRepo) EjecutarEnTx(ctx context.Context, usuarioID int64, fn func(Re
 func (f *fakeRepo) ObtenerPeriodoParaContabilizar(context.Context, int64) (PeriodoContable, error) {
 	return f.periodo, nil
 }
-func (f *fakeRepo) ContarAsientosDelPeriodo(context.Context, int64) (int64, error) {
+func (f *fakeRepo) ContarAsientosDelPeriodo(context.Context, int64, string) (int64, error) {
 	return f.existentes, nil
 }
 func (f *fakeRepo) ListarMapeosVigentesEnFecha(context.Context, time.Time) ([]MapeoConceptoCuenta, error) {
@@ -221,8 +212,8 @@ func (f *fakeRepo) GuardarAsiento(_ context.Context, a AsientoContable) (int64, 
 	f.guardados = append(f.guardados, a)
 	return int64(100 + len(f.guardados)), nil
 }
-func (f *fakeRepo) MarcarPeriodoContabilizado(_ context.Context, _ int64, estadoActual string) error {
-	f.marcado, f.marcadoDe = true, estadoActual
+func (f *fakeRepo) MarcarPeriodoContabilizado(_ context.Context, _ int64, estadoActual string, usuarioID int64) error {
+	f.marcado, f.marcadoDe, f.marcadoPor = true, estadoActual, usuarioID
 	return nil
 }
 
@@ -238,9 +229,7 @@ func TestContabilizarPeriodo(t *testing.T) {
 		if err != nil || len(as) != 2 || len(r.guardados) != 2 || !r.marcado {
 			t.Fatalf("err=%v as=%d guardados=%d marcado=%v", err, len(as), len(r.guardados), r.marcado)
 		}
-		// Misma transacción auditada: una sola tx, con el usuario real, y la
-		// transición sale de 'pagada'.
-		if r.txAbiertas != 1 || r.usuarioTx != 42 || r.marcadoDe != "pagada" {
+		if r.txAbiertas != 1 || r.usuarioTx != 42 || r.marcadoDe != "pagada" || r.marcadoPor != 42 {
 			t.Errorf("tx=%d usuario=%d marcadoDe=%q", r.txAbiertas, r.usuarioTx, r.marcadoDe)
 		}
 		if as[0].NumeroAsiento == "" || as[0].ID == 0 || as[0].Lineas[0].AsientoContableID != as[0].ID {
@@ -256,8 +245,6 @@ func TestContabilizarPeriodo(t *testing.T) {
 			t.Fatalf("err=%v guardados=%d marcado=%v", err, len(r.guardados), r.marcado)
 		}
 	})
-	// D4: solo 'pagada' se contabiliza. Cualquier otro estado → error de estado
-	// y NADA persistido ni marcado.
 	for _, estado := range []string{"borrador", "calculada", "aprobada", "contabilizada", "cerrado", ""} {
 		estado := estado
 		t.Run("estado inválido: "+estado, func(t *testing.T) {
@@ -269,6 +256,22 @@ func TestContabilizarPeriodo(t *testing.T) {
 			}
 		})
 	}
+	t.Run("quien pagó no contabiliza", func(t *testing.T) {
+		r := base()
+		pago := int64(42)
+		r.periodo.PagadoPorUsuarioID = &pago
+		_, err := svc(r).ContabilizarPeriodo(context.Background(), 5, 42, []DetallePlanilla{detalleEjemplo(7)})
+		if !errors.Is(err, planilla.ErrSegregacionFunciones) || len(r.guardados) != 0 || r.marcado {
+			t.Fatalf("err=%v guardados=%d marcado=%v", err, len(r.guardados), r.marcado)
+		}
+	})
+	t.Run("los mapeos del asiento de pago no entran al devengo", func(t *testing.T) {
+		r := base()
+		r.mapeos = append(r.mapeos, mapeoPago(prog, 1101))
+		if _, err := svc(r).ContabilizarPeriodo(context.Background(), 5, 1, []DetallePlanilla{detalleEjemplo(7)}); err != nil {
+			t.Fatalf("el mapeo de bancos (haber de SAL_BASE en PAGO_PLANILLA) no debe duplicar el neto: %v", err)
+		}
+	})
 	t.Run("asientos ya generados", func(t *testing.T) {
 		r := base()
 		r.existentes = 2
@@ -284,7 +287,7 @@ func TestContabilizarPeriodo_NetoAlteradoDescuadra(t *testing.T) {
 	r := &fakeRepo{periodo: PeriodoContable{ID: 5, FechaFin: time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC), Estado: "pagada"}, mapeos: mapeosSeed()}
 	s, _ := NewService(r, cfg())
 	det := detalleEjemplo(7)
-	det.Calculo.NetoPagado = d("932981.26") // +0.01
+	det.Calculo.NetoPagado = d("932981.26")
 	_, err := s.ContabilizarPeriodo(context.Background(), 5, 1, []DetallePlanilla{det})
 	var de *DescuadreError
 	if !errors.As(err, &de) || !errors.Is(err, ErrDescuadre) {
@@ -298,13 +301,13 @@ func TestContabilizarPeriodo_NetoAlteradoDescuadra(t *testing.T) {
 	}
 }
 
-// Los montos con más de 2 decimales se redondean ANTES de validar/persistir
+// Los montos con más de 2 decimales se redondean antes de validar/persistir
 // (las columnas son DECIMAL(14,2)): ninguna línea puede llevar más precisión
 // que la que la base va a conservar.
 func TestGenerarAsientos_RedondeaADosDecimales(t *testing.T) {
 	det := detalleEjemplo(7)
 	det.Calculo.DesglosePorConcepto[1] = linea(cHrsExtra, "HRS_EXTRA", "62500.004")
-	det.Calculo.CuotaPatronalCCSS = d("285068.754")
+	det.Calculo.Patronal[0].Monto = d("285068.754")
 	det.Calculo.NetoPagado = d("932981.254")
 	as, err := GenerarAsientos(5, []DetallePlanilla{det}, mapeosSeed(), cfg())
 	if err != nil {
@@ -327,7 +330,7 @@ func TestGenerarAsientos_MontoQueRedondeaACeroSeOmite(t *testing.T) {
 	det := detalleEjemplo(7)
 	det.Calculo.DesglosePorConcepto[1] = linea(cHrsExtra, "HRS_EXTRA", "0.004")
 	det.Calculo.TotalIngresos = d("1000000")
-	det.Calculo.NetoPagado = d("870481.25") // 1.000.000 - 129.518,75
+	det.Calculo.NetoPagado = d("870481.25")
 	as, err := GenerarAsientos(5, []DetallePlanilla{det}, mapeosSeed(), cfg())
 	if err != nil {
 		t.Fatal(err)
@@ -342,8 +345,42 @@ func TestGenerarAsientos_MontoQueRedondeaACeroSeOmite(t *testing.T) {
 // La cuota patronal negativa se rechaza aunque redondee a cero.
 func TestGenerarAsientos_PatronalNegativaFalla(t *testing.T) {
 	det := detalleEjemplo(7)
-	det.Calculo.CuotaPatronalCCSS = d("-0.004")
+	det.Calculo.Patronal[0].Monto = d("-0.004")
 	if _, err := GenerarAsientos(5, []DetallePlanilla{det}, mapeosSeed(), cfg()); !errors.Is(err, ErrMontoNegativoOInvalido) {
 		t.Fatalf("esperaba ErrMontoNegativoOInvalido, obtuve %v", err)
+	}
+}
+
+func mapeoPago(programa, cuenta int64) MapeoConceptoCuenta {
+	return MapeoConceptoCuenta{ConceptoSalarialID: cSalBase, ConceptoCodigo: "SAL_BASE", ProgramaPresupuestarioID: programa,
+		TipoAsientoID: 9, TipoAsientoCodigo: "PAGO_PLANILLA", CuentaContableID: cuenta, TipoMovimiento: MovimientoHaber, Proyecto: "99"}
+}
+
+func TestGenerarAsientoPago(t *testing.T) {
+	ms := append(mapeosSeed(), mapeoPago(prog, 1101))
+	a, ok, err := GenerarAsientoPago(5, []NetoPrograma{{ProgramaPresupuestarioID: prog, Neto: d("932981.25")}}, ms, cfg())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if a.TipoAsientoID != 9 || len(a.Lineas) != 2 {
+		t.Fatalf("asiento %+v", a)
+	}
+	if a.Lineas[0].CuentaContableID != 2106 || !a.Lineas[0].MontoDebe.Equal(d("932981.25")) ||
+		a.Lineas[1].CuentaContableID != 1101 || !a.Lineas[1].MontoHaber.Equal(d("932981.25")) {
+		t.Errorf("líneas %+v", a.Lineas)
+	}
+	if !a.TotalDebe().Equal(a.TotalHaber()) {
+		t.Error("asiento de pago descuadrado")
+	}
+}
+
+func TestGenerarAsientoPago_SinMapeoDeBancosFalla(t *testing.T) {
+	_, _, err := GenerarAsientoPago(5, []NetoPrograma{{ProgramaPresupuestarioID: prog, Neto: d("10")}}, mapeosSeed(), cfg())
+	if !errors.Is(err, ErrMapeoFaltante) {
+		t.Fatalf("esperaba ErrMapeoFaltante, fue %v", err)
+	}
+	_, ok, err := GenerarAsientoPago(5, []NetoPrograma{{ProgramaPresupuestarioID: prog, Neto: d("0")}}, mapeosSeed(), cfg())
+	if err != nil || ok {
+		t.Fatalf("neto cero: sin asiento y sin error (ok=%v, %v)", ok, err)
 	}
 }

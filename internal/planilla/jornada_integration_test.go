@@ -8,16 +8,16 @@ import (
 	"testing"
 )
 
-// L12: la BD resuelve contratos.jornada_id del texto; una jornada sin
-// parametros_jornada vigente (NOCTURNA no se siembra) no calcula horas extra.
-func TestL12JornadaYDivisor(t *testing.T) {
+// Una jornada sin parametros_jornada vigente (NOCTURNA no se siembra) no
+// calcula horas extra.
+func TestJornadaYDivisor(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	f.sembrarSalarioMinimoInembargable(t)
 	var jornada string
 	if err := f.db.QueryRow(`SELECT j.codigo FROM contratos c JOIN jornadas j ON j.id = c.jornada_id WHERE c.id = ?`, f.contrato[2]).Scan(&jornada); err != nil || jornada != "DIURNA" {
-		t.Fatalf("jornada_id resuelta por trigger = %q, %v", jornada, err)
+		t.Fatalf("jornada del contrato = %q, %v", jornada, err)
 	}
-	mustExec(t, f.db, `UPDATE contratos SET jornada = 'NOCTURNA', jornada_id = (SELECT id FROM jornadas WHERE codigo = 'NOCTURNA') WHERE id = ?`, f.contrato[2])
+	mustExec(t, f.db, `UPDATE contratos SET jornada_id = (SELECT id FROM jornadas WHERE codigo = 'NOCTURNA') WHERE id = ?`, f.contrato[2])
 
 	svc := f.servicio()
 	p := marzo(t, svc, f)

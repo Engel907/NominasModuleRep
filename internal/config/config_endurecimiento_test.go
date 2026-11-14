@@ -19,6 +19,8 @@ func entornoDev(t *testing.T) {
 		"DB_USER":                 "u",
 		"DB_NAME":                 "n",
 		"PASETO_LOCAL_KEYS_HEX":   "k1:" + strings.Repeat("ab", 32),
+		"DATA_KEYS_HEX":           "d1:" + strings.Repeat("cd", 32),
+		"DATA_HMAC_KEY_HEX":       strings.Repeat("ef", 32),
 		"RATE_LIMIT_AUTH_PER_MIN": "10",
 		"RATE_LIMIT_AUTH_BURST":   "10",
 		"RATE_LIMIT_USER_PER_MIN": "300",
@@ -27,9 +29,8 @@ func entornoDev(t *testing.T) {
 	for k, v := range validas {
 		t.Setenv(k, v)
 	}
-	// Variables que podrían venir del shell del desarrollador.
 	for _, k := range []string{"DB_TLS_MODE", "DB_TLS_CA_FILE", "DB_PARAMS", "TRUSTED_PROXIES",
-		"CORS_ALLOWED_ORIGINS", "MAX_BODY_BYTES", "DB_PASSWORD", "SMTP_HOST", "SMTP_FROM", "URL_BASE_RESET"} {
+		"CORS_ALLOWED_ORIGINS", "MAX_BODY_BYTES", "DB_PASSWORD", "SMTP_HOST", "SMTP_FROM", "URL_BASE_RESET", "NOMBRE_SISTEMA"} {
 		t.Setenv(k, "")
 	}
 }
@@ -42,11 +43,14 @@ func entornoProd(t *testing.T) {
 	t.Setenv("DB_TLS_MODE", "verify-full")
 	t.Setenv("SMTP_HOST", "smtp.example")
 	t.Setenv("SMTP_FROM", "a@b.c")
+	t.Setenv("NOMBRE_SISTEMA", "Planillas de prueba")
 	t.Setenv("URL_BASE_RESET", "https://app.example/reset")
 	t.Setenv("PASETO_LOCAL_KEYS_HEX", "k1:"+strings.Repeat("ab", 32))
+	t.Setenv("DATA_KEYS_HEX", "d1:"+strings.Repeat("cd", 32))
+	t.Setenv("DATA_HMAC_KEY_HEX", strings.Repeat("ef", 32))
 }
 
-func TestF16_DefaultsEnDesarrollo(t *testing.T) {
+func TestDefaultsEnDesarrollo(t *testing.T) {
 	entornoDev(t)
 	cfg, err := LoadConfig()
 	require.NoError(t, err)
@@ -58,7 +62,7 @@ func TestF16_DefaultsEnDesarrollo(t *testing.T) {
 	assert.NotContains(t, cfg.Database.DSN(), "tls=")
 }
 
-func TestF16_RateLimitSinDefaultEsObligatorio(t *testing.T) {
+func TestRateLimitSinDefaultEsObligatorio(t *testing.T) {
 	entornoDev(t)
 	t.Setenv("RATE_LIMIT_AUTH_PER_MIN", "")
 	_, err := LoadConfig()
@@ -72,26 +76,26 @@ func TestF16_RateLimitSinDefaultEsObligatorio(t *testing.T) {
 	assert.Contains(t, err.Error(), "RATE_LIMIT_USER_BURST")
 }
 
-func TestF16_LogLevelInvalido(t *testing.T) {
+func TestLogLevelInvalido(t *testing.T) {
 	entornoDev(t)
 	t.Setenv("LOG_LEVEL", "verbose")
 	_, err := LoadConfig()
 	require.Error(t, err)
 }
 
-func TestF16_CORS(t *testing.T) {
+func TestCORS(t *testing.T) {
 	casos := []struct {
 		valor string
 		ok    bool
 	}{
 		{"*", false},
 		{"https://a.example,*", false},
-		{"https://a.example/", false}, // barra final
+		{"https://a.example/", false},
 		{"https://a.example/ruta", false},
 		{"ftp://a.example", false},
 		{"a.example", false},
 		{"https://a.example", true},
-		{"https://a.example, http://localhost:5173", true}, // http solo fuera de producción
+		{"https://a.example, http://localhost:5173", true},
 	}
 	for _, tc := range casos {
 		entornoDev(t)
@@ -111,7 +115,7 @@ func TestF16_CORS(t *testing.T) {
 	assert.Error(t, err, "http:// no se admite en producción")
 }
 
-func TestF16_TrustedProxies(t *testing.T) {
+func TestTrustedProxies(t *testing.T) {
 	entornoDev(t)
 	t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.10")
 	cfg, err := LoadConfig()
@@ -129,27 +133,23 @@ func TestF16_TrustedProxies(t *testing.T) {
 	assert.Error(t, err, "confiar en todo Internet no se admite en producción")
 }
 
-func TestF16_TLSBaseDeDatos(t *testing.T) {
-	// Producción + disabled => falla el arranque.
+func TestTLSBaseDeDatos(t *testing.T) {
 	entornoProd(t)
 	t.Setenv("DB_TLS_MODE", "disabled")
 	_, err := LoadConfig()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "DB_TLS_MODE")
 
-	// Producción sin declarar el modo (default disabled) => también falla.
 	entornoProd(t)
 	t.Setenv("DB_TLS_MODE", "")
 	_, err = LoadConfig()
 	assert.Error(t, err)
 
-	// Modo desconocido.
 	entornoDev(t)
 	t.Setenv("DB_TLS_MODE", "preferred")
 	_, err = LoadConfig()
 	assert.Error(t, err)
 
-	// required / verify-full en producción: ok y el DSN trae tls=.
 	for _, modo := range []string{"required", "verify-full"} {
 		entornoProd(t)
 		t.Setenv("DB_TLS_MODE", modo)
@@ -158,14 +158,12 @@ func TestF16_TLSBaseDeDatos(t *testing.T) {
 		assert.Contains(t, cfg.Database.DSN(), "&tls="+nombreTLSMySQL)
 	}
 
-	// tls= en DB_PARAMS choca con DB_TLS_MODE.
 	entornoDev(t)
 	t.Setenv("DB_TLS_MODE", "required")
 	t.Setenv("DB_PARAMS", "parseTime=true&tls=skip-verify")
 	_, err = LoadConfig()
 	assert.Error(t, err)
 
-	// CA solo con verify-full.
 	entornoDev(t)
 	t.Setenv("DB_TLS_MODE", "required")
 	t.Setenv("DB_TLS_CA_FILE", "/tmp/ca.pem")
@@ -173,7 +171,7 @@ func TestF16_TLSBaseDeDatos(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestF16_TLSConfig(t *testing.T) {
+func TestTLSConfig(t *testing.T) {
 	d := DatabaseConfig{Host: "db.interno", TLSMode: "disabled"}
 	cfg, err := d.TLSConfig()
 	require.NoError(t, err)
@@ -184,7 +182,7 @@ func TestF16_TLSConfig(t *testing.T) {
 	cfg, err = d.TLSConfig()
 	require.NoError(t, err)
 	assert.True(t, cfg.InsecureSkipVerify)
-	assert.GreaterOrEqual(t, int(cfg.MinVersion), 0x0303) // TLS 1.2+
+	assert.GreaterOrEqual(t, int(cfg.MinVersion), 0x0303)
 
 	d.TLSMode = "verify-full"
 	cfg, err = d.TLSConfig()
@@ -193,7 +191,6 @@ func TestF16_TLSConfig(t *testing.T) {
 	assert.Equal(t, "db.interno", cfg.ServerName)
 	assert.NoError(t, d.RegistrarTLS())
 
-	// CA inexistente o con basura => error claro.
 	d.TLSCAFile = filepath.Join(t.TempDir(), "no-existe.pem")
 	_, err = d.TLSConfig()
 	assert.Error(t, err)
@@ -205,7 +202,7 @@ func TestF16_TLSConfig(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestF16_SlogLevel(t *testing.T) {
+func TestSlogLevel(t *testing.T) {
 	assert.Equal(t, "DEBUG", AppConfig{LogLevel: "debug"}.SlogLevel().String())
 	assert.Equal(t, "WARN", AppConfig{LogLevel: "WARN"}.SlogLevel().String())
 	assert.Equal(t, "INFO", AppConfig{LogLevel: "???"}.SlogLevel().String())

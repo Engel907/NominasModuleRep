@@ -25,7 +25,7 @@ import (
 
 // listaBlancaDinamicas: archivos (ruta relativa a la raíz, con /) que
 // construyen SQL dinámicamente (concatenación, fmt, IN armados). Esas consultas
-// no se pueden preparar tal cual; cada entrada DEBE explicar qué test
+// no se pueden preparar tal cual; cada entrada debe explicar qué test
 // específico ejecuta sus variantes reales. Una consulta dinámica en un archivo
 // que no esté aquí hace fallar el test de contrato.
 var listaBlancaDinamicas = map[string]string{
@@ -34,9 +34,12 @@ var listaBlancaDinamicas = map[string]string{
 	"internal/db/dto/acumulados_liquidaciones.go": "Filtro IN de estados de período; ejecutado en TestVariantesDinamicasSQL.",
 	"internal/db/dto/dashboard.go":                "Placeholders variables según estados cerrados; ejecutados en TestVariantesDinamicasSQL.",
 	"internal/db/dto/planilla_ciclo.go":           "Filtros opcionales de período; ejecutados en TestVariantesDinamicasSQL.",
-	"internal/db/dto/planilla_periodo.go":         "Columna de base elegida por método y query agregada; ejecutadas en TestVariantesDinamicasSQL.",
 	"internal/db/dto/usuarios_admin.go":           "Filtros opcionales de usuario/auditoría y UPDATE selectivo; ejecutados en TestVariantesDinamicasSQL.",
-	"internal/db/dto/planilla_detalle.go":         "INSERT multi-fila por lote en las 6 tablas planilla_detalle_*; ejecutado en TestL7EscribirYEliminarDetalle (internal/planilla).",
+	"internal/db/dto/planilla_detalle.go":         "INSERT multi-fila por lote en las 6 tablas planilla_detalle_*; ejecutado en TestEscribirYEliminarDetalle (internal/planilla).",
+	"internal/db/dto/reportes_oficiales.go":       "Vista y columnas de la lista blanca de planilla.ReportesService; ejecutadas en TestReportesOficiales (internal/planilla).",
+	"internal/db/dto/datos_sensibles.go":          "Columnas _cifrado/_hash/_kid de la lista blanca dto.CamposSensibles; ejecutadas en TestCifradoYAccesos (internal/services).",
+	"internal/db/dto/parametros_propuestas.go":    "Tabla/columnas de la lista blanca de parametros.RegistroEspecs y filtros opcionales; cada tabla ejecutada en TestAplicaCadaTabla (internal/parametros).",
+	"internal/db/dto/catalogos_configuracion.go":  "Tabla/columnas de la lista blanca de catalogos.Registro; listado de cada catálogo y alta/cambio/baja ejecutados en TestCatalogoCicloCompletoAuditado, columnas contra el esquema en TestCatalogosCoincidenConElEsquema (internal/configuracion).",
 }
 
 type consulta struct {
@@ -224,10 +227,8 @@ func aStrings(es []planilla.EstadoPeriodo) []string {
 	return out
 }
 
-// TestVariantesDinamicasExport ejecuta las variantes reales del IN armado en
-// internal/db/dto/planilla_export.go y de planilla.ClausulaIN con los estados
-// de estados.go. Un estado fuera del ENUM no da error en MySQL (solo compara),
-// por eso el contrato del ENUM vive en planilla/estados_enum_test.go.
+// TestVariantesDinamicasExport ejecuta las variantes reales de los IN armados
+// con los estados del período.
 func TestVariantesDinamicasExport(t *testing.T) {
 	sqlDB := testutil.NuevaBD(t)
 	ctx := context.Background()
@@ -298,12 +299,6 @@ func TestVariantesDinamicasSQL(t *testing.T) {
 	}
 	if _, err := q.ContarPeriodosCiclo(ctx, filtroCiclo); err != nil {
 		t.Fatalf("ContarPeriodosCiclo: %v", err)
-	}
-	if _, err := q.SumarBaseAguinaldoPorEmpleado(ctx, desde, hasta); err != nil {
-		t.Fatalf("SumarBaseAguinaldoPorEmpleado: %v", err)
-	}
-	if _, err := q.SumarBaseSalarioEscolarPorEmpleado(ctx, desde, hasta); err != nil {
-		t.Fatalf("SumarBaseSalarioEscolarPorEmpleado: %v", err)
 	}
 
 	usuarioID, err := q.CrearUsuarioAdministracion(ctx, "contrato_sql", "Contrato SQL", "contrato-sql@example.test", sql.NullInt64{}, "hash-de-prueba")

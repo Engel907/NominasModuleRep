@@ -1,7 +1,3 @@
-// internal/db/dto/planilla_hidratacion.go
-//
-// Lecturas que usa el hidratador del cálculo (internal/planilla/hidratador.go)
-// y que no existían en planilla_periodo.go / planilla_motor.go.
 package dto
 
 import (
@@ -50,7 +46,7 @@ ORDER BY id ASC`, periodoID, empleadoID)
 type ContextoLaboralRow struct {
 	ProgramaPresupuestarioID int64
 	ClasificacionPuestoID    *int64 // puestos.clasificacion_puesto_id es NULL-able
-	RegimenCCSSID            *int64 // la columna aún no existe en BD: siempre nil hasta L15
+	RegimenCCSSID            *int64 // empleado_datos_laborales.regimen_ccss_id; NULL = sin asignar
 }
 
 // ObtenerContextoLaboral: datos laborales vigentes a `fecha` (versión de
@@ -58,16 +54,16 @@ type ContextoLaboralRow struct {
 // puesto. Devuelve sql.ErrNoRows si no hay versión vigente.
 func (q *Queries) ObtenerContextoLaboral(ctx context.Context, empleadoID int64, fecha time.Time) (ContextoLaboralRow, error) {
 	var r ContextoLaboralRow
-	var clasif sql.NullInt64
+	var clasif, regimen sql.NullInt64
 	err := q.db.QueryRowContext(ctx, `
-SELECT edl.programa_presupuestario_id, p.clasificacion_puesto_id
+SELECT edl.programa_presupuestario_id, p.clasificacion_puesto_id, edl.regimen_ccss_id
 FROM empleado_datos_laborales edl
 JOIN puestos p ON p.id = edl.puesto_id
 WHERE edl.empleado_id = ?
   AND edl.fecha_inicio_vigencia <= ?
   AND (edl.fecha_fin_vigencia IS NULL OR edl.fecha_fin_vigencia >= ?)
 ORDER BY edl.fecha_inicio_vigencia DESC
-LIMIT 1`, empleadoID, fecha, fecha).Scan(&r.ProgramaPresupuestarioID, &clasif)
+LIMIT 1`, empleadoID, fecha, fecha).Scan(&r.ProgramaPresupuestarioID, &clasif, &regimen)
 	if err != nil {
 		return ContextoLaboralRow{}, err
 	}
@@ -75,12 +71,18 @@ LIMIT 1`, empleadoID, fecha, fecha).Scan(&r.ProgramaPresupuestarioID, &clasif)
 		v := clasif.Int64
 		r.ClasificacionPuestoID = &v
 	}
+	if regimen.Valid {
+		v := regimen.Int64
+		r.RegimenCCSSID = &v
+	}
 	return r, nil
 }
 
 type ContratoEnRangoRow struct {
 	ContratoID          int64
 	SalarioPactado      decimal.Decimal
+	ModalidadSalario    string
+	JornadaID           int64
 	FechaInicioVigencia time.Time
 	FechaFinVigencia    *time.Time
 	FechaInicioContrato time.Time
@@ -88,11 +90,11 @@ type ContratoEnRangoRow struct {
 }
 
 // ListarContratosEnRango: versiones de contrato del empleado cuya vigencia se
-// solapa con [desde, hasta], por inicio de vigencia (L10: segmentación del
+// solapa con [desde, hasta], por inicio de vigencia (segmentación del
 // salario por ingreso, cese y aumentos).
 func (q *Queries) ListarContratosEnRango(ctx context.Context, empleadoID int64, desde, hasta time.Time) ([]ContratoEnRangoRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
-SELECT id, salario_pactado, fecha_inicio_vigencia, fecha_fin_vigencia, fecha_inicio_contrato, fecha_fin_contrato
+SELECT id, salario_pactado, modalidad_salario, jornada_id, fecha_inicio_vigencia, fecha_fin_vigencia, fecha_inicio_contrato, fecha_fin_contrato
 FROM contratos
 WHERE empleado_id = ?
   AND fecha_inicio_vigencia <= ?
@@ -106,7 +108,7 @@ ORDER BY fecha_inicio_vigencia ASC, id ASC`, empleadoID, hasta, desde)
 	for rows.Next() {
 		var r ContratoEnRangoRow
 		var finVig, finCon sql.NullTime
-		if err := rows.Scan(&r.ContratoID, &r.SalarioPactado, &r.FechaInicioVigencia, &finVig, &r.FechaInicioContrato, &finCon); err != nil {
+		if err := rows.Scan(&r.ContratoID, &r.SalarioPactado, &r.ModalidadSalario, &r.JornadaID, &r.FechaInicioVigencia, &finVig, &r.FechaInicioContrato, &finCon); err != nil {
 			return nil, err
 		}
 		if finVig.Valid {

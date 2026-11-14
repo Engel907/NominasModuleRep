@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"planillas-ccdr/internal/db/dto"
 	"planillas-ccdr/internal/planilla"
 )
@@ -17,6 +19,7 @@ type parametrosQueries interface {
 	ListarEscalaEmbargoEnFecha(context.Context, time.Time) ([]dto.TramoEscalaEmbargoVigenteRow, error)
 	ListarBaseMinimaContributivaEnFecha(context.Context, time.Time) ([]dto.BaseMinimaContributivaVigenteRow, error)
 	ListarParametrosJornadaEnFecha(context.Context, time.Time) ([]dto.ParametroJornadaRow, error)
+	ObtenerPorcentajeSalarioEscolarEnFecha(context.Context, time.Time) (decimal.Decimal, error)
 }
 
 var _ parametrosQueries = (*dto.Queries)(nil)
@@ -81,4 +84,8 @@ func (f *fuenteParametros) ListarBaseMinimaContributivaEnFecha(ctx context.Conte
 
 func (f *fuenteParametros) ListarParametrosJornadaEnFecha(ctx context.Context, fecha time.Time) ([]dto.ParametroJornadaRow, error) {
 	return f.q.ListarParametrosJornadaEnFecha(ctx, fecha)
+}
+
+func (f *fuenteParametros) ObtenerPorcentajeSalarioEscolarEnFecha(ctx context.Context, fecha time.Time) (decimal.Decimal, error) {
+	return f.q.ObtenerPorcentajeSalarioEscolarEnFecha(ctx, fecha)
 }

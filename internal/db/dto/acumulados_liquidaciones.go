@@ -1,32 +1,3 @@
-// internal/db/dto/acumulados_liquidaciones.go
-//
-// Fase 7 — Acumulados (Aguinaldo, Salario Escolar) y Liquidaciones Laborales.
-// Reemplaza db/queries/acumulados_liquidaciones.sql (referencia legible; ya no
-// se compila). Helpers (rowScanner) en asistencia.go. Estilo de contratos.go /
-// vacaciones.go: argumentos posicionales para queries chicas y un struct
-// *Params para los INSERT anchos.
-//
-// NOTA DE MIGRACIÓN:
-//
-//   - F08: las consultas de este archivo se revisaron contra el DDL real
-//     (aguinaldos, salarios_escolares, liquidaciones, parametros_salario_escolar,
-//     vacaciones_acumulado, periodos_planilla, planilla_detalle_empleado). Los
-//     SELECT listan columnas explícitas en vez de `SELECT *`; si el schema
-//     cambia, ajustar structs + columnas* aquí.
-//   - F08: los periodos que cuentan para acumulados son aprobada, pagada y
-//     contabilizada, los valores persistidos del ENUM periodos_planilla.estado.
-//   - CORRECCIÓN respecto al .sql: GetSaldoVacacionesDisponibles hacía
-//     `WHERE empleado_id = ? LIMIT 1` asumiendo una fila por empleado.
-//     vacaciones_acumulado es una tabla de CORTES históricos (UNIQUE
-//     empleado_id+fecha_corte, ver vacaciones.go), así que sin ORDER BY
-//     devolvería un corte arbitrario. Ahora toma el más reciente, igual que
-//     ObtenerSaldoVacacionesEmpleado.
-//   - Tipos de liquidaciones: dias_preaviso y antiguedad_meses como int32;
-//     dias_cesantia y dias_vacaciones_pendientes como decimal (pueden ser
-//     fraccionarios). Ajustar si la migración los definió distinto.
-//   - CerrarPorcentajeSalarioEscolarVigente + CrearVersionPorcentajeSalarioEscolar
-//     son un patrón de vigencia de 2 pasos (ADR-000 §2): el llamador DEBE
-//     ejecutarlos en la misma Tx (db.WithAuditContext / WithTx).
 package dto
 
 import (
@@ -36,11 +7,6 @@ import (
 
 	"github.com/shopspring/decimal"
 )
-
-// ============================================================================
-// SALARIOS BRUTOS DEVENGADOS (fuente compartida por aguinaldo, salario
-// escolar y liquidación). Solo periodos aprobados, pagados o contabilizados.
-// ============================================================================
 
 type SumarSalariosBrutosPeriodoRow struct {
 	TotalSalariosBrutos decimal.Decimal
@@ -121,10 +87,6 @@ LIMIT ?`, args...)
 	return out, rows.Err()
 }
 
-// ============================================================================
-// PARAMETROS_SALARIO_ESCOLAR (vigencia — único registro vigente global)
-// ============================================================================
-
 type ParametroSalarioEscolar struct {
 	ID                  int64
 	Porcentaje          decimal.Decimal
@@ -167,12 +129,8 @@ INSERT INTO parametros_salario_escolar (
 	return res.LastInsertId()
 }
 
-// ============================================================================
-// VACACIONES (saldo materializado — ver vacaciones.go)
-// ============================================================================
-
 // GetSaldoVacacionesDisponibles devuelve dias_disponibles del corte más
-// reciente del empleado (ver nota de migración arriba). sql.ErrNoRows si el
+// reciente del empleado. sql.ErrNoRows si el
 // empleado no tiene ningún corte.
 func (q *Queries) GetSaldoVacacionesDisponibles(ctx context.Context, empleadoID int64) (decimal.Decimal, error) {
 	var dias decimal.Decimal
@@ -184,10 +142,6 @@ ORDER BY fecha_corte DESC, id DESC
 LIMIT 1`, empleadoID).Scan(&dias)
 	return dias, err
 }
-
-// ============================================================================
-// AGUINALDOS (un registro por empleado+anio)
-// ============================================================================
 
 type Aguinaldo struct {
 	ID                  int64
@@ -271,10 +225,6 @@ INSERT INTO aguinaldos (
 	}
 	return res.LastInsertId()
 }
-
-// ============================================================================
-// SALARIOS_ESCOLARES (un registro por empleado+anio)
-// ============================================================================
 
 type SalarioEscolar struct {
 	ID                  int64
@@ -361,13 +311,6 @@ INSERT INTO salarios_escolares (
 	return res.LastInsertId()
 }
 
-// ============================================================================
-// LIQUIDACIONES — SOLO se inserta en /procesar; /proyectar nunca llama
-// CrearLiquidacion. Debe ir en la MISMA Tx que el cierre de expediente
-// (CerrarContratoVigente, CerrarDatosLaboralesVigente, SetEmpleadoActivo),
-// que ya existen en contratos.go / empleados.go y no se duplican aquí.
-// ============================================================================
-
 type Liquidacion struct {
 	ID                                     int64
 	EmpleadoID                             int64
@@ -387,6 +330,10 @@ type Liquidacion struct {
 	PeriodoAguinaldoDesde                  time.Time
 	TotalSalariosBrutosAguinaldoProporcion decimal.Decimal
 	MontoAguinaldoProporcional             decimal.Decimal
+	SalarioDiarioVacaciones                decimal.Decimal
+	PeriodoSalarioEscolarDesde             sql.NullTime
+	TotalBaseSalarioEscolarProporcional    decimal.Decimal
+	MontoSalarioEscolarProporcional        decimal.Decimal
 	TotalLiquidacion                       decimal.Decimal
 	Estado                                 string
 	CalculadoEn                            time.Time
@@ -399,6 +346,8 @@ const columnasLiquidacion = `id, empleado_id, fecha_salida, motivo_salida, aplic
        dias_preaviso, monto_preaviso, dias_cesantia, monto_cesantia,
        dias_vacaciones_pendientes, monto_vacaciones_proporcionales,
        periodo_aguinaldo_desde, total_salarios_brutos_aguinaldo_proporcional, monto_aguinaldo_proporcional,
+       salario_diario_vacaciones, periodo_salario_escolar_desde,
+       total_base_salario_escolar_proporcional, monto_salario_escolar_proporcional,
        total_liquidacion, estado, calculado_en, procesado_por, procesado_en`
 
 func scanLiquidacion(s rowScanner) (Liquidacion, error) {
@@ -408,6 +357,8 @@ func scanLiquidacion(s rowScanner) (Liquidacion, error) {
 		&l.DiasPreaviso, &l.MontoPreaviso, &l.DiasCesantia, &l.MontoCesantia,
 		&l.DiasVacacionesPendientes, &l.MontoVacacionesProporcionales,
 		&l.PeriodoAguinaldoDesde, &l.TotalSalariosBrutosAguinaldoProporcion, &l.MontoAguinaldoProporcional,
+		&l.SalarioDiarioVacaciones, &l.PeriodoSalarioEscolarDesde,
+		&l.TotalBaseSalarioEscolarProporcional, &l.MontoSalarioEscolarProporcional,
 		&l.TotalLiquidacion, &l.Estado, &l.CalculadoEn, &l.ProcesadoPor, &l.ProcesadoEn)
 	return l, err
 }
@@ -462,6 +413,10 @@ type CrearLiquidacionParams struct {
 	PeriodoAguinaldoDesde                  time.Time
 	TotalSalariosBrutosAguinaldoProporcion decimal.Decimal
 	MontoAguinaldoProporcional             decimal.Decimal
+	SalarioDiarioVacaciones                decimal.Decimal
+	PeriodoSalarioEscolarDesde             sql.NullTime
+	TotalBaseSalarioEscolarProporcional    decimal.Decimal
+	MontoSalarioEscolarProporcional        decimal.Decimal
 	TotalLiquidacion                       decimal.Decimal
 	ProcesadoPor                           int64
 }
@@ -477,8 +432,10 @@ INSERT INTO liquidaciones (
     dias_cesantia, monto_cesantia,
     dias_vacaciones_pendientes, monto_vacaciones_proporcionales,
     periodo_aguinaldo_desde, total_salarios_brutos_aguinaldo_proporcional, monto_aguinaldo_proporcional,
+    salario_diario_vacaciones, periodo_salario_escolar_desde,
+    total_base_salario_escolar_proporcional, monto_salario_escolar_proporcional,
     total_liquidacion, estado, calculado_en, procesado_por, procesado_en
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'procesada', NOW(), ?, NOW())`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'procesada', NOW(), ?, NOW())`,
 		arg.EmpleadoID, arg.FechaSalida, arg.MotivoSalida, arg.AplicaResponsabilidadPatronal,
 		arg.FechaIngreso, arg.AntiguedadMeses,
 		arg.SalarioPromedio6Meses, arg.SalarioDiarioPromedio,
@@ -486,6 +443,8 @@ INSERT INTO liquidaciones (
 		arg.DiasCesantia, arg.MontoCesantia,
 		arg.DiasVacacionesPendientes, arg.MontoVacacionesProporcionales,
 		arg.PeriodoAguinaldoDesde, arg.TotalSalariosBrutosAguinaldoProporcion, arg.MontoAguinaldoProporcional,
+		arg.SalarioDiarioVacaciones, arg.PeriodoSalarioEscolarDesde,
+		arg.TotalBaseSalarioEscolarProporcional, arg.MontoSalarioEscolarProporcional,
 		arg.TotalLiquidacion, arg.ProcesadoPor)
 	if err != nil {
 		return 0, err

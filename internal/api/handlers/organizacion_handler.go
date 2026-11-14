@@ -1,8 +1,3 @@
-// api/handlers/organizacion_handler.go
-//
-// Fase 3 — Handlers delgados de los catálogos organizacionales: Puestos,
-// Unidades Organizativas, Programas Presupuestarios y Clasificaciones de
-// Puesto.
 package handlers
 
 import (
@@ -11,30 +6,24 @@ import (
 
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
-	"planillas-ccdr/internal/pagination"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/paginacion"
+	"planillas-ccdr/internal/rrhh"
 
 	"github.com/gin-gonic/gin"
 )
 
-// -----------------------------------------------------------------------------
-// OrganizacionHandler agrupa los 4 catálogos porque comparten forma (CRUD
-// simple + paginación) y así los handlers de negocio (empleados, contratos)
-// no quedan mezclados con los de catálogo.
-// -----------------------------------------------------------------------------
-
 type OrganizacionHandler struct {
-	clasificaciones services.ClasificacionPuestoService
-	programas       services.ProgramaPresupuestarioService
-	unidades        services.UnidadOrganizativaService
-	puestos         services.PuestoService
+	clasificaciones rrhh.ClasificacionPuestoService
+	programas       rrhh.ProgramaPresupuestarioService
+	unidades        rrhh.UnidadOrganizativaService
+	puestos         rrhh.PuestoService
 }
 
 func NewOrganizacionHandler(
-	clasificaciones services.ClasificacionPuestoService,
-	programas services.ProgramaPresupuestarioService,
-	unidades services.UnidadOrganizativaService,
-	puestos services.PuestoService,
+	clasificaciones rrhh.ClasificacionPuestoService,
+	programas rrhh.ProgramaPresupuestarioService,
+	unidades rrhh.UnidadOrganizativaService,
+	puestos rrhh.PuestoService,
 ) *OrganizacionHandler {
 	return &OrganizacionHandler{
 		clasificaciones: clasificaciones,
@@ -78,15 +67,13 @@ func (h *OrganizacionHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	}
 }
 
-// --------------------------- Clasificaciones de Puesto ----------------------
-
 func (h *OrganizacionHandler) CrearClasificacionPuesto(c *gin.Context) {
 	usuarioID, ok := usuarioIDDesdeContexto(c)
 	if !ok {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "no autenticado", nil)
 		return
 	}
-	var in services.ClasificacionPuestoInput
+	var in rrhh.ClasificacionPuestoInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -109,13 +96,13 @@ func (h *OrganizacionHandler) ActualizarClasificacionPuesto(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var in services.ClasificacionPuestoUpdateInput
+	var in rrhh.ClasificacionPuestoUpdateInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
 	}
 	if err := h.clasificaciones.Actualizar(c.Request.Context(), usuarioID, id, in); err != nil {
-		if errors.Is(err, services.ErrNoEncontrado) {
+		if errors.Is(err, rrhh.ErrNoEncontrado) {
 			middleware.Fail(c, http.StatusNotFound, "not_found", "clasificación de puesto no encontrada", nil)
 			return
 		}
@@ -131,7 +118,7 @@ func (h *OrganizacionHandler) GetClasificacionPuesto(c *gin.Context) {
 		return
 	}
 	item, err := h.clasificaciones.Get(c.Request.Context(), id)
-	if errors.Is(err, services.ErrNoEncontrado) {
+	if errors.Is(err, rrhh.ErrNoEncontrado) {
 		middleware.Fail(c, http.StatusNotFound, "not_found", "clasificación de puesto no encontrada", nil)
 		return
 	}
@@ -143,21 +130,19 @@ func (h *OrganizacionHandler) GetClasificacionPuesto(c *gin.Context) {
 }
 
 func (h *OrganizacionHandler) ListarClasificacionesPuesto(c *gin.Context) {
-	var req services.CatalogoListRequest
+	var req rrhh.CatalogoListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
 		responderErrorBind(c, "parámetros de consulta inválidos", err)
 		return
 	}
-	req.Paginacion = pagination.Desde(c)
-	items, paginacion, err := h.clasificaciones.List(c.Request.Context(), req)
+	req.Paginacion = paginacion.Desde(c)
+	items, meta, err := h.clasificaciones.List(c.Request.Context(), req)
 	if err != nil {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al listar clasificaciones de puesto", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"clasificaciones_puesto": items, "paginacion": paginacion})
+	c.JSON(http.StatusOK, gin.H{"clasificaciones_puesto": items, "paginacion": meta})
 }
-
-// --------------------------- Programas Presupuestarios ----------------------
 
 func (h *OrganizacionHandler) CrearProgramaPresupuestario(c *gin.Context) {
 	usuarioID, ok := usuarioIDDesdeContexto(c)
@@ -165,7 +150,7 @@ func (h *OrganizacionHandler) CrearProgramaPresupuestario(c *gin.Context) {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "no autenticado", nil)
 		return
 	}
-	var in services.ProgramaPresupuestarioInput
+	var in rrhh.ProgramaPresupuestarioInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -188,13 +173,13 @@ func (h *OrganizacionHandler) ActualizarProgramaPresupuestario(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var in services.ProgramaPresupuestarioUpdateInput
+	var in rrhh.ProgramaPresupuestarioUpdateInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
 	}
 	if err := h.programas.Actualizar(c.Request.Context(), usuarioID, id, in); err != nil {
-		if errors.Is(err, services.ErrNoEncontrado) {
+		if errors.Is(err, rrhh.ErrNoEncontrado) {
 			middleware.Fail(c, http.StatusNotFound, "not_found", "programa presupuestario no encontrado", nil)
 			return
 		}
@@ -210,7 +195,7 @@ func (h *OrganizacionHandler) GetProgramaPresupuestario(c *gin.Context) {
 		return
 	}
 	item, err := h.programas.Get(c.Request.Context(), id)
-	if errors.Is(err, services.ErrNoEncontrado) {
+	if errors.Is(err, rrhh.ErrNoEncontrado) {
 		middleware.Fail(c, http.StatusNotFound, "not_found", "programa presupuestario no encontrado", nil)
 		return
 	}
@@ -222,21 +207,19 @@ func (h *OrganizacionHandler) GetProgramaPresupuestario(c *gin.Context) {
 }
 
 func (h *OrganizacionHandler) ListarProgramasPresupuestarios(c *gin.Context) {
-	var req services.CatalogoListRequest
+	var req rrhh.CatalogoListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
 		responderErrorBind(c, "parámetros de consulta inválidos", err)
 		return
 	}
-	req.Paginacion = pagination.Desde(c)
-	items, paginacion, err := h.programas.List(c.Request.Context(), req)
+	req.Paginacion = paginacion.Desde(c)
+	items, meta, err := h.programas.List(c.Request.Context(), req)
 	if err != nil {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al listar programas presupuestarios", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"programas_presupuestarios": items, "paginacion": paginacion})
+	c.JSON(http.StatusOK, gin.H{"programas_presupuestarios": items, "paginacion": meta})
 }
-
-// --------------------------- Unidades Organizativas --------------------------
 
 func (h *OrganizacionHandler) CrearUnidadOrganizativa(c *gin.Context) {
 	usuarioID, ok := usuarioIDDesdeContexto(c)
@@ -244,7 +227,7 @@ func (h *OrganizacionHandler) CrearUnidadOrganizativa(c *gin.Context) {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "no autenticado", nil)
 		return
 	}
-	var in services.UnidadOrganizativaInput
+	var in rrhh.UnidadOrganizativaInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -267,13 +250,13 @@ func (h *OrganizacionHandler) ActualizarUnidadOrganizativa(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var in services.UnidadOrganizativaUpdateInput
+	var in rrhh.UnidadOrganizativaUpdateInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
 	}
 	if err := h.unidades.Actualizar(c.Request.Context(), usuarioID, id, in); err != nil {
-		if errors.Is(err, services.ErrNoEncontrado) {
+		if errors.Is(err, rrhh.ErrNoEncontrado) {
 			middleware.Fail(c, http.StatusNotFound, "not_found", "unidad organizativa no encontrada", nil)
 			return
 		}
@@ -289,7 +272,7 @@ func (h *OrganizacionHandler) GetUnidadOrganizativa(c *gin.Context) {
 		return
 	}
 	item, err := h.unidades.Get(c.Request.Context(), id)
-	if errors.Is(err, services.ErrNoEncontrado) {
+	if errors.Is(err, rrhh.ErrNoEncontrado) {
 		middleware.Fail(c, http.StatusNotFound, "not_found", "unidad organizativa no encontrada", nil)
 		return
 	}
@@ -301,21 +284,19 @@ func (h *OrganizacionHandler) GetUnidadOrganizativa(c *gin.Context) {
 }
 
 func (h *OrganizacionHandler) ListarUnidadesOrganizativas(c *gin.Context) {
-	var req services.UnidadOrganizativaListRequest
+	var req rrhh.UnidadOrganizativaListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
 		responderErrorBind(c, "parámetros de consulta inválidos", err)
 		return
 	}
-	req.Paginacion = pagination.Desde(c)
-	items, paginacion, err := h.unidades.List(c.Request.Context(), req)
+	req.Paginacion = paginacion.Desde(c)
+	items, meta, err := h.unidades.List(c.Request.Context(), req)
 	if err != nil {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al listar unidades organizativas", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"unidades_organizativas": items, "paginacion": paginacion})
+	c.JSON(http.StatusOK, gin.H{"unidades_organizativas": items, "paginacion": meta})
 }
-
-// --------------------------------- Puestos -----------------------------------
 
 func (h *OrganizacionHandler) CrearPuesto(c *gin.Context) {
 	usuarioID, ok := usuarioIDDesdeContexto(c)
@@ -323,7 +304,7 @@ func (h *OrganizacionHandler) CrearPuesto(c *gin.Context) {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "no autenticado", nil)
 		return
 	}
-	var in services.PuestoInput
+	var in rrhh.PuestoInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
@@ -346,13 +327,13 @@ func (h *OrganizacionHandler) ActualizarPuesto(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var in services.PuestoUpdateInput
+	var in rrhh.PuestoUpdateInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		responderErrorBind(c, "cuerpo de la solicitud inválido", err)
 		return
 	}
 	if err := h.puestos.Actualizar(c.Request.Context(), usuarioID, id, in); err != nil {
-		if errors.Is(err, services.ErrNoEncontrado) {
+		if errors.Is(err, rrhh.ErrNoEncontrado) {
 			middleware.Fail(c, http.StatusNotFound, "not_found", "puesto no encontrado", nil)
 			return
 		}
@@ -368,7 +349,7 @@ func (h *OrganizacionHandler) GetPuesto(c *gin.Context) {
 		return
 	}
 	item, err := h.puestos.Get(c.Request.Context(), id)
-	if errors.Is(err, services.ErrNoEncontrado) {
+	if errors.Is(err, rrhh.ErrNoEncontrado) {
 		middleware.Fail(c, http.StatusNotFound, "not_found", "puesto no encontrado", nil)
 		return
 	}
@@ -380,16 +361,16 @@ func (h *OrganizacionHandler) GetPuesto(c *gin.Context) {
 }
 
 func (h *OrganizacionHandler) ListarPuestos(c *gin.Context) {
-	var req services.PuestoListRequest
+	var req rrhh.PuestoListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
 		responderErrorBind(c, "parámetros de consulta inválidos", err)
 		return
 	}
-	req.Paginacion = pagination.Desde(c)
-	items, paginacion, err := h.puestos.List(c.Request.Context(), req)
+	req.Paginacion = paginacion.Desde(c)
+	items, meta, err := h.puestos.List(c.Request.Context(), req)
 	if err != nil {
 		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "error al listar puestos", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"puestos": items, "paginacion": paginacion})
+	c.JSON(http.StatusOK, gin.H{"puestos": items, "paginacion": meta})
 }

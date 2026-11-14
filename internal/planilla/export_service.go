@@ -1,10 +1,3 @@
-// Fase 6c / F09 — Comprobantes, boletas de pago y exportación bancaria.
-//
-// Este archivo separa el ACCESO A DATOS (ExportRepository y ExportUnitOfWork,
-// cuya implementación sobre dto.Queries vive en export_repository.go) del
-// ARMADO DEL ARCHIVO/RESPUESTA (ExportService), para poder testear el
-// formateo del TXT de dispersión y el ensamblado de la boleta sin una BD
-// real. Este archivo NO importa internal/db ni internal/db/dto.
 package planilla
 
 import (
@@ -22,10 +15,6 @@ import (
 
 	"planillas-ccdr/internal/authz"
 )
-
-// ============================================================================
-// Contratos de lectura (implementados en internal/db/dto/planilla_export.go)
-// ============================================================================
 
 // FilaDispersionBancaria es la fila que necesita el archivo plano de
 // dispersión. Corresponde 1:1 a ObtenerDetallesPlanillaParaDispersion.
@@ -64,10 +53,6 @@ type ConceptoBoletaPago struct {
 }
 
 // EmbargoBoletaPago corresponde a una fila de ObtenerEmbargosBoletaPago.
-//
-// F20: planilla_detalle_embargo hoy solo guarda orden_prioridad y monto
-// (monto efectivamente retenido). F20 agregará monto_calculado,
-// monto_aplicado y saldo_pendiente_insatisfecho; entonces se amplía este struct.
 type EmbargoBoletaPago struct {
 	EmbargoID         int64
 	TipoEmbargoCodigo string
@@ -76,11 +61,29 @@ type EmbargoBoletaPago struct {
 	Monto             decimal.Decimal
 }
 
+// IncapacidadBoletaPago: tramo de subsidio de incapacidad del período.
+// MontoEntidadInformativo lo paga la CCSS/INS, no la planilla.
+type IncapacidadBoletaPago struct {
+	IncapacidadID           int64
+	NumeroBoleta            string
+	FechaInicio, FechaFin   time.Time
+	DiaSerieDesde           int32
+	DiaSerieHasta           int32
+	Dias                    decimal.Decimal
+	MontoPatronal           decimal.Decimal
+	MontoEntidadInformativo decimal.Decimal
+}
+
 // ExportRepository es el subconjunto de acceso a datos de LECTURA que
 // necesita este archivo, sobre resultados YA calculados y persistidos.
+// Descifrador recupera un dato personal cifrado (seguridad.Llavero).
+type Descifrador interface {
+	Descifrar(campo string, cifrado []byte, kid string) (string, error)
+}
+
 type ExportRepository interface {
 	// ObtenerDetallesPlanillaParaDispersion retorna una fila por empleado
-	// del período, solo si el período está en EstadosParaDispersion()
+	// del período, solo si el período está en EstadosParaDispersion
 	// (aprobada|pagada). Viene ordenado por nombre e id para que el archivo
 	// sea determinístico entre corridas.
 	ObtenerDetallesPlanillaParaDispersion(ctx context.Context, periodoID int64) ([]FilaDispersionBancaria, error)
@@ -93,11 +96,9 @@ type ExportRepository interface {
 	ObtenerDesgloseConceptosBoletaPago(ctx context.Context, periodoID int64, empleadoID int64) ([]ConceptoBoletaPago, error)
 
 	ObtenerEmbargosBoletaPago(ctx context.Context, periodoID int64, empleadoID int64) ([]EmbargoBoletaPago, error)
-}
 
-// ============================================================================
-// Trazabilidad (S14): registro de exportaciones en exportaciones_generadas
-// ============================================================================
+	ObtenerIncapacidadesBoletaPago(ctx context.Context, periodoID int64, empleadoID int64) ([]IncapacidadBoletaPago, error)
+}
 
 // FormatoDispersionTXT es formatos_exportacion.codigo del TXT de dispersión
 // delimitado por comas (lo siembra la migración 000109).
@@ -120,7 +121,7 @@ type ExportRegistrador interface {
 }
 
 // ExportTx es lo que ve el servicio dentro de la transacción auditada:
-// lecturas y registro comparten la MISMA transacción.
+// lecturas y registro comparten la misma transacción.
 type ExportTx interface {
 	ExportRepository
 	ExportRegistrador
@@ -133,32 +134,24 @@ type ExportUnitOfWork interface {
 	EjecutarAuditado(ctx context.Context, usuarioID int64, fn func(ctx context.Context, tx ExportTx) error) error
 }
 
-// ============================================================================
-// Salida: boleta de pago (para serializar como JSON en el handler)
-// ============================================================================
-
 // BoletaPagoOutput es la estructura completa de la boleta individual.
 type BoletaPagoOutput struct {
-	Encabezado  EncabezadoBoletaPago
-	Ingresos    []ConceptoBoletaPago
-	Deducciones []ConceptoBoletaPago
-	Embargos    []EmbargoBoletaPago
-	GeneradaEn  time.Time
+	Encabezado    EncabezadoBoletaPago
+	Ingresos      []ConceptoBoletaPago
+	Deducciones   []ConceptoBoletaPago
+	Embargos      []EmbargoBoletaPago
+	Incapacidades []IncapacidadBoletaPago
+	GeneradaEn    time.Time
 }
-
-// ============================================================================
-// ExportService
-// ============================================================================
 
 const (
 	dosDecimalesExport = int32(2)
 
-	// separadorDispersion: coma ("TXT delimitado por comas"). ASUNCIÓN a
-	// confirmar con el banco real: cada plataforma tiene su propio layout.
+	// separadorDispersion: coma (TXT delimitado por comas).
 	separadorDispersion = ","
 
-	// finLineaDispersion: CRLF. ASUNCIÓN: varias plataformas bancarias por
-	// lotes en Costa Rica exigen CRLF; si la destino exige LF, cambiar aquí.
+	// finLineaDispersion: CRLF, el fin de línea de las plataformas bancarias
+	// por lotes.
 	finLineaDispersion = "\r\n"
 )
 
@@ -211,10 +204,8 @@ func NewExportService(repo ExportRepository, uow ExportUnitOfWork) *ExportServic
 // GenerarArchivoDispersionBancaria arma el archivo plano de dispersión del
 // período ("IBAN,Cédula,Nombre,Monto", CRLF) y registra la exportación
 // (quién, cuándo, período, formato, nombre, SHA-256, filas y total) en
-// exportaciones_generadas en la MISMA transacción auditada. Si algo falla,
+// exportaciones_generadas en la misma transacción auditada. Si algo falla,
 // no se entrega archivo ni queda registro.
-//
-// Devuelve el contenido y el nombre de archivo sugerido.
 func (s *ExportService) GenerarArchivoDispersionBancaria(ctx context.Context, periodoID int64, usuarioID int64) ([]byte, string, error) {
 	if usuarioID <= 0 {
 		return nil, "", ErrUsuarioExportRequerido
@@ -233,6 +224,10 @@ func (s *ExportService) GenerarArchivoDispersionBancaria(ctx context.Context, pe
 			return ErrPlanillaSinFilasParaDispersion
 		}
 
+		filas = sinNetoCero(filas)
+		if len(filas) == 0 {
+			return ErrPlanillaSinFilasParaDispersion
+		}
 		buf, total, err := armarArchivoDispersion(filas)
 		if err != nil {
 			return err
@@ -283,6 +278,17 @@ func armarArchivoDispersion(filas []FilaDispersionBancaria) ([]byte, decimal.Dec
 	return buf.Bytes(), total, nil
 }
 
+// sinNetoCero descarta las filas con neto exactamente 0.
+func sinNetoCero(filas []FilaDispersionBancaria) []FilaDispersionBancaria {
+	out := make([]FilaDispersionBancaria, 0, len(filas))
+	for _, f := range filas {
+		if !f.NetoPagado.IsZero() {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func nombreArchivoDispersion(periodoID int64, t time.Time) string {
 	return fmt.Sprintf("dispersion_bancaria_periodo_%d_%s.txt", periodoID, t.Format("20060102_150405"))
 }
@@ -318,8 +324,6 @@ func validarFilaDispersion(fila FilaDispersionBancaria) error {
 	if !fila.NetoPagado.IsPositive() {
 		return rechazar(MotivoNetoNoPositivo)
 	}
-	// StringFixed(2) redondearía en silencio: un monto con más de 2 decimales
-	// indica un dato corrupto, no algo que haya que "arreglar" al pagar.
 	if !fila.NetoPagado.Equal(fila.NetoPagado.Round(dosDecimalesExport)) {
 		return rechazar(MotivoNetoDecimales)
 	}
@@ -358,6 +362,11 @@ func (s *ExportService) ObtenerBoletaPago(ctx context.Context, periodoID int64, 
 		return nil, fmt.Errorf("planilla: error obteniendo embargos aplicados: %w", err)
 	}
 
+	incaps, err := s.repo.ObtenerIncapacidadesBoletaPago(ctx, periodoID, empleadoID)
+	if err != nil {
+		return nil, fmt.Errorf("planilla: error obteniendo incapacidades: %w", err)
+	}
+
 	ingresos := make([]ConceptoBoletaPago, 0, len(conceptos))
 	deducciones := make([]ConceptoBoletaPago, 0, len(conceptos))
 	for _, c := range conceptos {
@@ -372,11 +381,12 @@ func (s *ExportService) ObtenerBoletaPago(ctx context.Context, periodoID int64, 
 	}
 
 	return &BoletaPagoOutput{
-		Encabezado:  encabezado,
-		Ingresos:    ingresos,
-		Deducciones: deducciones,
-		Embargos:    embargos,
-		GeneradaEn:  s.now(),
+		Encabezado:    encabezado,
+		Ingresos:      ingresos,
+		Deducciones:   deducciones,
+		Embargos:      embargos,
+		Incapacidades: incaps,
+		GeneradaEn:    s.now(),
 	}, nil
 }
 

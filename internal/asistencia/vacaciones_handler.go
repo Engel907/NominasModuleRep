@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
@@ -28,15 +29,7 @@ func NewVacacionesHandler(service *VacacionesService, resolver ...middleware.Emp
 	return h
 }
 
-// RegisterRoutes cablea las rutas bajo el grupo /api/v1 ya existente. Cada
-// ruta lleva su RequirePermission; nunca se autoriza por nombre de rol. Los
-// códigos son las constantes de internal/authz:
-//
-//	POST /vacaciones/solicitudes                    authz.PermVacacionesSolicitar
-//	POST /vacaciones/solicitudes/:id/aprobar        authz.PermVacacionesAprobar
-//	POST /vacaciones/solicitudes/:id/rechazar       authz.PermVacacionesAprobar
-//	POST /vacaciones/solicitudes/:id/disfrute       authz.PermVacacionesRegistrarDisfrute
-//	GET  /vacaciones/empleados/:empleado_id/saldo   authz.PermVacacionesVer
+// RegisterRoutes registra las rutas de vacaciones, cada una con su permiso.
 func (h *VacacionesHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	vac := rg.Group("/vacaciones")
 	vac.POST("/solicitudes", middleware.RequirePermission(authz.PermVacacionesSolicitar), h.solicitar)
@@ -44,9 +37,8 @@ func (h *VacacionesHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	vac.POST("/solicitudes/:id/rechazar", middleware.RequirePermission(authz.PermVacacionesAprobar), h.rechazar)
 	vac.POST("/solicitudes/:id/disfrute", middleware.RequirePermission(authz.PermVacacionesRegistrarDisfrute), h.registrarDisfrute)
 	vac.GET("/empleados/:empleado_id/saldo", middleware.RequirePermission(authz.PermVacacionesVer), h.consultarSaldo)
+	vac.POST("/empleados/:empleado_id/compensaciones", middleware.RequirePermission(authz.PermVacacionesAprobar), h.registrarCompensacion)
 }
-
-// --- Solicitar -----------------------------------------------------------
 
 type solicitarVacacionesRequest struct {
 	EmpleadoID  int64  `json:"empleado_id"`
@@ -57,13 +49,13 @@ type solicitarVacacionesRequest struct {
 func (h *VacacionesHandler) solicitar(c *gin.Context) {
 	var req solicitarVacacionesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.RespondWithError(c, err)
 		return
 	}
 	inicio, err1 := time.Parse("2006-01-02", req.FechaInicio)
 	fin, err2 := time.Parse("2006-01-02", req.FechaFin)
 	if err1 != nil || err2 != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "fecha_inicio/fecha_fin deben tener formato YYYY-MM-DD"})
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "fecha_inicio/fecha_fin deben tener formato YYYY-MM-DD", nil)
 		return
 	}
 	payload := middleware.PayloadDesdeContexto(c)
@@ -107,8 +99,6 @@ func (h *VacacionesHandler) solicitar(c *gin.Context) {
 	c.JSON(http.StatusCreated, solicitud)
 }
 
-// --- Aprobar / rechazar --------------------------------------------------
-
 func (h *VacacionesHandler) aprobar(c *gin.Context) {
 	id, err := middleware.ParseIDParam(c, "id")
 	if err != nil {
@@ -144,7 +134,7 @@ func (h *VacacionesHandler) rechazar(c *gin.Context) {
 	}
 	var req rechazarVacacionesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.RespondWithError(c, err)
 		return
 	}
 	aprobadorEmpleadoID, ok := h.aprobadorEmpleadoID(c)
@@ -165,8 +155,6 @@ func (h *VacacionesHandler) rechazar(c *gin.Context) {
 	c.JSON(http.StatusOK, solicitud)
 }
 
-// --- Disfrute ------------------------------------------------------------
-
 type registrarDisfruteRequest struct {
 	FechaEfectiva string `json:"fecha_efectiva"` // YYYY-MM-DD; opcional (por defecto fecha_inicio de la solicitud)
 }
@@ -178,17 +166,16 @@ func (h *VacacionesHandler) registrarDisfrute(c *gin.Context) {
 		return
 	}
 
-	// El body es opcional: sin body se usa la fecha de inicio de la solicitud.
 	var req registrarDisfruteRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middleware.RespondWithError(c, err)
 		return
 	}
 	var fecha time.Time
 	if req.FechaEfectiva != "" {
 		f, err := time.Parse("2006-01-02", req.FechaEfectiva)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "fecha_efectiva debe tener formato YYYY-MM-DD"})
+			middleware.Fail(c, http.StatusBadRequest, "invalid_request", "fecha_efectiva debe tener formato YYYY-MM-DD", nil)
 			return
 		}
 		fecha = f
@@ -206,7 +193,43 @@ func (h *VacacionesHandler) registrarDisfrute(c *gin.Context) {
 	c.JSON(http.StatusOK, saldo)
 }
 
-// --- Saldo ---------------------------------------------------------------
+type registrarCompensacionRequest struct {
+	Dias          string `json:"dias" binding:"required"` // texto decimal, nunca float
+	FechaEfectiva string `json:"fecha_efectiva" binding:"required"`
+	Observaciones string `json:"observaciones"`
+}
+
+func (h *VacacionesHandler) registrarCompensacion(c *gin.Context) {
+	empleadoID, err := middleware.ParseIDParam(c, "empleado_id")
+	if err != nil {
+		_ = c.Error(err)
+		return
+	}
+	var req registrarCompensacionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "cuerpo inválido: se requieren dias y fecha_efectiva", nil)
+		return
+	}
+	dias, err := decimal.NewFromString(req.Dias)
+	if err != nil {
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "dias debe ser un número decimal en texto", nil)
+		return
+	}
+	fecha, err := time.Parse("2006-01-02", req.FechaEfectiva)
+	if err != nil {
+		middleware.Fail(c, http.StatusBadRequest, "invalid_request", "fecha_efectiva debe tener formato YYYY-MM-DD", nil)
+		return
+	}
+	saldo, err := h.service.RegistrarCompensacion(c.Request.Context(), RegistrarCompensacionInput{
+		EmpleadoID: empleadoID, Dias: dias, FechaEfectiva: fecha, Observaciones: req.Observaciones,
+		RegistradoPor: middleware.UsuarioID(c),
+	})
+	if err != nil {
+		vacResponderError(c, err, "no se pudo registrar la compensación de vacaciones")
+		return
+	}
+	c.JSON(http.StatusCreated, saldo)
+}
 
 func (h *VacacionesHandler) consultarSaldo(c *gin.Context) {
 	empleadoID, err := middleware.ParseIDParam(c, "empleado_id")
@@ -214,13 +237,11 @@ func (h *VacacionesHandler) consultarSaldo(c *gin.Context) {
 		_ = c.Error(err)
 		return
 	}
-	// ?fecha=YYYY-MM-DD es opcional; por defecto hoy. Solo afecta la
-	// antigüedad y la escala que se reportan, no el saldo (último corte).
 	fecha := time.Now()
 	if q := c.Query("fecha"); q != "" {
 		f, err := time.Parse("2006-01-02", q)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "fecha debe tener formato YYYY-MM-DD"})
+			middleware.Fail(c, http.StatusBadRequest, "invalid_request", "fecha debe tener formato YYYY-MM-DD", nil)
 			return
 		}
 		fecha = f
@@ -234,10 +255,8 @@ func (h *VacacionesHandler) consultarSaldo(c *gin.Context) {
 	c.JSON(http.StatusOK, saldo)
 }
 
-// --- Helpers -------------------------------------------------------------
-
 // vacResponderError traduce los errores del servicio a HTTP y escribe
-// EXACTAMENTE una respuesta. Los errores de negocio (4xx) devuelven su
+// exactamente una respuesta. Los errores de negocio (4xx) devuelven su
 // mensaje, redactado para el usuario; cualquier otro es un 500 genérico para
 // no filtrar detalles de BD.
 func vacResponderError(c *gin.Context, err error, mensajeGenerico string) {
@@ -251,15 +270,11 @@ func vacResponderError(c *gin.Context, err error, mensajeGenerico string) {
 		for i, f := range calInc.Fechas {
 			fechas[i] = f.Format("2006-01-02")
 		}
-
-		c.JSON(http.StatusUnprocessableEntity, gin.H{
-			"error":            calInc.Error(),
-			"fechas_faltantes": fechas,
-		})
+		middleware.Fail(c, http.StatusUnprocessableEntity, "calendario_incompleto", calInc.Error(), gin.H{"fechas_faltantes": fechas})
 
 	case errors.Is(err, ErrVacEmpleadoNoEncontrado),
 		errors.Is(err, ErrVacSolicitudNoEncontrada):
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		middleware.Fail(c, http.StatusNotFound, "not_found", err.Error(), nil)
 
 	case errors.Is(err, ErrVacSolicitudNoPendiente),
 		errors.Is(err, ErrVacSolicitudNoAprobada),
@@ -267,7 +282,7 @@ func vacResponderError(c *gin.Context, err error, mensajeGenerico string) {
 		errors.Is(err, ErrAcumulacionYaRegistrada),
 		errors.Is(err, ErrVacSolicitudTraslapada),
 		errors.Is(err, ErrVacSaldoInsuficiente):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		middleware.Fail(c, http.StatusConflict, "conflict", err.Error(), nil)
 
 	case errors.Is(err, ErrVacRangoFechasInvalido),
 		errors.Is(err, ErrVacSinDiasHabiles),
@@ -275,11 +290,13 @@ func vacResponderError(c *gin.Context, err error, mensajeGenerico string) {
 		errors.Is(err, ErrVacEscalaNoConfigurada),
 		errors.Is(err, ErrVacMotivoRechazoRequerido),
 		errors.Is(err, ErrVacMotivoRechazoMuyLargo),
-		errors.Is(err, ErrVacPeriodoReferenciaInvalid):
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+		errors.Is(err, ErrVacPeriodoReferenciaInvalid),
+		errors.Is(err, ErrVacDiasCompensacionInvalidos),
+		errors.Is(err, ErrVacObservacionMuyLarga):
+		middleware.Fail(c, http.StatusUnprocessableEntity, "unprocessable_entity", err.Error(), nil)
 
 	default:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": mensajeGenerico})
+		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", mensajeGenerico, err)
 	}
 }
 

@@ -1,20 +1,3 @@
-// internal/db/dto/contratos.go
-//
-// Fase 3B — RRHH: contratos (versionados, patrón 2-pasos) y lectura de
-// parametros_salario_minimo para la validación de salario mínimo.
-//
-// NOTA DE MIGRACIÓN: la tabla `contratos` real (ver db/schema.sql, sección
-// "CONTRATOS") SÍ coincide en su mayoría con lo que asumía
-// db/queries/empleados_puestos.sql (empleado_id, puesto_id, tipo_contrato
-// VARCHAR libre, salario_pactado, jornada, fechas, patrón de vigencia,
-// creado_por, created_at) — es la única de las tablas de Fase 3 que además
-// SÍ tiene columna `creado_por` a nivel de negocio, no solo trigger
-// genérico. La única diferencia real es que `contratos.regimen_laboral_id`
-// es NOT NULL (FK a regimenes_laborales) y ninguno de los DTOs originales
-// de contrato_service.go lo contemplaba. Se agregó
-// CrearContratoRequest.RegimenLaboralID / ActualizarContratoRequest.RegimenLaboralID
-// en internal/services/contrato_service.go — no hay valor por defecto
-// razonable para una FK obligatoria sin ese dato desde el cliente.
 package dto
 
 import (
@@ -25,18 +8,17 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ============================================================================
-// CONTRATOS
-// ============================================================================
-
 type Contrato struct {
 	ID                  int64
 	EmpleadoID          int64
 	PuestoID            int64
 	RegimenLaboralID    int64
-	TipoContrato        string
+	TipoContratoID      int64
+	TipoContrato        string // tipos_contrato.codigo (solo lectura)
 	SalarioPactado      decimal.Decimal
-	Jornada             string
+	ModalidadSalario    string
+	JornadaID           int64
+	Jornada             string // jornadas.codigo (solo lectura)
 	FechaInicioContrato time.Time
 	FechaFinContrato    sql.NullTime
 	FechaInicioVigencia time.Time
@@ -46,42 +28,47 @@ type Contrato struct {
 	CreatedAt           time.Time
 }
 
-// F03: es_vigente es una columna GENERATED que vale 1 si la fila está vigente y
+// es_vigente es una columna GENERATED que vale 1 si la fila está vigente y
 // NULL (no 0) si está cerrada. Scan de NULL a bool falla, así que se
 // COALESCE-a a 0 en todas las lecturas. Por la misma razón los filtros
 // por "no vigentes" usan COALESCE(c.es_vigente, 0) = ? (es_vigente = 0 nunca
 // matchea, porque el valor real es NULL).
-const columnasContrato = `id, empleado_id, puesto_id, regimen_laboral_id, tipo_contrato,
-       salario_pactado, jornada, fecha_inicio_contrato, fecha_fin_contrato,
-       fecha_inicio_vigencia, fecha_fin_vigencia, COALESCE(es_vigente, 0), creado_por, created_at`
+const columnasContrato = `c.id, c.empleado_id, c.puesto_id, c.regimen_laboral_id, c.tipo_contrato_id, tc.codigo,
+       c.salario_pactado, c.modalidad_salario, c.jornada_id, j.codigo, c.fecha_inicio_contrato, c.fecha_fin_contrato,
+       c.fecha_inicio_vigencia, c.fecha_fin_vigencia, COALESCE(c.es_vigente, 0), c.creado_por, c.created_at`
+
+// desdeContratos: contratos con los catálogos de los que se leen los códigos.
+const desdeContratos = `contratos c
+JOIN tipos_contrato tc ON tc.id = c.tipo_contrato_id
+JOIN jornadas j ON j.id = c.jornada_id`
 
 func scanContratoRow(row *sql.Row) (Contrato, error) {
 	var c Contrato
-	err := row.Scan(&c.ID, &c.EmpleadoID, &c.PuestoID, &c.RegimenLaboralID, &c.TipoContrato,
-		&c.SalarioPactado, &c.Jornada, &c.FechaInicioContrato, &c.FechaFinContrato,
+	err := row.Scan(&c.ID, &c.EmpleadoID, &c.PuestoID, &c.RegimenLaboralID, &c.TipoContratoID, &c.TipoContrato,
+		&c.SalarioPactado, &c.ModalidadSalario, &c.JornadaID, &c.Jornada, &c.FechaInicioContrato, &c.FechaFinContrato,
 		&c.FechaInicioVigencia, &c.FechaFinVigencia, &c.EsVigente, &c.CreadoPor, &c.CreatedAt)
 	return c, err
 }
 
 func scanContratoRows(rows *sql.Rows) (Contrato, error) {
 	var c Contrato
-	err := rows.Scan(&c.ID, &c.EmpleadoID, &c.PuestoID, &c.RegimenLaboralID, &c.TipoContrato,
-		&c.SalarioPactado, &c.Jornada, &c.FechaInicioContrato, &c.FechaFinContrato,
+	err := rows.Scan(&c.ID, &c.EmpleadoID, &c.PuestoID, &c.RegimenLaboralID, &c.TipoContratoID, &c.TipoContrato,
+		&c.SalarioPactado, &c.ModalidadSalario, &c.JornadaID, &c.Jornada, &c.FechaInicioContrato, &c.FechaFinContrato,
 		&c.FechaInicioVigencia, &c.FechaFinVigencia, &c.EsVigente, &c.CreadoPor, &c.CreatedAt)
 	return c, err
 }
 
 func (q *Queries) GetContratoVigente(ctx context.Context, empleadoID int64) (Contrato, error) {
-	row := q.db.QueryRowContext(ctx, `SELECT `+columnasContrato+` FROM contratos WHERE empleado_id = ? AND es_vigente = 1 LIMIT 1`, empleadoID)
+	row := q.db.QueryRowContext(ctx, `SELECT `+columnasContrato+` FROM `+desdeContratos+` WHERE c.empleado_id = ? AND c.es_vigente = 1 LIMIT 1`, empleadoID)
 	return scanContratoRow(row)
 }
 
 func (q *Queries) ListContratosHistoricoPorEmpleado(ctx context.Context, empleadoID int64, limit, offset int32) ([]Contrato, error) {
 	rows, err := q.db.QueryContext(ctx, `
 SELECT `+columnasContrato+`
-FROM contratos
-WHERE empleado_id = ?
-ORDER BY fecha_inicio_vigencia DESC
+FROM `+desdeContratos+`
+WHERE c.empleado_id = ?
+ORDER BY c.fecha_inicio_vigencia DESC
 LIMIT ? OFFSET ?`, empleadoID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -106,7 +93,7 @@ func (q *Queries) CountContratosHistoricoPorEmpleado(ctx context.Context, emplea
 	return total, err
 }
 
-func (q *Queries) ListContratos(ctx context.Context, esVigente *bool, puestoID *int64, tipoContrato *string, limit, offset int32) ([]Contrato, error) {
+func (q *Queries) ListContratos(ctx context.Context, esVigente *bool, puestoID, tipoContratoID *int64, limit, offset int32) ([]Contrato, error) {
 	var vigArg, puestoArg, tipoArg interface{}
 	if esVigente != nil {
 		vigArg = *esVigente
@@ -114,15 +101,15 @@ func (q *Queries) ListContratos(ctx context.Context, esVigente *bool, puestoID *
 	if puestoID != nil {
 		puestoArg = *puestoID
 	}
-	if tipoContrato != nil {
-		tipoArg = *tipoContrato
+	if tipoContratoID != nil {
+		tipoArg = *tipoContratoID
 	}
 	rows, err := q.db.QueryContext(ctx, `
 SELECT `+columnasContrato+`
-FROM contratos c
+FROM `+desdeContratos+`
 WHERE (? IS NULL OR COALESCE(c.es_vigente, 0) = ?)
   AND (? IS NULL OR c.puesto_id = ?)
-  AND (? IS NULL OR c.tipo_contrato = ?)
+  AND (? IS NULL OR c.tipo_contrato_id = ?)
 ORDER BY c.id DESC
 LIMIT ? OFFSET ?`, vigArg, vigArg, puestoArg, puestoArg, tipoArg, tipoArg, limit, offset)
 	if err != nil {
@@ -141,7 +128,7 @@ LIMIT ? OFFSET ?`, vigArg, vigArg, puestoArg, puestoArg, tipoArg, tipoArg, limit
 	return out, rows.Err()
 }
 
-func (q *Queries) CountContratos(ctx context.Context, esVigente *bool, puestoID *int64, tipoContrato *string) (int64, error) {
+func (q *Queries) CountContratos(ctx context.Context, esVigente *bool, puestoID, tipoContratoID *int64) (int64, error) {
 	var vigArg, puestoArg, tipoArg interface{}
 	if esVigente != nil {
 		vigArg = *esVigente
@@ -149,15 +136,15 @@ func (q *Queries) CountContratos(ctx context.Context, esVigente *bool, puestoID 
 	if puestoID != nil {
 		puestoArg = *puestoID
 	}
-	if tipoContrato != nil {
-		tipoArg = *tipoContrato
+	if tipoContratoID != nil {
+		tipoArg = *tipoContratoID
 	}
 	row := q.db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM contratos c
 WHERE (? IS NULL OR COALESCE(c.es_vigente, 0) = ?)
   AND (? IS NULL OR c.puesto_id = ?)
-  AND (? IS NULL OR c.tipo_contrato = ?)`, vigArg, vigArg, puestoArg, puestoArg, tipoArg, tipoArg)
+  AND (? IS NULL OR c.tipo_contrato_id = ?)`, vigArg, vigArg, puestoArg, puestoArg, tipoArg, tipoArg)
 	var total int64
 	err := row.Scan(&total)
 	return total, err
@@ -174,10 +161,10 @@ WHERE empleado_id = ? AND es_vigente = 1`, fechaFinVigencia, empleadoID)
 func (q *Queries) CrearVersionContrato(
 	ctx context.Context,
 	empleadoID, puestoID int64,
-	regimenLaboralID int64,
-	tipoContrato string,
+	regimenLaboralID, tipoContratoID int64,
 	salarioPactado decimal.Decimal,
-	jornada string,
+	modalidadSalario string,
+	jornadaID int64,
 	fechaInicioContrato time.Time,
 	fechaFinContrato sql.NullTime,
 	fechaInicioVigencia time.Time,
@@ -185,23 +172,17 @@ func (q *Queries) CrearVersionContrato(
 ) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
 INSERT INTO contratos (
-    empleado_id, puesto_id, regimen_laboral_id, tipo_contrato, salario_pactado, jornada,
+    empleado_id, puesto_id, regimen_laboral_id, tipo_contrato_id, salario_pactado, modalidad_salario, jornada_id,
     fecha_inicio_contrato, fecha_fin_contrato, fecha_inicio_vigencia, fecha_fin_vigencia,
     creado_por, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NOW())`,
-		// tipo_contrato_id y jornada_id los resuelve trg_contratos_catalogos_bi
-		// a partir del texto (000125).
-		empleadoID, puestoID, regimenLaboralID, tipoContrato, salarioPactado, jornada,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NOW())`,
+		empleadoID, puestoID, regimenLaboralID, tipoContratoID, salarioPactado, modalidadSalario, jornadaID,
 		fechaInicioContrato, fechaFinContrato, fechaInicioVigencia, creadoPor)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
-
-// ============================================================================
-// PARAMETROS_SALARIO_MINIMO (solo lectura en esta fase)
-// ============================================================================
 
 type ParametroSalarioMinimo struct {
 	ID                    int64
@@ -224,8 +205,7 @@ LIMIT 1`, clasificacionPuestoID)
 }
 
 // GetSalarioMinimoVigentePorPuesto resuelve puestos -> clasificaciones_puesto
-// -> parametros_salario_minimo en una sola consulta, igual que la query
-// original — esta parte del schema sí coincidía con lo asumido.
+// -> parametros_salario_minimo en una sola consulta.
 func (q *Queries) GetSalarioMinimoVigentePorPuesto(ctx context.Context, puestoID int64) (ParametroSalarioMinimo, error) {
 	row := q.db.QueryRowContext(ctx, `
 SELECT psm.id, psm.clasificacion_puesto_id, psm.monto_mensual, psm.fecha_inicio_vigencia, psm.fecha_fin_vigencia, psm.fuente_legal
@@ -240,10 +220,34 @@ LIMIT 1`, puestoID)
 	return p, err
 }
 
-// ExisteJornada indica si `codigo` es una jornada activa del catálogo (L12).
-func (q *Queries) ExisteJornada(ctx context.Context, codigo string) (bool, error) {
+// ExisteJornadaActiva indica si `id` es una jornada activa del catálogo.
+func (q *Queries) ExisteJornadaActiva(ctx context.Context, id int64) (bool, error) {
 	var n int
-	err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM jornadas WHERE UPPER(codigo) = UPPER(?) AND activo = 1`, codigo).Scan(&n)
+	err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jornadas WHERE id = ? AND activo = 1`, id).Scan(&n)
 	return n > 0, err
+}
+
+// ExisteTipoContrato indica si `id` existe en el catálogo tipos_contrato.
+func (q *Queries) ExisteTipoContrato(ctx context.Context, id int64) (bool, error) {
+	var n int
+	err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tipos_contrato WHERE id = ?`, id).Scan(&n)
+	return n > 0, err
+}
+
+// ParametroJornadaVigente: divisor y horas diarias de la jornada a `fecha`.
+type ParametroJornadaVigente struct {
+	DivisorHorasMensuales  decimal.Decimal
+	HorasDiariasOrdinarias decimal.NullDecimal
+}
+
+// ObtenerParametroJornadaEnFecha: parametros_jornada vigente de la jornada;
+// sql.ErrNoRows si no hay.
+func (q *Queries) ObtenerParametroJornadaEnFecha(ctx context.Context, jornadaID int64, fecha time.Time) (ParametroJornadaVigente, error) {
+	var p ParametroJornadaVigente
+	err := q.db.QueryRowContext(ctx, `
+SELECT divisor_horas_mensuales, horas_diarias_ordinarias
+FROM parametros_jornada
+WHERE jornada_id = ? AND fecha_inicio_vigencia <= ? AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
+ORDER BY fecha_inicio_vigencia DESC LIMIT 1`, jornadaID, fecha, fecha).Scan(&p.DivisorHorasMensuales, &p.HorasDiariasOrdinarias)
+	return p, err
 }

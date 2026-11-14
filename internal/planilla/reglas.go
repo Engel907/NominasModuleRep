@@ -1,9 +1,3 @@
-// Contrato de las reglas de cálculo del motor.
-//
-// Cada valor de expresion_formula.tipo (sembrado en concepto_salarial_formula)
-// tiene su propia Regla en un archivo regla_*.go. MotorEmpleado solo resuelve
-// los conceptos aplicables, despacha cada uno a su regla y totaliza; las
-// reglas legales nuevas se agregan o modifican tocando únicamente su archivo.
 package planilla
 
 import "github.com/shopspring/decimal"
@@ -12,6 +6,7 @@ import "github.com/shopspring/decimal"
 const (
 	formulaReferenciaDirecta = "referencia_directa"
 	formulaHorasExtra        = "horas_extra"
+	formulaFeriadoLaborado   = "feriado_laborado"
 	formulaIncapacidad       = "incapacidad"
 	formulaAguinaldo         = "aguinaldo"
 	formulaSalarioEscolar    = "salario_escolar"
@@ -20,6 +15,8 @@ const (
 	formulaRenta             = "renta"
 	formulaEmbargo           = "embargo"
 	formulaPrestamo          = "prestamo"
+	formulaLiquidacion       = "liquidacion" // rubros LIQ_* ya calculados por internal/liquidacion
+	formulaAsignacion        = "asignacion_empleado"
 )
 
 // ContextoRegla agrupa todo lo que una regla puede leer para calcular un
@@ -46,6 +43,7 @@ func reglasPorDefecto() map[string]Regla {
 	return map[string]Regla{
 		formulaReferenciaDirecta: reglaSalarioBase{},
 		formulaHorasExtra:        reglaHorasExtra{},
+		formulaFeriadoLaborado:   reglaFeriadoLaborado{},
 		formulaIncapacidad:       reglaIncapacidad{},
 		formulaAguinaldo:         reglaDiferida{},
 		formulaSalarioEscolar:    reglaDiferida{},
@@ -54,5 +52,7 @@ func reglasPorDefecto() map[string]Regla {
 		formulaRenta:             reglaRenta{},
 		formulaEmbargo:           reglaEmbargo{},
 		formulaPrestamo:          reglaPrestamo{},
+		formulaLiquidacion:       reglaLiquidacion{},
+		formulaAsignacion:        reglaAsignacion{},
 	}
 }

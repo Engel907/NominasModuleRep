@@ -1,5 +1,3 @@
--- 000120 down: revierte en orden inverso al up
-
 DROP TRIGGER IF EXISTS trg_aud_planilla_devengos_manuales_del;
 DROP TRIGGER IF EXISTS trg_aud_planilla_devengos_manuales_upd;
 DROP TRIGGER IF EXISTS trg_aud_planilla_devengos_manuales_ins;
@@ -45,7 +43,6 @@ ALTER TABLE periodos_planilla
   DROP COLUMN version_motor,
   DROP COLUMN parametros_snapshot;
 
--- Restaura los triggers pre-000120 para que coincidan con el esquema anterior.
 CREATE TRIGGER trg_aud_periodos_planilla_ins AFTER INSERT ON periodos_planilla
 FOR EACH ROW
 BEGIN

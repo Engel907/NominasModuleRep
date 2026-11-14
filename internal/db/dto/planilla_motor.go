@@ -1,18 +1,3 @@
-// internal/db/dto/planilla_motor.go
-//
-// Fase 6d — Lecturas que necesita el orquestador del motor de cálculo
-// (evaluarConcepto / CalcularEmpleado, ver internal/planilla/motor_calculo.go).
-// Mismo estilo que contratos.go / planilla_export.go: argumentos
-// posicionales, structs *Row, decimal.Decimal para todo monto.
-//
-// Columnas verificadas contra db/schema.sql: contratos, conceptos_salariales,
-// concepto_salarial_formula, orden_calculo_concepto,
-// regimen_concepto_aplicable, parametros_horas_extra.
-//
-// Vigencia "a una fecha" (NO es_vigente): en un recálculo retroactivo la
-// fecha efectiva puede ser anterior a la versión hoy vigente, por eso todas
-// las consultas usan  inicio <= fecha AND (fin IS NULL OR fin >= fecha)
-// en vez de la columna generada es_vigente.
 package dto
 
 import (
@@ -22,39 +7,33 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ============================================================================
-// CONTRATO VIGENTE A UNA FECHA (régimen laboral + salario pactado)
-// ============================================================================
-
 type ContratoVigenteEnFechaRow struct {
 	ContratoID       int64
 	EmpleadoID       int64
 	RegimenLaboralID int64
 	SalarioPactado   decimal.Decimal
-	Jornada          string
-	JornadaID        *int64 // FK a jornadas (L12); NULL si el texto no calzó con el catálogo
+	ModalidadSalario string // mensual | diario | por_hora
+	Jornada          string // jornadas.codigo
+	JornadaID        *int64
 }
 
 // ObtenerContratoVigenteEnFecha devuelve la versión de contrato cuya
 // vigencia cubre `fecha`. Si no hay ninguna devuelve sql.ErrNoRows (el
-// llamador NO debe asumir un régimen por defecto).
+// llamador no debe asumir un régimen por defecto).
 func (q *Queries) ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (ContratoVigenteEnFechaRow, error) {
 	var r ContratoVigenteEnFechaRow
 	err := q.db.QueryRowContext(ctx, `
-SELECT id, empleado_id, regimen_laboral_id, salario_pactado, jornada, jornada_id
-FROM contratos
-WHERE empleado_id = ?
-  AND fecha_inicio_vigencia <= ?
-  AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
-ORDER BY fecha_inicio_vigencia DESC
+SELECT c.id, c.empleado_id, c.regimen_laboral_id, c.salario_pactado, c.modalidad_salario, j.codigo, c.jornada_id
+FROM contratos c
+JOIN jornadas j ON j.id = c.jornada_id
+WHERE c.empleado_id = ?
+  AND c.fecha_inicio_vigencia <= ?
+  AND (c.fecha_fin_vigencia IS NULL OR c.fecha_fin_vigencia >= ?)
+ORDER BY c.fecha_inicio_vigencia DESC
 LIMIT 1`, empleadoID, fecha, fecha).
-		Scan(&r.ContratoID, &r.EmpleadoID, &r.RegimenLaboralID, &r.SalarioPactado, &r.Jornada, &r.JornadaID)
+		Scan(&r.ContratoID, &r.EmpleadoID, &r.RegimenLaboralID, &r.SalarioPactado, &r.ModalidadSalario, &r.Jornada, &r.JornadaID)
 	return r, err
 }
-
-// ============================================================================
-// CONCEPTOS APLICABLES (régimen ∩ orden de cálculo ∩ fórmula) A UNA FECHA
-// ============================================================================
 
 type ConceptoAplicableRow struct {
 	ConceptoSalarialID int64
@@ -68,27 +47,41 @@ type ConceptoAplicableRow struct {
 	FormulaID        *int64
 	MontoFijo        decimal.NullDecimal
 	ExpresionFormula *string
+	// FormulaEmpleadoID: fórmula propia del empleado (empleado_concepto_formula)
+	// que reemplaza a la general; si no es nil, FormulaID es nil y MontoFijo /
+	// ExpresionFormula son los del empleado.
+	FormulaEmpleadoID *int64
 
 	AfectaBaseCCSS       bool
 	AfectaBaseRenta      bool
 	AfectaBaseAguinaldo  bool
 	AfectaBaseCesantia   bool
 	AfectaBaseVacaciones bool
+	AfectaBaseEmbargo    bool
+
+	EsDeduccionObligatoria bool
 }
 
 // ListarConceptosAplicablesEnFecha resuelve, para un régimen laboral y una
 // fecha, los conceptos que aplican: (a) regimen_concepto_aplicable vigente,
 // (b) con orden de cálculo vigente (INNER: un concepto sin orden no se puede
 // calcular), (c) con su fórmula/monto vigente (LEFT: captura_manual no tiene),
-// (d) que el tipo de planilla calcula (tipo_planilla_concepto, D18).
+// (d) que el tipo de planilla calcula (tipo_planilla_concepto).
 // Ordenado por orden, luego id, para que el cálculo sea determinístico.
-func (q *Queries) ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]ConceptoAplicableRow, error) {
+//
+// Si el empleado tiene fórmula propia vigente para el concepto
+// (empleado_concepto_formula), esa reemplaza a la general.
+func (q *Queries) ListarConceptosAplicablesEnFecha(ctx context.Context, empleadoID, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]ConceptoAplicableRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
 SELECT
     cs.id, cs.codigo, cs.naturaleza, cs.tipo_calculo, occ.orden,
-    csf.id, csf.monto_fijo, csf.expresion_formula,
+    CASE WHEN ecf.id IS NULL THEN csf.id END,
+    CASE WHEN ecf.id IS NULL THEN csf.monto_fijo ELSE ecf.monto_fijo END,
+    CASE WHEN ecf.id IS NULL THEN csf.expresion_formula ELSE ecf.expresion_formula END,
+    ecf.id,
     cs.afecta_base_ccss, cs.afecta_base_renta, cs.afecta_base_aguinaldo,
-    cs.afecta_base_cesantia, cs.afecta_base_vacaciones
+    cs.afecta_base_cesantia, cs.afecta_base_vacaciones, cs.afecta_base_embargo,
+    cs.es_deduccion_obligatoria
 FROM regimen_concepto_aplicable rca
 JOIN conceptos_salariales cs
   ON cs.id = rca.concepto_salarial_id
@@ -104,11 +97,16 @@ LEFT JOIN concepto_salarial_formula csf
   ON csf.concepto_salarial_id = cs.id
  AND csf.fecha_inicio_vigencia <= ?
  AND (csf.fecha_fin_vigencia IS NULL OR csf.fecha_fin_vigencia >= ?)
+LEFT JOIN empleado_concepto_formula ecf
+  ON ecf.concepto_salarial_id = cs.id
+ AND ecf.empleado_id = ?
+ AND ecf.fecha_inicio_vigencia <= ?
+ AND (ecf.fecha_fin_vigencia IS NULL OR ecf.fecha_fin_vigencia >= ?)
 WHERE rca.regimen_laboral_id = ?
   AND rca.fecha_inicio_vigencia <= ?
   AND (rca.fecha_fin_vigencia IS NULL OR rca.fecha_fin_vigencia >= ?)
 ORDER BY occ.orden ASC, cs.id ASC`,
-		tipoPlanillaID, fecha, fecha, fecha, fecha, regimenLaboralID, fecha, fecha)
+		tipoPlanillaID, fecha, fecha, fecha, fecha, empleadoID, fecha, fecha, regimenLaboralID, fecha, fecha)
 	if err != nil {
 		return nil, err
 	}
@@ -118,19 +116,16 @@ ORDER BY occ.orden ASC, cs.id ASC`,
 	for rows.Next() {
 		var r ConceptoAplicableRow
 		if err := rows.Scan(&r.ConceptoSalarialID, &r.Codigo, &r.Naturaleza, &r.TipoCalculo, &r.OrdenCalculo,
-			&r.FormulaID, &r.MontoFijo, &r.ExpresionFormula,
+			&r.FormulaID, &r.MontoFijo, &r.ExpresionFormula, &r.FormulaEmpleadoID,
 			&r.AfectaBaseCCSS, &r.AfectaBaseRenta, &r.AfectaBaseAguinaldo,
-			&r.AfectaBaseCesantia, &r.AfectaBaseVacaciones); err != nil {
+			&r.AfectaBaseCesantia, &r.AfectaBaseVacaciones, &r.AfectaBaseEmbargo,
+			&r.EsDeduccionObligatoria); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
 }
-
-// ============================================================================
-// PARAMETROS_HORAS_EXTRA A UNA FECHA
-// ============================================================================
 
 type ParametroHoraExtraRow struct {
 	TipoHoraExtraID int64
@@ -163,20 +158,17 @@ ORDER BY tipo_hora_extra_id ASC`, fecha, fecha)
 	return out, rows.Err()
 }
 
-// ============================================================================
-// PARAMETROS_JORNADA A UNA FECHA (L12)
-// ============================================================================
-
 type ParametroJornadaRow struct {
-	JornadaID             int64
-	JornadaCodigo         string
-	DivisorHorasMensuales decimal.Decimal
+	JornadaID              int64
+	JornadaCodigo          string
+	DivisorHorasMensuales  decimal.Decimal
+	HorasDiariasOrdinarias decimal.NullDecimal
 }
 
 // ListarParametrosJornadaEnFecha: divisor de la hora ordinaria vigente por jornada.
 func (q *Queries) ListarParametrosJornadaEnFecha(ctx context.Context, fecha time.Time) ([]ParametroJornadaRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
-SELECT p.jornada_id, j.codigo, p.divisor_horas_mensuales
+SELECT p.jornada_id, j.codigo, p.divisor_horas_mensuales, p.horas_diarias_ordinarias
 FROM parametros_jornada p
 JOIN jornadas j ON j.id = p.jornada_id
 WHERE p.fecha_inicio_vigencia <= ?
@@ -189,7 +181,7 @@ ORDER BY p.jornada_id ASC`, fecha, fecha)
 	var out []ParametroJornadaRow
 	for rows.Next() {
 		var r ParametroJornadaRow
-		if err := rows.Scan(&r.JornadaID, &r.JornadaCodigo, &r.DivisorHorasMensuales); err != nil {
+		if err := rows.Scan(&r.JornadaID, &r.JornadaCodigo, &r.DivisorHorasMensuales, &r.HorasDiariasOrdinarias); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

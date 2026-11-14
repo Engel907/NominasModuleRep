@@ -40,7 +40,7 @@ type LogoutRequest struct {
 	RefreshToken string `json:"refresh_token" binding:"required"`
 }
 
-// CambiarPasswordRequest (F14): la política de contraseñas la aplica el
+// CambiarPasswordRequest: la política de contraseñas la aplica el
 // servicio (ValidarPassword), por eso acá no hay min/max: así el usuario recibe
 // el mensaje específico de la regla incumplida y no un 400 genérico.
 type CambiarPasswordRequest struct {
@@ -58,10 +58,8 @@ type MeResponse struct {
 }
 
 type AsignarRolRequest struct {
-	// gt=0: un rol_id negativo ya se rechazaba con el tipo sin signo anterior;
-	// con int64 hay que rechazarlo explícitamente para conservar ese comportamiento.
 	RolID int64 `json:"rol_id" binding:"required,gt=0"`
-	// FechaEfectiva es opcional; si viene vacía el servicio usa NOW().
+	// FechaEfectiva es opcional; si viene vacía el servicio usa NOW.
 	// Permite programar asignaciones a futuro sin reabrir la fila luego.
 	FechaEfectiva *time.Time `json:"fecha_efectiva"`
 }
@@ -82,7 +80,7 @@ type SolicitarResetPasswordRequest struct {
 	NombreUsuario string `json:"nombre_usuario" binding:"required"`
 }
 
-// ConfirmarResetPasswordRequest: sin min=8 a propósito (ver CambiarPasswordRequest).
+// ConfirmarResetPasswordRequest: sin min=8 a propósito.
 type ConfirmarResetPasswordRequest struct {
 	Token         string `json:"token" binding:"required"`
 	NuevaPassword string `json:"nueva_password" binding:"required"`

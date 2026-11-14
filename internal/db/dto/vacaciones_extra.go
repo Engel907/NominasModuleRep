@@ -1,23 +1,3 @@
-// internal/db/dto/vacaciones_extra.go
-//
-// Fase 4 — Vacaciones: queries puntuales que la capa de servicio
-// (internal/asistencia/vacaciones_service.go) necesita y que no existían en
-// vacaciones.go. Mismo patrón sin sqlc: database/sql a mano, placeholders `?`.
-//
-//   - BloquearEmpleado: serializa TODAS las operaciones de vacaciones de un
-//     mismo empleado (acumular, solicitar, aprobar, disfrutar). Es necesario
-//     porque el lock FOR UPDATE sobre el corte de vacaciones_acumulado no
-//     protege cuando el empleado todavía no tiene ningún corte.
-//   - ContarSolicitudesVacacionesTraslapadas: verificación de traslape de
-//     fechas contra solicitudes pendientes/aprobadas del mismo empleado.
-//   - ContarSolicitudesVacacionesAprobadasTraslapadas: igual que la anterior pero
-//     solo contra solicitudes ya 'aprobada' (validación previa a aprobar).
-//   - SumarDiasVacacionesAprobadasSinDisfrutar: días ya comprometidos por
-//     solicitudes aprobadas cuyo disfrute aún no se registró (no están
-//     descontados de vacaciones_acumulado todavía).
-//   - ExisteMovimientoVacacionesPorSolicitud / ExisteMovimientoAcumulacionVacaciones:
-//     idempotencia del ledger (vacaciones_movimientos no tiene UNIQUE que
-//     impida duplicar un disfrute o una acumulación de período).
 package dto
 
 import (

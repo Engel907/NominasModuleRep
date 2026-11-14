@@ -9,20 +9,6 @@ import (
 	"testing"
 )
 
-// Test de coherencia catálogo <-> migraciones (F12, test b).
-//
-// Reconstruye, leyendo db/migrations/*.up.sql en orden, el conjunto de códigos
-// que quedan en la tabla `permisos` (INSERT agrega, DELETE FROM permisos quita)
-// y lo compara con authz.Todos() en ambas direcciones:
-//   - un código de authz sin sembrar  => las rutas darían 403 para siempre;
-//   - un código sembrado fuera de authz => permiso huérfano que nadie controla.
-//
-// Reglas para escribir migraciones de permisos (lo que este parser entiende):
-//   - sentencias "INSERT [IGNORE] INTO permisos ..." con los códigos como
-//     literales 'dominio.accion' dentro de la misma sentencia;
-//   - sentencias "DELETE FROM permisos WHERE codigo IN (...)" con literales;
-//   - sin ';' dentro de strings ni de la sentencia salvo el terminador.
-
 var (
 	reComentarioLinea  = regexp.MustCompile(`(?m)--[^\n]*`)
 	reComentarioBloque = regexp.MustCompile(`(?s)/\*.*?\*/`)
@@ -54,7 +40,7 @@ func sinComentarios(sql string) string {
 // codigosSembrados devuelve el conjunto neto de códigos tras aplicar todas las migraciones.
 func codigosSembrados(t *testing.T) map[string]string {
 	t.Helper()
-	neto := map[string]string{} // codigo -> archivo que lo sembró
+	neto := map[string]string{}
 	for _, archivo := range archivosUp(t) {
 		crudo, err := os.ReadFile(archivo)
 		if err != nil {
@@ -127,7 +113,7 @@ func TestTodos_CatalogoWellFormed(t *testing.T) {
 		if !FormatoCodigo.MatchString(p.Codigo) {
 			t.Errorf("código con formato inválido: %q", p.Codigo)
 		}
-		if len(p.Codigo) > 60 { // permisos.codigo VARCHAR(60)
+		if len(p.Codigo) > 60 {
 			t.Errorf("código demasiado largo (%d > 60): %q", len(p.Codigo), p.Codigo)
 		}
 		if vistos[p.Codigo] {

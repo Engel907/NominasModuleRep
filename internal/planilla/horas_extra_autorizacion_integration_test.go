@@ -25,18 +25,16 @@ WHERE pde.periodo_planilla_id = ? AND pde.empleado_id = ? AND pdc.concepto_salar
 	return m, true
 }
 
-// L13: lo que llega a planilla es min(horas registradas, horas autorizadas) de
+// lo que llega a planilla es min(horas registradas, horas autorizadas) de
 // los días autorizados; sin autorización no se paga.
-func TestL13HorasExtraSoloAutorizadas(t *testing.T) {
+func TestHorasExtraSoloAutorizadas(t *testing.T) {
 	ctx := context.Background()
 	casos := []struct {
 		nombre string
 		prep   func(t *testing.T, f *fixtureCalculo)
-		monto  string // "" = sin línea HRS_EXTRA
+		monto  string
 	}{
-		// 700 000 / 240 × 6 × 1.5 = 26 250
 		{"autorizadas las 6", func(*testing.T, *fixtureCalculo) {}, "26250.00"},
-		// Autorizadas 4 de 6: 700 000 / 240 × 4 × 1.5 = 17 500
 		{"autorizado menos de lo trabajado", func(t *testing.T, f *fixtureCalculo) {
 			mustExec(t, f.db, `DELETE FROM horas_extra_autorizadas WHERE id = ?`, f.autorizacionHE)
 			mustExec(t, f.db, `

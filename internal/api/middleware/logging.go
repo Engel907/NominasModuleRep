@@ -43,7 +43,7 @@ func RequestIDDesdeGin(c *gin.Context) string {
 }
 
 // RequestID asigna un request_id a cada petición: toma X-Request-ID si es
-// válido o genera un UUID, lo deja en gin.Context y en c.Request.Context()
+// válido o genera un UUID, lo deja en gin.Context y en c.Request.Context
 // (propagación a servicios), y lo devuelve en la cabecera de respuesta.
 // Debe ser el PRIMER middleware.
 func RequestID() gin.HandlerFunc {
@@ -100,9 +100,9 @@ func redactarAtributo(_ []string, a slog.Attr) slog.Attr {
 	return a
 }
 
-// RequestLogger registra UNA línea JSON por petición, al terminar:
+// RequestLogger registra una línea JSON por petición, al terminar:
 // método, ruta, estado, latencia, bytes, IP del cliente y usuario_id si hay
-// sesión. La ruta es la PLANTILLA de la ruta (c.FullPath(), p. ej.
+// sesión. La ruta es la PLANTILLA de la ruta (c.FullPath, p. ej.
 // "/api/v1/planillas/:id/boleta/:empleado_id"): sin query string ni valores
 // de parámetros. Nunca se registran cuerpos, cabeceras ni tokens.
 func RequestLogger(logger *slog.Logger) gin.HandlerFunc {
@@ -112,7 +112,7 @@ func RequestLogger(logger *slog.Logger) gin.HandlerFunc {
 
 		ruta := c.FullPath()
 		if ruta == "" {
-			ruta = "(sin_ruta)" // 404/405: no se registra la URL cruda
+			ruta = "(sin_ruta)"
 		}
 		status := c.Writer.Status()
 		bytes := c.Writer.Size()
@@ -139,7 +139,6 @@ func RequestLogger(logger *slog.Logger) gin.HandlerFunc {
 		case status >= 400:
 			nivel = slog.LevelWarn
 		}
-		// Los probes de salud no deben inundar el log.
 		if (ruta == "/healthz" || ruta == "/health") && nivel == slog.LevelInfo {
 			nivel = slog.LevelDebug
 		}
@@ -159,7 +158,6 @@ func Recovery(logger *slog.Logger) gin.HandlerFunc {
 			if r == nil {
 				return
 			}
-			// Protocolo de net/http para abortar una respuesta: se re-lanza.
 			if err, ok := r.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 				panic(r)
 			}

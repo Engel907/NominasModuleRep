@@ -1,15 +1,5 @@
 package auth
 
-// Política de contraseñas (F14 / S11).
-//
-// ValidarPassword se usa en TODO punto donde se fija una contraseña nueva:
-// cambio autenticado (CambiarPassword) y confirmación de reset
-// (ConfirmarResetPassword). El login NO la aplica: debe poder verificar
-// contraseñas anteriores a esta política.
-//
-// El nombre `Politica` ya lo usa service.go (parámetros de sesión/bloqueo),
-// por eso esto vive bajo ErrPoliticaPassword / ValidarPassword.
-
 import (
 	_ "embed"
 	"strings"

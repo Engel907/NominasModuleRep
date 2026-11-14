@@ -8,7 +8,7 @@ import (
 
 // reglaIncapacidad (incapacidad): SUB_INCAP = parte PATRONAL del subsidio de
 // cada boleta, por tramos de parametros_subsidios_incapacidad y con el
-// salario del segmento de contrato de cada día. La parte de la CCSS/INS no
+// salario diario del segmento de contrato de cada día (ValorDia). La parte de la CCSS/INS no
 // suma al neto: queda en planilla_detalle_incapacidad.monto_entidad_informativo.
 // Los días ya se descontaron del salario base (regla_salario).
 type reglaIncapacidad struct{}
@@ -23,7 +23,6 @@ func (reglaIncapacidad) Aplicar(rc *ContextoRegla) error {
 	if err != nil {
 		return err
 	}
-	divisorDec := decimal.NewFromInt(int64(divisor))
 	total, dias := decimal.Zero, 0
 	for _, inc := range rc.In.Incapacidades {
 		for _, seg := range rc.In.Segmentos {
@@ -34,7 +33,11 @@ func (reglaIncapacidad) Aplicar(rc *ContextoRegla) error {
 			parte := inc
 			parte.Desde, parte.Hasta = ini, fin
 			parte.DiaSerieDesde = inc.DiaSerieDesde + int32(diasEntre(inc.Desde, ini))
-			sub, err := CalcularSubsidioIncapacidad(seg.Salario.Div(divisorDec), parte, rc.P.SubsidiosIncapacidad, divisor)
+			diario, err := seg.ValorDia(rc.P)
+			if err != nil {
+				return err
+			}
+			sub, err := CalcularSubsidioIncapacidad(diario, parte, rc.P.SubsidiosIncapacidad, divisor)
 			if err != nil {
 				return err
 			}

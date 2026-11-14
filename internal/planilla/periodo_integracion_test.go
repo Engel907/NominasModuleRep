@@ -1,14 +1,5 @@
 package planilla
 
-// Tests de integración del ciclo de vida del período (F19).
-//
-// Requieren una BD DESECHABLE con las migraciones aplicadas (incluida la
-// 000119), al menos 3 usuarios, 1 tipo de planilla, 1 empleado y 1 programa
-// presupuestario. Dejan períodos aprobados que no se pueden borrar (son
-// inmutables), por eso usan años aleatorios lejanos.
-//
-//	PLANILLAS_TEST_DSN='user:pass@tcp(127.0.0.1:3306)/planillas?parseTime=true' go test ./internal/planilla -run Integracion
-
 import (
 	"context"
 	"database/sql"
@@ -121,12 +112,10 @@ func TestIntegracionTraslape(t *testing.T) {
 	if _, err := f.svc.Crear(ctx, f.u[0], f.tipoID, ini, fin); err != nil {
 		t.Fatal(err)
 	}
-	// Traslape parcial (no igualdad exacta).
 	ini2, fin2 := ini.AddDate(0, 0, 9), ini.AddDate(0, 0, 19)
 	if _, err := f.svc.Crear(ctx, f.u[0], f.tipoID, ini2, fin2); !errors.Is(err, ErrPeriodoTraslapado) {
 		t.Fatalf("traslape parcial: err=%v", err)
 	}
-	// Contiguo sí.
 	if _, err := f.svc.Crear(ctx, f.u[0], f.tipoID, fin.AddDate(0, 0, 1), fin.AddDate(0, 0, 15)); err != nil {
 		t.Fatalf("período contiguo: %v", err)
 	}
@@ -165,7 +154,6 @@ func TestIntegracionSegregacion(t *testing.T) {
 func TestIntegracionTriggerSegregacionDirecta(t *testing.T) {
 	f := nuevoFixtureCiclo(t)
 	p := f.periodoCalculado(t)
-	// Saltándose el servicio, el trigger igual rechaza.
 	_, err := f.db.Exec(`UPDATE periodos_planilla SET estado='aprobada', aprobado_por_usuario_id=?, fecha_aprobacion=NOW() WHERE id=?`, f.u[0], p.ID)
 	if !esTrigger(err, "segregacion_funciones") {
 		t.Fatalf("esperaba segregacion_funciones, got %v", err)

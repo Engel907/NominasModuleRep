@@ -3,9 +3,7 @@ package prestamos
 import (
 	"database/sql"
 	"errors"
-	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,20 +11,12 @@ import (
 
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/db"
+	"planillas-ccdr/internal/paginacion"
 )
 
 // Handler agrupa los endpoints HTTP del módulo. Es deliberadamente
 // delgado: valida forma de entrada, llama al Service, traduce errores
 // de dominio a códigos HTTP y responde en el sobre JSON estandarizado.
-//
-// Convenciones (F05):
-//   - Cada camino escribe EXACTAMENTE una respuesta y retorna de inmediato.
-//   - Los parámetros de ruta se parsean con middleware.ParseIDParam; si son
-//     inválidos el handler hace c.Error(err) + return y el ErrorHandler
-//     global responde 400 (NO se escribe respuesta aquí).
-//   - Nunca se envía al cliente err.Error() de errores internos (SQL, bind
-//     del validador, etc.): se registra con slog y se responde un mensaje
-//     genérico. Solo los errores de dominio tipados exponen su mensaje.
 type Handler struct {
 	svc *Service
 }
@@ -35,52 +25,26 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-// ---------------------------------------------------------------------
-// Sobre de respuesta estandarizado
-// ---------------------------------------------------------------------
-
-type apiResponse struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty"`
-	Meta    interface{} `json:"meta,omitempty"`
-	Error   *apiError   `json:"error,omitempty"`
-}
-
-type apiError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-type paginacionMeta struct {
-	Total  int64 `json:"total"`
-	Limit  int32 `json:"limit"`
-	Offset int32 `json:"offset"`
-}
-
 func respondOK(c *gin.Context, status int, data interface{}) {
-	c.JSON(status, apiResponse{Success: true, Data: data})
+	c.JSON(status, gin.H{"data": data})
 }
 
-func respondOKPaginado(c *gin.Context, data interface{}, meta paginacionMeta) {
-	c.JSON(http.StatusOK, apiResponse{Success: true, Data: data, Meta: meta})
+func respondOKPaginado(c *gin.Context, data interface{}, meta paginacion.Meta) {
+	c.JSON(http.StatusOK, gin.H{"data": data, "meta": meta})
 }
 
 func respondFail(c *gin.Context, status int, code, message string) {
-	c.JSON(status, apiResponse{Success: false, Error: &apiError{Code: code, Message: message}})
+	middleware.Fail(c, status, code, message, nil)
 }
 
 // payloadInvalido responde 400 con un mensaje fijo o escrito por nosotros.
 // Nunca recibe el error crudo de ShouldBindJSON (filtra nombres de structs,
 // tags del validador y tipos Go).
 func payloadInvalido(c *gin.Context, message string) {
-	respondFail(c, http.StatusBadRequest, "PAYLOAD_INVALIDO", message)
+	respondFail(c, http.StatusBadRequest, "invalid_request", message)
 }
 
 const msgCuerpoInvalido = "el cuerpo de la solicitud es inválido o está incompleto"
-
-// ---------------------------------------------------------------------
-// Mapeo de errores de dominio a HTTP
-// ---------------------------------------------------------------------
 
 type mapeoError struct {
 	err    error
@@ -89,40 +53,36 @@ type mapeoError struct {
 }
 
 var mapeoErrores = []mapeoError{
-	// 422 — el dato enviado no cumple una regla de validación.
-	{ErrMontoInvalido, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrMontoPrecision, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrCuotaExcedeMonto, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrCuotasInvalidas, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrCuotasIncoherentes, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrFechasInvalidas, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrEmbargoSinBase, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrEmbargoBaseDuplicada, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrPorcentajeInvalido, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrFechaFinRequerida, http.StatusUnprocessableEntity, "VALIDACION"},
-	{ErrAbonoExcedeSaldo, http.StatusUnprocessableEntity, "VALIDACION"},
+	{ErrMontoInvalido, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrMontoPrecision, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrCuotaExcedeMonto, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrCuotasInvalidas, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrCuotasIncoherentes, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrFechasInvalidas, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrEmbargoSinBase, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrEmbargoBaseDuplicada, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrPorcentajeInvalido, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrFechaFinRequerida, http.StatusUnprocessableEntity, "unprocessable_entity"},
+	{ErrAbonoExcedeSaldo, http.StatusUnprocessableEntity, "unprocessable_entity"},
 
-	// 422 — el cuerpo referencia una entidad que no existe.
-	{ErrEmpleadoNoEncontrado, http.StatusUnprocessableEntity, "REFERENCIA_INVALIDA"},
-	{ErrTerceroNoEncontrado, http.StatusUnprocessableEntity, "REFERENCIA_INVALIDA"},
-	{ErrTipoEmbargoNoEncontrado, http.StatusUnprocessableEntity, "REFERENCIA_INVALIDA"},
+	{ErrEmpleadoNoEncontrado, http.StatusUnprocessableEntity, "referencia_invalida"},
+	{ErrTerceroNoEncontrado, http.StatusUnprocessableEntity, "referencia_invalida"},
+	{ErrTipoEmbargoNoEncontrado, http.StatusUnprocessableEntity, "referencia_invalida"},
 
-	// 404 — el recurso de la ruta no existe.
-	{ErrPrestamoNoEncontrado, http.StatusNotFound, "NO_ENCONTRADO"},
-	{ErrEmbargoNoEncontrado, http.StatusNotFound, "NO_ENCONTRADO"},
+	{ErrPrestamoNoEncontrado, http.StatusNotFound, "not_found"},
+	{ErrEmbargoNoEncontrado, http.StatusNotFound, "not_found"},
 
-	// 409 — el estado actual impide la operación.
-	{ErrTransicionInvalida, http.StatusConflict, "ESTADO_INVALIDO"},
-	{ErrPrestamoNoActivo, http.StatusConflict, "ESTADO_INVALIDO"},
-	{ErrPrestamoYaCancelado, http.StatusConflict, "ESTADO_INVALIDO"},
-	{ErrEmpleadoInactivo, http.StatusConflict, "ESTADO_INVALIDO"},
-	{ErrEmpleadoSinContratoVigente, http.StatusConflict, "ESTADO_INVALIDO"},
-	{ErrTipoEmbargoNoVigente, http.StatusConflict, "ESTADO_INVALIDO"},
-	{ErrPrestamoDuplicado, http.StatusConflict, "DUPLICADO"},
+	{ErrTransicionInvalida, http.StatusConflict, "conflict"},
+	{ErrPrestamoNoActivo, http.StatusConflict, "conflict"},
+	{ErrPrestamoYaCancelado, http.StatusConflict, "conflict"},
+	{ErrEmpleadoInactivo, http.StatusConflict, "conflict"},
+	{ErrEmpleadoSinContratoVigente, http.StatusConflict, "conflict"},
+	{ErrTipoEmbargoNoVigente, http.StatusConflict, "conflict"},
+	{ErrPrestamoDuplicado, http.StatusConflict, "duplicado"},
 }
 
 // respondError centraliza el mapeo de errores de dominio a HTTP. Se responde
-// con el mensaje del error de dominio CANÓNICO (m.err), no con err.Error(),
+// con el mensaje del error de dominio CANÓNICO (m.err), no con err.Error,
 // para que un error envuelto con detalle interno nunca llegue al cliente.
 // Todo lo no reconocido es 500 genérico y se registra en el log.
 func respondError(c *gin.Context, err error) {
@@ -134,20 +94,13 @@ func respondError(c *gin.Context, err error) {
 	}
 	switch {
 	case errors.Is(err, db.ErrNilUserID):
-		respondFail(c, http.StatusUnauthorized, "NO_AUTENTICADO", "no se pudo identificar al usuario autenticado")
+		respondFail(c, http.StatusUnauthorized, "unauthorized", "no se pudo identificar al usuario autenticado")
 	case errors.Is(err, sql.ErrNoRows):
-		respondFail(c, http.StatusNotFound, "NO_ENCONTRADO", "el recurso solicitado no existe")
+		respondFail(c, http.StatusNotFound, "not_found", "el recurso solicitado no existe")
 	default:
-		slog.ErrorContext(c.Request.Context(), "prestamos: error interno",
-			slog.String("ruta", c.FullPath()),
-			slog.String("error", err.Error()))
-		respondFail(c, http.StatusInternalServerError, "ERROR_INTERNO", "ocurrió un error inesperado")
+		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "ocurrió un error inesperado", err)
 	}
 }
-
-// ---------------------------------------------------------------------
-// Helpers de entrada
-// ---------------------------------------------------------------------
 
 // usuarioAutenticado lee el usuario_id que dejó AuthPASETO. Si no hay
 // payload responde 401 y devuelve false (defensa en profundidad: la ruta
@@ -155,14 +108,14 @@ func respondError(c *gin.Context, err error) {
 func usuarioAutenticado(c *gin.Context) (int64, bool) {
 	id, ok := middleware.UsuarioIDDesdeContexto(c)
 	if !ok || id <= 0 {
-		respondFail(c, http.StatusUnauthorized, "NO_AUTENTICADO", "no se pudo identificar al usuario autenticado")
+		respondFail(c, http.StatusUnauthorized, "unauthorized", "no se pudo identificar al usuario autenticado")
 		return 0, false
 	}
 	return id, true
 }
 
 // idParam parsea un parámetro de ruta como int64 > 0. Si es inválido
-// registra el error con c.Error y devuelve false SIN escribir respuesta:
+// registra el error con c.Error y devuelve false sin escribir respuesta:
 // el ErrorHandler lo traduce a 400.
 func idParam(c *gin.Context, nombre string) (int64, bool) {
 	id, err := middleware.ParseIDParam(c, nombre)
@@ -171,18 +124,6 @@ func idParam(c *gin.Context, nombre string) (int64, bool) {
 		return 0, false
 	}
 	return id, true
-}
-
-func paginacionFromQuery(c *gin.Context) (limit, offset int32) {
-	l, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	if err != nil || l <= 0 || l > 100 {
-		l = 20
-	}
-	o, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	if err != nil || o < 0 {
-		o = 0
-	}
-	return int32(l), int32(o)
 }
 
 // parseFecha parsea YYYY-MM-DD; si falla responde 400 y devuelve false.
@@ -205,15 +146,11 @@ func parseDecimal(c *gin.Context, campo, valor string) (decimal.Decimal, bool) {
 	return d, true
 }
 
-// ---------------------------------------------------------------------
-// TERCEROS
-// ---------------------------------------------------------------------
-
 // El esquema solo guarda (nombre, tipo); `identificacion` y `cuenta_bancaria`
 // no existen en la tabla `terceros` y se eliminaron del contrato.
 type crearTerceroRequest struct {
 	Nombre      string `json:"nombre" binding:"required"`
-	TipoTercero string `json:"tipo_tercero" binding:"required,oneof=juzgado entidad_financiera otro"`
+	TipoTercero string `json:"tipo_tercero" binding:"required,oneof=juzgado entidad_financiera asociacion_solidarista sindicato aseguradora cooperativa otro"`
 }
 
 func (h *Handler) CrearTercero(c *gin.Context) {
@@ -238,18 +175,14 @@ func (h *Handler) CrearTercero(c *gin.Context) {
 }
 
 func (h *Handler) ListarTerceros(c *gin.Context) {
-	limit, offset := paginacionFromQuery(c)
-	items, total, err := h.svc.ListarTerceros(c.Request.Context(), c.Query("tipo"), c.Query("q"), limit, offset)
+	pag := paginacion.Desde(c)
+	items, total, err := h.svc.ListarTerceros(c.Request.Context(), c.Query("tipo"), c.Query("q"), pag.Limit32(), pag.Offset32())
 	if err != nil {
 		respondError(c, err)
 		return
 	}
-	respondOKPaginado(c, items, paginacionMeta{Total: total, Limit: limit, Offset: offset})
+	respondOKPaginado(c, items, paginacion.NuevaMeta(pag, total))
 }
-
-// ---------------------------------------------------------------------
-// PRESTAMOS
-// ---------------------------------------------------------------------
 
 // `descripcion` se eliminó (no existe en `prestamos`). `tercero_id` es
 // obligatorio (NOT NULL en el esquema). `cuotas_totales` es opcional: no se
@@ -316,13 +249,13 @@ func (h *Handler) ListarPrestamosPorEmpleado(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, offset := paginacionFromQuery(c)
-	items, total, err := h.svc.ListarPrestamosPorEmpleado(c.Request.Context(), empleadoID, c.Query("estado"), limit, offset)
+	pag := paginacion.Desde(c)
+	items, total, err := h.svc.ListarPrestamosPorEmpleado(c.Request.Context(), empleadoID, c.Query("estado"), pag.Limit32(), pag.Offset32())
 	if err != nil {
 		respondError(c, err)
 		return
 	}
-	respondOKPaginado(c, items, paginacionMeta{Total: total, Limit: limit, Offset: offset})
+	respondOKPaginado(c, items, paginacion.NuevaMeta(pag, total))
 }
 
 type abonoPrestamoRequest struct {
@@ -370,10 +303,6 @@ func (h *Handler) CancelarPrestamo(c *gin.Context) {
 	respondOK(c, http.StatusOK, gin.H{"id": prestamoID, "estado": "cancelado"})
 }
 
-// ---------------------------------------------------------------------
-// EMBARGOS
-// ---------------------------------------------------------------------
-
 type crearEmbargoRequest struct {
 	EmpleadoID       int64   `json:"empleado_id" binding:"required"`
 	TipoEmbargoID    int64   `json:"tipo_embargo_id" binding:"required"`
@@ -381,6 +310,7 @@ type crearEmbargoRequest struct {
 	NumeroExpediente *string `json:"numero_expediente"`
 	Porcentaje       *string `json:"porcentaje"`
 	MontoFijo        *string `json:"monto_fijo"`
+	TopeMensual      *string `json:"tope_mensual"` // opcional
 	FechaInicio      string  `json:"fecha_inicio_vigencia" binding:"required"`
 	FechaFin         *string `json:"fecha_fin_vigencia"`
 }
@@ -422,6 +352,14 @@ func (h *Handler) CrearEmbargo(c *gin.Context) {
 		}
 		montoFijo = &d
 	}
+	var topeMensual *decimal.Decimal
+	if req.TopeMensual != nil {
+		d, ok := parseDecimal(c, "tope_mensual", *req.TopeMensual)
+		if !ok {
+			return
+		}
+		topeMensual = &d
+	}
 
 	id, err := h.svc.CrearEmbargo(c.Request.Context(), userID, CrearEmbargoInput{
 		EmpleadoID:       req.EmpleadoID,
@@ -430,6 +368,7 @@ func (h *Handler) CrearEmbargo(c *gin.Context) {
 		NumeroExpediente: req.NumeroExpediente,
 		Porcentaje:       porcentaje,
 		MontoFijo:        montoFijo,
+		TopeMensual:      topeMensual,
 		FechaInicio:      fechaInicio,
 		FechaFinVigencia: fechaFin,
 	})
@@ -445,13 +384,13 @@ func (h *Handler) ListarEmbargosPorEmpleado(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, offset := paginacionFromQuery(c)
-	items, total, err := h.svc.ListarEmbargosPorEmpleado(c.Request.Context(), empleadoID, c.Query("estado"), limit, offset)
+	pag := paginacion.Desde(c)
+	items, total, err := h.svc.ListarEmbargosPorEmpleado(c.Request.Context(), empleadoID, c.Query("estado"), pag.Limit32(), pag.Offset32())
 	if err != nil {
 		respondError(c, err)
 		return
 	}
-	respondOKPaginado(c, items, paginacionMeta{Total: total, Limit: limit, Offset: offset})
+	respondOKPaginado(c, items, paginacion.NuevaMeta(pag, total))
 }
 
 // ListarEmbargosActivosOrdenados expone, para consumo del motor de
@@ -479,7 +418,6 @@ func (h *Handler) ListarEmbargosActivosOrdenados(c *gin.Context) {
 }
 
 // Estados del ENUM embargos.estado: activo | suspendido | finalizado.
-// ('cancelado' no existe en el esquema; era el valor de la versión anterior.)
 type cambiarEstadoEmbargoRequest struct {
 	Estado   string  `json:"estado" binding:"required,oneof=activo suspendido finalizado"`
 	FechaFin *string `json:"fecha_fin_vigencia"`

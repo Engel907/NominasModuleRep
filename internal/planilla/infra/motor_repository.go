@@ -10,7 +10,7 @@ import (
 
 type motorQueries interface {
 	ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (dto.ContratoVigenteEnFechaRow, error)
-	ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]dto.ConceptoAplicableRow, error)
+	ListarConceptosAplicablesEnFecha(ctx context.Context, empleadoID, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]dto.ConceptoAplicableRow, error)
 	ListarParametrosHorasExtraEnFecha(ctx context.Context, fecha time.Time) ([]dto.ParametroHoraExtraRow, error)
 }
 
@@ -29,8 +29,8 @@ func (r *motorRepository) ObtenerContratoVigenteEnFecha(ctx context.Context, emp
 	return planilla.ContratoVigente(x), nil
 }
 
-func (r *motorRepository) ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]planilla.ConceptoAplicableFila, error) {
-	rows, err := r.q.ListarConceptosAplicablesEnFecha(ctx, regimenLaboralID, tipoPlanillaID, fecha)
+func (r *motorRepository) ListarConceptosAplicablesEnFecha(ctx context.Context, empleadoID, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]planilla.ConceptoAplicableFila, error) {
+	rows, err := r.q.ListarConceptosAplicablesEnFecha(ctx, empleadoID, regimenLaboralID, tipoPlanillaID, fecha)
 	if err != nil {
 		return nil, err
 	}
@@ -46,11 +46,15 @@ func (r *motorRepository) ListarConceptosAplicablesEnFecha(ctx context.Context, 
 				AfectaBaseAguinaldo:  x.AfectaBaseAguinaldo,
 				AfectaBaseCesantia:   x.AfectaBaseCesantia,
 				AfectaBaseVacaciones: x.AfectaBaseVacaciones,
+				AfectaBaseEmbargo:    x.AfectaBaseEmbargo,
+
+				EsDeduccionObligatoria: x.EsDeduccionObligatoria,
 			},
-			Naturaleza:       x.Naturaleza,
-			TipoCalculo:      x.TipoCalculo,
-			FormulaID:        x.FormulaID,
-			ExpresionFormula: x.ExpresionFormula,
+			Naturaleza:        x.Naturaleza,
+			TipoCalculo:       x.TipoCalculo,
+			FormulaID:         x.FormulaID,
+			ExpresionFormula:  x.ExpresionFormula,
+			FormulaEmpleadoID: x.FormulaEmpleadoID,
 		}
 		if x.MontoFijo.Valid {
 			m := x.MontoFijo.Decimal

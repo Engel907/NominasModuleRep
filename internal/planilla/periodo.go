@@ -1,7 +1,4 @@
 // Package planilla implementa el motor de cálculo de planilla y sus exportaciones.
-//
-// periodo.go — F19: dominio del ciclo de vida del período (transiciones,
-// segregación de funciones, errores de dominio y ganchos para otras fases).
 package planilla
 
 import (
@@ -54,7 +51,6 @@ var transicionesPermitidas = map[EstadoPeriodo][]EstadoPeriodo{
 	EstadoCalculada: {EstadoBorrador, EstadoAprobada},
 	EstadoAprobada:  {EstadoPagada},
 	EstadoPagada:    {EstadoContabilizada},
-	// contabilizada: terminal. Desde aprobada en adelante no hay retroceso.
 }
 
 // TransicionPermitida indica si el período puede pasar de `desde` a `hasta`.
@@ -89,7 +85,7 @@ func ParticipantesDe(p dto.PeriodoCicloRow) Participantes {
 // VerificarSegregacion aplica la regla: quien prepara/calcula != quien
 // aprueba != quien paga; quien contabiliza != quien pagó. `destino` es el
 // estado al que se quiere llegar y usuarioID quien lo intenta.
-// F28 debe usarla para EstadoContabilizada.
+// Debe usarla para EstadoContabilizada.
 func VerificarSegregacion(destino EstadoPeriodo, usuarioID int64, p Participantes) error {
 	var previos []*int64
 	switch destino {
@@ -108,29 +104,42 @@ func VerificarSegregacion(destino EstadoPeriodo, usuarioID int64, p Participante
 	return nil
 }
 
-// --- Ganchos ---------------------------------------------------------------
-// Todos corren dentro de la transacción del paso (con el q de esa
-// transacción): si devuelven error, el paso completo se revierte.
-
-// Calculador lo implementa F20. Debe insertar las líneas de detalle del
+// Calculador lo implementa. Debe insertar las líneas de detalle del
 // período (que está en borrador); el servicio hace después la transición a
 // calculada.
 type Calculador interface {
 	Calcular(ctx context.Context, q *dto.Queries, periodo dto.PeriodoCicloRow, usuarioID int64) error
 }
 
-// EliminadorDetalle lo implementa F20: borra planilla_detalle_concepto y
+// EliminadorDetalle lo implementa borra planilla_detalle_concepto y
 // planilla_detalle_empleado del período (que está en calculada).
 type EliminadorDetalle interface {
 	EliminarDetalle(ctx context.Context, q *dto.Queries, periodoID int64) error
 }
 
-// GanchoAlAprobar lo implementa F23. Recibe el período ya aprobado.
+// GanchoAlAprobar recibe el período ya aprobado (préstamos,
+// aguinaldo/salario escolar, vacaciones).
 type GanchoAlAprobar interface {
 	AlAprobar(ctx context.Context, q *dto.Queries, periodo dto.PeriodoCicloRow) error
 }
 
-// GanchoAlPagar lo implementa F28. Recibe el período ya pagado.
+// GanchosAlAprobar ejecuta varios ganchos en orden y corta en el primer
+// error (la transacción de la aprobación se revierte completa).
+type GanchosAlAprobar []GanchoAlAprobar
+
+func (gs GanchosAlAprobar) AlAprobar(ctx context.Context, q *dto.Queries, periodo dto.PeriodoCicloRow) error {
+	for _, g := range gs {
+		if g == nil {
+			continue
+		}
+		if err := g.AlAprobar(ctx, q, periodo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GanchoAlPagar lo implementa. Recibe el período ya pagado.
 type GanchoAlPagar interface {
 	AlPagar(ctx context.Context, q *dto.Queries, periodo dto.PeriodoCicloRow) error
 }

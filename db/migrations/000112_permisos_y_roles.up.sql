@@ -1,22 +1,3 @@
--- 000112_permisos_y_roles.up.sql
--- F12: alinea el catálogo de permisos con internal/authz, define los roles
--- reales con segregación de funciones (preparar / aprobar / pagar) y retira
--- los permisos "gestionar/ejecutar" que ninguna ruta usa.
---
--- Reglas de esta migración:
---   * Roles y permisos se resuelven SIEMPRE por codigo, nunca por id fijo.
---   * Solo INSERT ... SELECT ... WHERE NOT EXISTS: no se usan las variantes que
---     pisan datos existentes ni las que ocultan fallos.
---   * No contiene credenciales. El usuario administrador inicial se crea con
---     cmd/seedadmin.
---
--- La fuente de verdad del catálogo es internal/authz.Todos(). El test
--- internal/authz/migraciones_test.go falla si este archivo y authz se
--- desalinean (incluidos los permisos que esta migración elimina).
-
--- ---------------------------------------------------------------------------
--- 1) permisos: sembrar los que falten (los ya existentes no se tocan)
--- ---------------------------------------------------------------------------
 INSERT INTO permisos (codigo, nombre, modulo)
 SELECT n.codigo, n.nombre, n.modulo
 FROM (
@@ -81,12 +62,6 @@ FROM (
 ) AS n
 WHERE NOT EXISTS (SELECT 1 FROM permisos p WHERE p.codigo = n.codigo);
 
--- ---------------------------------------------------------------------------
--- 2) roles
---    El rol ADMINISTRADOR (creado en 000006) pasa a ser ADMINISTRADOR_SISTEMA.
---    El UPDATE solo corre si el nombre nuevo no existe todavia. La subconsulta
---    derivada evita el error 1093 de MySQL (leer la tabla que se actualiza).
--- ---------------------------------------------------------------------------
 UPDATE roles
 SET codigo = 'ADMINISTRADOR_SISTEMA',
     nombre = 'Administrador del sistema'
@@ -106,10 +81,6 @@ FROM (
 ) AS n
 WHERE NOT EXISTS (SELECT 1 FROM roles r WHERE r.codigo = n.codigo);
 
--- ---------------------------------------------------------------------------
--- 3) Retirar de ADMINISTRADOR_SISTEMA los permisos operativos heredados de
---    000006 que no corresponden a su perfil (segregacion de funciones).
--- ---------------------------------------------------------------------------
 DELETE rp
 FROM rol_permisos rp
 JOIN roles r ON r.id = rp.rol_id
@@ -117,11 +88,6 @@ JOIN permisos p ON p.id = rp.permiso_id
 WHERE r.codigo = 'ADMINISTRADOR_SISTEMA'
   AND p.codigo IN ('asientos_contables.generar', 'asientos_contables.ver');
 
--- ---------------------------------------------------------------------------
--- 4) Asignacion inicial de permisos por rol (ajustable despues)
--- ---------------------------------------------------------------------------
-
--- ADMINISTRADOR_SISTEMA
 INSERT INTO rol_permisos (rol_id, permiso_id)
 SELECT r.id, p.id
 FROM roles r
@@ -141,8 +107,6 @@ WHERE r.codigo = 'ADMINISTRADOR_SISTEMA'
     SELECT 1 FROM rol_permisos rp WHERE rp.rol_id = r.id AND rp.permiso_id = p.id
   );
 
-
--- RRHH
 INSERT INTO rol_permisos (rol_id, permiso_id)
 SELECT r.id, p.id
 FROM roles r
@@ -184,8 +148,6 @@ WHERE r.codigo = 'RRHH'
     SELECT 1 FROM rol_permisos rp WHERE rp.rol_id = r.id AND rp.permiso_id = p.id
   );
 
-
--- PLANILLAS_PREPARA
 INSERT INTO rol_permisos (rol_id, permiso_id)
 SELECT r.id, p.id
 FROM roles r
@@ -208,8 +170,6 @@ WHERE r.codigo = 'PLANILLAS_PREPARA'
     SELECT 1 FROM rol_permisos rp WHERE rp.rol_id = r.id AND rp.permiso_id = p.id
   );
 
-
--- PLANILLAS_APRUEBA
 INSERT INTO rol_permisos (rol_id, permiso_id)
 SELECT r.id, p.id
 FROM roles r
@@ -225,8 +185,6 @@ WHERE r.codigo = 'PLANILLAS_APRUEBA'
     SELECT 1 FROM rol_permisos rp WHERE rp.rol_id = r.id AND rp.permiso_id = p.id
   );
 
-
--- TESORERIA
 INSERT INTO rol_permisos (rol_id, permiso_id)
 SELECT r.id, p.id
 FROM roles r
@@ -240,8 +198,6 @@ WHERE r.codigo = 'TESORERIA'
     SELECT 1 FROM rol_permisos rp WHERE rp.rol_id = r.id AND rp.permiso_id = p.id
   );
 
-
--- CONTABILIDAD
 INSERT INTO rol_permisos (rol_id, permiso_id)
 SELECT r.id, p.id
 FROM roles r
@@ -258,8 +214,6 @@ WHERE r.codigo = 'CONTABILIDAD'
     SELECT 1 FROM rol_permisos rp WHERE rp.rol_id = r.id AND rp.permiso_id = p.id
   );
 
-
--- AUDITOR
 INSERT INTO rol_permisos (rol_id, permiso_id)
 SELECT r.id, p.id
 FROM roles r
@@ -284,12 +238,6 @@ WHERE r.codigo = 'AUDITOR'
     SELECT 1 FROM rol_permisos rp WHERE rp.rol_id = r.id AND rp.permiso_id = p.id
   );
 
--- ---------------------------------------------------------------------------
--- 5) Eliminar permisos obsoletos de 000006 (ninguna ruta ni constante de
---    internal/authz los usa). Primero sus asignaciones, luego el permiso.
---    Si algun codigo fuera de las rutas revisadas aun los usara, NO aplicar:
---    buscar antes en el repo (ver nota de entrega).
--- ---------------------------------------------------------------------------
 DELETE rp
 FROM rol_permisos rp
 JOIN permisos p ON p.id = rp.permiso_id
@@ -315,17 +263,3 @@ WHERE codigo IN (
     'asientos_contables.gestionar',
     'usuarios_roles.administrar'
 );
-
--- ---------------------------------------------------------------------------
--- 6) Cuenta heredada de 000006 (version anterior): si en algun ambiente ya se
---    aplico esa migracion, existe un usuario admin con una contrasena temporal
---    conocida. Se deshabilita solo si sigue sin cambio de contrasena, que es la
---    senal de que nadie la reemplazo. El administrador real se crea con
---    cmd/seedadmin (con otro nombre de usuario, porque admin queda ocupado).
--- ---------------------------------------------------------------------------
-UPDATE usuarios
-SET activo = 0
-WHERE nombre_usuario = 'admin'
-  AND correo = 'admin@ccdrliberia.local'
-  AND fecha_ultimo_cambio_password IS NULL
-  AND activo = 1;

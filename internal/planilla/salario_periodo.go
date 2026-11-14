@@ -1,10 +1,3 @@
-// L10 — Salario base del período por días comerciales y vigencias.
-//
-// D15 (SUPUESTO A VALIDAR con RR. HH.): el mes cuenta `divisor` días
-// (DIVISOR_DIAS_MES). Un día del mes vale min(día, divisor); el ÚLTIMO día del
-// mes vale `divisor` (así febrero completo = mes completo y el 31 no suma).
-// Ejemplos con divisor 30: 1–31 mar = 30; 1–28 feb = 30; 16–31 = 15;
-// 16–28 feb = 15; ingreso el 10 = 21; cese el 20 = 20.
 package planilla
 
 import (
@@ -58,19 +51,24 @@ type VigenciaContrato struct {
 	ContratoID   int64
 	Desde, Hasta time.Time
 	Salario      decimal.Decimal
+	Modalidad    string // contratos.modalidad_salario
+	JornadaID    int64
 }
 
 // SegmentoSalario: parte del período con un mismo contrato y salario.
+// Salario va en la unidad de Modalidad (mes, día u hora).
 type SegmentoSalario struct {
 	Inicio, Fin time.Time
 	Salario     decimal.Decimal
+	Modalidad   string
+	JornadaID   int64
 	ContratoID  int64
 	Dias        int // días comerciales
 }
 
 // SegmentarPeriodo recorta las vigencias a [desde, hasta] y las ordena. Los
 // días sin contrato quedan fuera. Convención del proyecto (CerrarContratoVigente):
-// la versión que se cierra termina el MISMO día en que empieza la nueva; ese
+// la versión que se cierra termina el mismo día en que empieza la nueva; ese
 // día de frontera es de la versión nueva. Cualquier otro solape es error (no
 // se sabe qué salario pagar).
 func SegmentarPeriodo(desde, hasta time.Time, v []VigenciaContrato, divisor int) ([]SegmentoSalario, error) {
@@ -91,7 +89,8 @@ func SegmentarPeriodo(desde, hasta time.Time, v []VigenciaContrato, divisor int)
 		if fin.Before(ini) {
 			continue
 		}
-		segs = append(segs, SegmentoSalario{Inicio: ini, Fin: fin, Salario: x.Salario, ContratoID: x.ContratoID})
+		segs = append(segs, SegmentoSalario{Inicio: ini, Fin: fin, Salario: x.Salario, Modalidad: x.Modalidad,
+			JornadaID: x.JornadaID, ContratoID: x.ContratoID})
 	}
 	sort.SliceStable(segs, func(i, j int) bool { return segs[i].Inicio.Before(segs[j].Inicio) })
 	for i := 1; i < len(segs); i++ {
@@ -99,7 +98,7 @@ func SegmentarPeriodo(desde, hasta time.Time, v []VigenciaContrato, divisor int)
 		switch {
 		case prev.Fin.Before(act.Inicio):
 		case prev.Fin.Equal(act.Inicio) && prev.Inicio.Before(act.Inicio):
-			prev.Fin = act.Inicio.AddDate(0, 0, -1) // día de frontera: gana la versión nueva
+			prev.Fin = act.Inicio.AddDate(0, 0, -1)
 		default:
 			return nil, fmt.Errorf("planilla: los contratos %d y %d se solapan entre %s y %s",
 				prev.ContratoID, act.ContratoID, act.Inicio.Format("2006-01-02"), prev.Fin.Format("2006-01-02"))

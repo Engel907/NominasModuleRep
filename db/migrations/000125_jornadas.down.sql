@@ -1,4 +1,3 @@
--- Revierte 000125: auditorías de contratos (000124) y turnos (000000) sin jornada_id.
 DROP TRIGGER trg_contratos_catalogos_bi;
 DROP TRIGGER IF EXISTS trg_aud_contratos_ins;
 CREATE TRIGGER trg_aud_contratos_ins AFTER INSERT ON contratos

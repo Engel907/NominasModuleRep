@@ -1,65 +1,3 @@
-// internal/db/dto/empleados.go
-//
-// Fase 3B — RRHH: empleados y sus 4 infotypes con vigencia (datos
-// personales, laborales, bancarios, familiares).
-//
-// NOTA DE MIGRACIÓN IMPORTANTE — leer antes de tocar este archivo:
-// db/queries/empleados_puestos.sql y los DTOs originales de
-// internal/services/empleado_service.go se escribieron contra un esquema
-// SUPUESTO para `empleados` y sus infotypes que no coincide con las tablas
-// reales de db/schema.sql. Se corrigió contra el schema real; diferencias
-// puntuales:
-//
-//  1. `empleados` (tabla base, NO versionada) tiene codigo_interno,
-//     tipo_identificacion_id (FK), numero_identificacion, nombre_completo,
-//     fecha_ingreso, activo, created_at, updated_at. NO tiene
-//     `numero_empleado` (se usa codigo_interno). nombre_completo y
-//     fecha_ingreso viven AQUÍ, no en los infotypes versionados — un
-//     empleado no cambia de nombre ni de fecha de ingreso con el patrón de
-//     vigencia, así que CrearEmpleadoRequest los sube a nivel raíz en
-//     internal/services/empleado_service.go (antes estaban, sin lugar
-//     donde persistirlos, dentro de DatosPersonalesInput/DatosLaboralesInput).
-//
-//  2. `empleado_datos_personales` (vigencia) SOLO tiene direccion, telefono,
-//     correo_electronico — NO tiene cedula, nombre_completo,
-//     fecha_nacimiento, genero, estado_civil ni nacionalidad (no existen en
-//     ninguna tabla del esquema actual). Esos campos se quitaron de
-//     DatosPersonalesInput. Tampoco tiene columna `creado_por` (la
-//     auditoría de esta tabla es solo vía trigger genérico +
-//     db.WithAuditContext, no una columna de negocio explícita).
-//
-//  3. `empleado_datos_laborales` (vigencia) tiene puesto_id,
-//     salario_base_nominal, tipo_contrato_id (FK a tipos_contrato, NO un
-//     string libre), programa_presupuestario_id, sindicato_id (FK
-//     opcional). NO tiene unidad_organizativa_id (ya se deriva de
-//     puesto_id → puestos.unidad_organizativa_id, no se duplica), NO tiene
-//     jornada, NO tiene fecha_ingreso (vive en `empleados`, ver punto 1), y
-//     tampoco tiene `creado_por`.
-//
-//  4. `empleado_datos_bancarios` (vigencia) tiene banco_id (FK a bancos, no
-//     un nombre de banco libre) y tipo_cuenta ENUM('corriente','ahorros').
-//     NO tiene numero_iban ni `creado_por`.
-//
-//  5. `empleado_datos_familiares` (vigencia) — la más distinta: en el
-//     schema real es UNA fila agregada por empleado (aplica_credito_conyuge
-//     bool + numero_hijos_dependientes int), con UNIQUE KEY
-//     uk_edf_una_vigente(empleado_id, es_vigente) que permite como máximo
-//     UNA fila vigente por empleado. NO es una lista de familiares con
-//     nombre propio (nombre_familiar/parentesco/fecha_nacimiento no
-//     existen en esta tabla). DatosFamiliarInput se ajustó en
-//     internal/services/empleado_service.go a
-//     (AplicaCreditoConyuge, NumeroHijosDependientes). Como consecuencia,
-//     AgregarFamiliar YA NO puede solo insertar (el comentario original
-//     asumía "puede haber N vigentes simultáneos", que es falso contra
-//     este schema y violaría uk_edf_una_vigente en el segundo alta) —
-//     ahora cierra la vigente anterior antes de abrir la nueva, igual que
-//     el resto de infotypes.
-//
-// IDs: todos los IDs y FKs de este archivo son int64 (decisión D1, Fase 02),
-// igual que security.go, contratos.go y organizacion.go. Las columnas
-// siguen siendo BIGINT UNSIGNED en la BD; database/sql convierte al hacer
-// Scan. Los contadores (p. ej. numero_hijos_dependientes) no son IDs y
-// conservan su tipo.
 package dto
 
 import (
@@ -70,15 +8,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ============================================================================
-// EMPLEADOS (tabla base, NO versionada)
-// ============================================================================
-
 type Empleado struct {
 	ID                   int64
 	CodigoInterno        string
 	TipoIdentificacionID int64
-	NumeroIdentificacion string
 	NombreCompleto       string
 	FechaIngreso         time.Time
 	Activo               bool
@@ -86,23 +19,24 @@ type Empleado struct {
 	UpdatedAt            time.Time
 }
 
-const columnasEmpleado = `id, codigo_interno, tipo_identificacion_id, numero_identificacion,
+const columnasEmpleado = `id, codigo_interno, tipo_identificacion_id,
        nombre_completo, fecha_ingreso, activo, created_at, updated_at`
 
 func scanEmpleado(row *sql.Row) (Empleado, error) {
 	var e Empleado
 	err := row.Scan(
-		&e.ID, &e.CodigoInterno, &e.TipoIdentificacionID, &e.NumeroIdentificacion,
+		&e.ID, &e.CodigoInterno, &e.TipoIdentificacionID,
 		&e.NombreCompleto, &e.FechaIngreso, &e.Activo, &e.CreatedAt, &e.UpdatedAt,
 	)
 	return e, err
 }
 
-func (q *Queries) CreateEmpleado(ctx context.Context, codigoInterno string, tipoIdentificacionID int64, numeroIdentificacion, nombreCompleto string, fechaIngreso time.Time) (int64, error) {
+func (q *Queries) CreateEmpleado(ctx context.Context, codigoInterno string, tipoIdentificacionID int64, identificacion ValorCifrado, nombreCompleto string, fechaIngreso time.Time) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
-INSERT INTO empleados (codigo_interno, tipo_identificacion_id, numero_identificacion, nombre_completo, fecha_ingreso, activo, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW())`,
-		codigoInterno, tipoIdentificacionID, numeroIdentificacion, nombreCompleto, fechaIngreso)
+INSERT INTO empleados (codigo_interno, tipo_identificacion_id, numero_identificacion_cifrado, numero_identificacion_hash,
+    numero_identificacion_kid, nombre_completo, fecha_ingreso, activo, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())`,
+		codigoInterno, tipoIdentificacionID, identificacion.Cifrado, identificacion.Hash, identificacion.Kid, nombreCompleto, fechaIngreso)
 	if err != nil {
 		return 0, err
 	}
@@ -115,7 +49,7 @@ func (q *Queries) GetEmpleadoByID(ctx context.Context, id int64) (Empleado, erro
 }
 
 // GetEmpleadoByIDForUpdate toma un lock de fila (SELECT ... FOR UPDATE) sobre el
-// empleado. F03: se usa al inicio de toda escritura versionada (cerrar+abrir) de
+// empleado. se usa al inicio de toda escritura versionada (cerrar+abrir) de
 // un empleado para serializar escrituras concurrentes sobre el mismo empleado y
 // para validar que exista. Solo tiene sentido dentro de una transacción
 // (db.WithAuditContext).
@@ -124,8 +58,7 @@ func (q *Queries) GetEmpleadoByIDForUpdate(ctx context.Context, id int64) (Emple
 	return scanEmpleado(row)
 }
 
-// GetEmpleadoByCodigoInterno — equivalente a GetEmpleadoByNumero de la query
-// original, renombrado porque la columna real es codigo_interno.
+// GetEmpleadoByCodigoInterno busca un empleado por su código interno.
 func (q *Queries) GetEmpleadoByCodigoInterno(ctx context.Context, codigoInterno string) (Empleado, error) {
 	row := q.db.QueryRowContext(ctx, `SELECT `+columnasEmpleado+` FROM empleados WHERE codigo_interno = ? LIMIT 1`, codigoInterno)
 	return scanEmpleado(row)
@@ -136,7 +69,9 @@ func (q *Queries) SetEmpleadoActivo(ctx context.Context, id int64, activo bool) 
 	return err
 }
 
-func (q *Queries) ListEmpleados(ctx context.Context, activo *bool, codigoInterno *string, limit, offset int32) ([]Empleado, error) {
+// sinRegimenCCSS = true: solo empleados cuya versión vigente de datos
+// laborales no tiene regimen_ccss_id (o que no tienen versión vigente).
+func (q *Queries) ListEmpleados(ctx context.Context, activo *bool, codigoInterno *string, sinRegimenCCSS bool, limit, offset int32) ([]Empleado, error) {
 	var activoArg, codigoArg interface{}
 	if activo != nil {
 		activoArg = *activo
@@ -149,8 +84,11 @@ SELECT `+columnasEmpleado+`
 FROM empleados
 WHERE (? IS NULL OR activo = ?)
   AND (? IS NULL OR codigo_interno LIKE CONCAT('%', ?, '%'))
+  AND (? = 0 OR NOT EXISTS (
+        SELECT 1 FROM empleado_datos_laborales edl
+         WHERE edl.empleado_id = empleados.id AND edl.es_vigente = 1 AND edl.regimen_ccss_id IS NOT NULL))
 ORDER BY id DESC
-LIMIT ? OFFSET ?`, activoArg, activoArg, codigoArg, codigoArg, limit, offset)
+LIMIT ? OFFSET ?`, activoArg, activoArg, codigoArg, codigoArg, sinRegimenCCSS, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +97,7 @@ LIMIT ? OFFSET ?`, activoArg, activoArg, codigoArg, codigoArg, limit, offset)
 	var out []Empleado
 	for rows.Next() {
 		var e Empleado
-		if err := rows.Scan(&e.ID, &e.CodigoInterno, &e.TipoIdentificacionID, &e.NumeroIdentificacion,
+		if err := rows.Scan(&e.ID, &e.CodigoInterno, &e.TipoIdentificacionID,
 			&e.NombreCompleto, &e.FechaIngreso, &e.Activo, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -168,7 +106,7 @@ LIMIT ? OFFSET ?`, activoArg, activoArg, codigoArg, codigoArg, limit, offset)
 	return out, rows.Err()
 }
 
-func (q *Queries) CountEmpleados(ctx context.Context, activo *bool, codigoInterno *string) (int64, error) {
+func (q *Queries) CountEmpleados(ctx context.Context, activo *bool, codigoInterno *string, sinRegimenCCSS bool) (int64, error) {
 	var activoArg, codigoArg interface{}
 	if activo != nil {
 		activoArg = *activo
@@ -180,39 +118,30 @@ func (q *Queries) CountEmpleados(ctx context.Context, activo *bool, codigoIntern
 SELECT COUNT(*)
 FROM empleados
 WHERE (? IS NULL OR activo = ?)
-  AND (? IS NULL OR codigo_interno LIKE CONCAT('%', ?, '%'))`, activoArg, activoArg, codigoArg, codigoArg)
+  AND (? IS NULL OR codigo_interno LIKE CONCAT('%', ?, '%'))
+  AND (? = 0 OR NOT EXISTS (
+        SELECT 1 FROM empleado_datos_laborales edl
+         WHERE edl.empleado_id = empleados.id AND edl.es_vigente = 1 AND edl.regimen_ccss_id IS NOT NULL))`, activoArg, activoArg, codigoArg, codigoArg, sinRegimenCCSS)
 	var total int64
 	err := row.Scan(&total)
 	return total, err
 }
 
-// ============================================================================
-// EMPLEADO_DATOS_PERSONALES (vigencia — único vigente por empleado_id)
-// Solo direccion/telefono/correo_electronico — ver NOTA DE MIGRACIÓN punto 2.
-// ============================================================================
-
 type EmpleadoDatosPersonales struct {
 	ID                  int64
 	EmpleadoID          int64
-	Direccion           sql.NullString
-	Telefono            sql.NullString
-	CorreoElectronico   sql.NullString
 	FechaInicioVigencia time.Time
 	FechaFinVigencia    sql.NullTime
 }
 
-func nullStr(s string) sql.NullString {
-	return sql.NullString{String: s, Valid: s != ""}
-}
-
 func (q *Queries) GetDatosPersonalesVigente(ctx context.Context, empleadoID int64) (EmpleadoDatosPersonales, error) {
 	row := q.db.QueryRowContext(ctx, `
-SELECT id, empleado_id, direccion, telefono, correo_electronico, fecha_inicio_vigencia, fecha_fin_vigencia
+SELECT id, empleado_id, fecha_inicio_vigencia, fecha_fin_vigencia
 FROM empleado_datos_personales
 WHERE empleado_id = ? AND es_vigente = 1
 LIMIT 1`, empleadoID)
 	var d EmpleadoDatosPersonales
-	err := row.Scan(&d.ID, &d.EmpleadoID, &d.Direccion, &d.Telefono, &d.CorreoElectronico, &d.FechaInicioVigencia, &d.FechaFinVigencia)
+	err := row.Scan(&d.ID, &d.EmpleadoID, &d.FechaInicioVigencia, &d.FechaFinVigencia)
 	return d, err
 }
 
@@ -224,20 +153,18 @@ WHERE empleado_id = ? AND es_vigente = 1`, fechaFinVigencia, empleadoID)
 	return err
 }
 
-func (q *Queries) CrearVersionDatosPersonales(ctx context.Context, empleadoID int64, direccion, telefono, correoElectronico string, fechaInicioVigencia time.Time) (int64, error) {
+// CrearVersionDatosPersonales abre la versión; los valores se guardan
+// cifrados con GuardarCifrado en la misma transacción.
+func (q *Queries) CrearVersionDatosPersonales(ctx context.Context, empleadoID int64, fechaInicioVigencia time.Time) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
-INSERT INTO empleado_datos_personales (empleado_id, direccion, telefono, correo_electronico, fecha_inicio_vigencia, fecha_fin_vigencia)
-VALUES (?, ?, ?, ?, ?, NULL)`,
-		empleadoID, nullStr(direccion), nullStr(telefono), nullStr(correoElectronico), fechaInicioVigencia)
+INSERT INTO empleado_datos_personales (empleado_id, fecha_inicio_vigencia, fecha_fin_vigencia)
+VALUES (?, ?, NULL)`,
+		empleadoID, fechaInicioVigencia)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
-
-// ============================================================================
-// EMPLEADO_DATOS_LABORALES (vigencia — único vigente por empleado_id)
-// ============================================================================
 
 type EmpleadoDatosLaborales struct {
 	ID                       int64
@@ -247,19 +174,20 @@ type EmpleadoDatosLaborales struct {
 	TipoContratoID           int64
 	ProgramaPresupuestarioID int64
 	SindicatoID              sql.NullInt64
+	RegimenCCSSID            sql.NullInt64
 	FechaInicioVigencia      time.Time
 	FechaFinVigencia         sql.NullTime
 }
 
 func (q *Queries) GetDatosLaboralesVigente(ctx context.Context, empleadoID int64) (EmpleadoDatosLaborales, error) {
 	row := q.db.QueryRowContext(ctx, `
-SELECT id, empleado_id, puesto_id, salario_base_nominal, tipo_contrato_id, programa_presupuestario_id, sindicato_id, fecha_inicio_vigencia, fecha_fin_vigencia
+SELECT id, empleado_id, puesto_id, salario_base_nominal, tipo_contrato_id, programa_presupuestario_id, sindicato_id, regimen_ccss_id, fecha_inicio_vigencia, fecha_fin_vigencia
 FROM empleado_datos_laborales
 WHERE empleado_id = ? AND es_vigente = 1
 LIMIT 1`, empleadoID)
 	var d EmpleadoDatosLaborales
 	err := row.Scan(&d.ID, &d.EmpleadoID, &d.PuestoID, &d.SalarioBaseNominal, &d.TipoContratoID,
-		&d.ProgramaPresupuestarioID, &d.SindicatoID, &d.FechaInicioVigencia, &d.FechaFinVigencia)
+		&d.ProgramaPresupuestarioID, &d.SindicatoID, &d.RegimenCCSSID, &d.FechaInicioVigencia, &d.FechaFinVigencia)
 	return d, err
 }
 
@@ -271,39 +199,34 @@ WHERE empleado_id = ? AND es_vigente = 1`, fechaFinVigencia, empleadoID)
 	return err
 }
 
-func (q *Queries) CrearVersionDatosLaborales(ctx context.Context, empleadoID, puestoID int64, salarioBaseNominal decimal.Decimal, tipoContratoID, programaPresupuestarioID int64, sindicatoID *int64, fechaInicioVigencia time.Time) (int64, error) {
+func (q *Queries) CrearVersionDatosLaborales(ctx context.Context, empleadoID, puestoID int64, salarioBaseNominal decimal.Decimal, tipoContratoID, programaPresupuestarioID int64, sindicatoID, regimenCCSSID *int64, fechaInicioVigencia time.Time) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
-INSERT INTO empleado_datos_laborales (empleado_id, puesto_id, salario_base_nominal, tipo_contrato_id, programa_presupuestario_id, sindicato_id, fecha_inicio_vigencia, fecha_fin_vigencia)
-VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-		empleadoID, puestoID, salarioBaseNominal, tipoContratoID, programaPresupuestarioID, nullInt64FromPtr(sindicatoID), fechaInicioVigencia)
+INSERT INTO empleado_datos_laborales (empleado_id, puesto_id, salario_base_nominal, tipo_contrato_id, programa_presupuestario_id, sindicato_id, regimen_ccss_id, fecha_inicio_vigencia, fecha_fin_vigencia)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+		empleadoID, puestoID, salarioBaseNominal, tipoContratoID, programaPresupuestarioID, nullInt64FromPtr(sindicatoID), nullInt64FromPtr(regimenCCSSID), fechaInicioVigencia)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-// ============================================================================
-// EMPLEADO_DATOS_BANCARIOS (vigencia — único vigente por empleado_id)
-// ============================================================================
-
 type EmpleadoDatosBancarios struct {
 	ID                  int64
 	EmpleadoID          int64
 	BancoID             int64
 	TipoCuenta          string
-	NumeroCuenta        string
 	FechaInicioVigencia time.Time
 	FechaFinVigencia    sql.NullTime
 }
 
 func (q *Queries) GetDatosBancariosVigente(ctx context.Context, empleadoID int64) (EmpleadoDatosBancarios, error) {
 	row := q.db.QueryRowContext(ctx, `
-SELECT id, empleado_id, banco_id, tipo_cuenta, numero_cuenta, fecha_inicio_vigencia, fecha_fin_vigencia
+SELECT id, empleado_id, banco_id, tipo_cuenta, fecha_inicio_vigencia, fecha_fin_vigencia
 FROM empleado_datos_bancarios
 WHERE empleado_id = ? AND es_vigente = 1
 LIMIT 1`, empleadoID)
 	var d EmpleadoDatosBancarios
-	err := row.Scan(&d.ID, &d.EmpleadoID, &d.BancoID, &d.TipoCuenta, &d.NumeroCuenta, &d.FechaInicioVigencia, &d.FechaFinVigencia)
+	err := row.Scan(&d.ID, &d.EmpleadoID, &d.BancoID, &d.TipoCuenta, &d.FechaInicioVigencia, &d.FechaFinVigencia)
 	return d, err
 }
 
@@ -315,23 +238,17 @@ WHERE empleado_id = ? AND es_vigente = 1`, fechaFinVigencia, empleadoID)
 	return err
 }
 
-func (q *Queries) CrearVersionDatosBancarios(ctx context.Context, empleadoID, bancoID int64, tipoCuenta, numeroCuenta string, fechaInicioVigencia time.Time) (int64, error) {
+func (q *Queries) CrearVersionDatosBancarios(ctx context.Context, empleadoID, bancoID int64, tipoCuenta string, cuenta ValorCifrado, fechaInicioVigencia time.Time) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
-INSERT INTO empleado_datos_bancarios (empleado_id, banco_id, tipo_cuenta, numero_cuenta, fecha_inicio_vigencia, fecha_fin_vigencia)
-VALUES (?, ?, ?, ?, ?, NULL)`,
-		empleadoID, bancoID, tipoCuenta, numeroCuenta, fechaInicioVigencia)
+INSERT INTO empleado_datos_bancarios (empleado_id, banco_id, tipo_cuenta, numero_cuenta_cifrado, numero_cuenta_hash, numero_cuenta_kid,
+    fecha_inicio_vigencia, fecha_fin_vigencia)
+VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+		empleadoID, bancoID, tipoCuenta, cuenta.Cifrado, cuenta.Hash, cuenta.Kid, fechaInicioVigencia)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
-
-// ============================================================================
-// EMPLEADO_DATOS_FAMILIARES (vigencia — UNA fila agregada por empleado, ver
-// NOTA DE MIGRACIÓN punto 5. Se mantiene el nombre en plural
-// "DatosFamiliares" por continuidad con el código existente, aunque
-// representa una sola declaración, no una lista de personas.)
-// ============================================================================
 
 type EmpleadoDatosFamiliare struct {
 	ID                      int64
@@ -389,11 +306,8 @@ WHERE id = ? AND es_vigente = 1`, fechaFinVigencia, id)
 }
 
 // CerrarDatosFamiliarVigentePorEmpleado cierra (si existe) la declaración
-// familiar vigente del empleado. Necesaria para AgregarFamiliar: a
-// diferencia del código original (que solo insertaba, asumiendo que podían
-// convivir N familiares vigentes), el schema real permite como máximo UNA
-// fila vigente por empleado_id (uk_edf_una_vigente) — sin este cierre, un
-// segundo alta para el mismo empleado violaría esa unicidad.
+// familiar vigente del empleado; solo puede haber una vigente por empleado
+// (uk_edf_una_vigente).
 func (q *Queries) CerrarDatosFamiliarVigentePorEmpleado(ctx context.Context, empleadoID int64, fechaFinVigencia time.Time) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE empleado_datos_familiares
@@ -411,4 +325,11 @@ VALUES (?, ?, ?, ?, NULL)`,
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// ExisteRegimenCCSSActivo: el régimen existe en regimenes_ccss y está activo.
+func (q *Queries) ExisteRegimenCCSSActivo(ctx context.Context, id int64) (bool, error) {
+	var n int
+	err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM regimenes_ccss WHERE id = ? AND activo = 1`, id).Scan(&n)
+	return n > 0, err
 }

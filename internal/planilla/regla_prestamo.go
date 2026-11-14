@@ -8,6 +8,7 @@ type reglaPrestamo struct{}
 func (reglaPrestamo) Aplicar(rc *ContextoRegla) error {
 	st := rc.St
 	st.usados[formulaPrestamo] = true
+	st.conceptoPrestamoID = rc.Concepto.ConceptoSalarialID
 	monto := CalcularPrestamos(rc.In.Prestamos)
 	st.res.DeduccionesPrestamos = monto
 	for _, p := range rc.In.Prestamos {

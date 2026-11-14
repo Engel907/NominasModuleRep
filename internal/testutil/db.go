@@ -1,8 +1,4 @@
 // Package testutil agrupa helpers para pruebas de integración.
-//
-// NuevaBD crea una base MySQL temporal (nombre aleatorio), le aplica las
-// migraciones de db/migrations con golang-migrate y la elimina al terminar
-// el test. Requiere TEST_DATABASE_URL; si no está definida, el test se salta.
 package testutil
 
 import (
@@ -28,8 +24,6 @@ import (
 // EnvURL es la variable con el DSN de un servidor MySQL 8 donde el usuario
 // puede CREATE/DROP DATABASE y crear triggers (p. ej. root del docker-compose).
 // Formato go-sql-driver (el prefijo mysql:// es opcional):
-//
-//	root:root_dev@tcp(127.0.0.1:3307)/
 const EnvURL = "TEST_DATABASE_URL"
 
 // RaizRepo sube desde el directorio actual hasta encontrar go.mod.
@@ -53,6 +47,25 @@ func RaizRepo(t testing.TB) string {
 
 // NuevaBD devuelve un *sql.DB conectado a una base temporal ya migrada.
 func NuevaBD(t *testing.T) *sql.DB {
+	t.Helper()
+	db, _ := nuevaBD(t)
+	return db
+}
+
+// NuevaBDConMigrador es NuevaBD más un migrador abierto sobre esa base, para
+// pruebas que suben o bajan versiones.
+func NuevaBDConMigrador(t *testing.T) (*sql.DB, *migrate.Migrate) {
+	t.Helper()
+	db, cfg := nuevaBD(t)
+	m, err := migrador(t, cfg)
+	if err != nil {
+		t.Fatalf("testutil: migrador: %v", err)
+	}
+	t.Cleanup(func() { _, _ = m.Close() })
+	return db, m
+}
+
+func nuevaBD(t *testing.T) (*sql.DB, *mysql.Config) {
 	t.Helper()
 
 	raw := strings.TrimSpace(os.Getenv(EnvURL))
@@ -91,7 +104,7 @@ func NuevaBD(t *testing.T) *sql.DB {
 	if _, err := rand.Read(suf); err != nil {
 		t.Fatalf("testutil: rand: %v", err)
 	}
-	nombre := "ccdr_test_" + hex.EncodeToString(suf)
+	nombre := "planillas_test_" + hex.EncodeToString(suf)
 
 	if _, err := admin.ExecContext(ctx, "CREATE DATABASE `"+nombre+"` CHARACTER SET utf8mb4"); err != nil {
 		_ = admin.Close()
@@ -106,7 +119,6 @@ func NuevaBD(t *testing.T) *sql.DB {
 		_ = admin.Close()
 	})
 
-	// Migraciones con una conexión propia (multiStatements=true).
 	mig := *cfg
 	mig.DBName = nombre
 	mig.MultiStatements = true
@@ -121,13 +133,16 @@ func NuevaBD(t *testing.T) *sql.DB {
 	}
 	sqlDB.SetMaxOpenConns(10)
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := sqlDB.PingContext(ctx); err != nil {
+	// Contexto propio: el de arriba ya consumió el tiempo de las migraciones.
+	ctxPing, cancelPing := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelPing()
+	if err := sqlDB.PingContext(ctxPing); err != nil {
 		t.Fatalf("testutil: ping BD de prueba: %v", err)
 	}
-	return sqlDB
+	return sqlDB, &mig
 }
 
-func migrar(t testing.TB, cfg *mysql.Config) error {
+func migrador(t testing.TB, cfg *mysql.Config) (*migrate.Migrate, error) {
 	ruta := filepath.Join(RaizRepo(t), "db", "migrations")
 	sourceURL := "file://" + filepath.ToSlash(ruta)
 	if volumen := filepath.VolumeName(ruta); volumen != "" {
@@ -140,7 +155,15 @@ func migrar(t testing.TB, cfg *mysql.Config) error {
 	}
 	m, err := migrate.New(sourceURL, "mysql://"+cfg.FormatDSN())
 	if err != nil {
-		return fmt.Errorf("inicializar golang-migrate: %w", err)
+		return nil, fmt.Errorf("inicializar golang-migrate: %w", err)
+	}
+	return m, nil
+}
+
+func migrar(t testing.TB, cfg *mysql.Config) error {
+	m, err := migrador(t, cfg)
+	if err != nil {
+		return err
 	}
 	defer m.Close()
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {

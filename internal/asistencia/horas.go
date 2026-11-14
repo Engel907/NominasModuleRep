@@ -17,7 +17,7 @@ type ResultadoHoras struct {
 	Ordinarias decimal.Decimal
 	// ExcesoJornada: tiempo trabajado por encima de la jornada programada.
 	// Es una CANDIDATA a hora extra: queda pendiente de autorización y de
-	// tipificación (diurna/nocturna/mixta) en F22. Esta fase no decide si se
+	// tipificación (diurna/nocturna/mixta). Esta fase no decide si se
 	// paga ni a qué tarifa. Se persiste en registro_asistencia_detalle.horas_extra.
 	ExcesoJornada decimal.Decimal
 	// Tardanza en horas (2 decimales) y en minutos enteros.

@@ -10,14 +10,15 @@ import (
 
 	"planillas-ccdr/internal/asistencia"
 	"planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/parametros"
 	"planillas-ccdr/internal/testutil"
 )
 
-// L14 de punta a punta: RegistrarAsistencia tipifica el exceso y lo guarda en
+// de punta a punta: RegistrarAsistencia tipifica el exceso y lo guarda en
 // asistencia_hora_extra_tipificada (feriado/descanso → doble; franja nocturna →
 // nocturna; resto → diurna). Sin franja vigente, un día hábil con exceso falla
 // y no se guarda nada.
-func TestL14RegistrarAsistenciaTipificaHorasExtra(t *testing.T) {
+func TestRegistrarAsistenciaTipificaHorasExtra(t *testing.T) {
 	db := testutil.NuevaBD(t)
 	ctx := context.Background()
 	usuario := exec(t, db, `INSERT INTO usuarios (nombre_usuario, nombre_completo, correo, password_hash) VALUES ('tip', 'Tip', 'tip@example.test', 'x')`)
@@ -28,13 +29,13 @@ func TestL14RegistrarAsistenciaTipificaHorasExtra(t *testing.T) {
 	if err := db.QueryRow(`SELECT id FROM regimenes_laborales WHERE codigo='CODIGO_TRABAJO'`).Scan(&regimen); err != nil {
 		t.Fatal(err)
 	}
-	emp := exec(t, db, `INSERT INTO empleados (codigo_interno, tipo_identificacion_id, numero_identificacion, nombre_completo, fecha_ingreso)
-VALUES ('TIP1', ?, 'TIP-0001', 'Empleado tipificación', '2020-01-01')`, tipoIdent)
+	emp := testutil.InsertarEmpleado(t, db, "TIP1", tipoIdent, "TIP-0001", "Empleado tipificación", "2020-01-01")
 	unidad := exec(t, db, `INSERT INTO unidades_organizativas (codigo, nombre) VALUES ('TIP', 'Unidad')`)
 	puesto := exec(t, db, `INSERT INTO puestos (codigo, nombre, unidad_organizativa_id) VALUES ('TIP', 'Puesto', ?)`, unidad)
-	exec(t, db, `INSERT INTO contratos (empleado_id, puesto_id, regimen_laboral_id, tipo_contrato, salario_pactado, jornada,
+	exec(t, db, `INSERT INTO tipos_contrato (codigo, nombre) VALUES ('TIP_IND', 'Indefinido')`)
+	exec(t, db, `INSERT INTO contratos (empleado_id, puesto_id, regimen_laboral_id, tipo_contrato_id, salario_pactado, modalidad_salario, jornada_id,
                        fecha_inicio_contrato, fecha_inicio_vigencia, creado_por)
-VALUES (?, ?, ?, 'INDEFINIDO', 700000, 'DIURNA', '2020-01-01', '2020-01-01', ?)`, emp, puesto, regimen, usuario)
+VALUES (?, ?, ?, (SELECT MIN(id) FROM tipos_contrato), 700000, 'mensual', (SELECT id FROM jornadas WHERE codigo = 'DIURNA'), '2020-01-01', '2020-01-01', ?)`, emp, puesto, regimen, usuario)
 	turno := exec(t, db, `INSERT INTO turnos (codigo, nombre, hora_inicio, hora_fin) VALUES ('T0715', 'Diurno', '07:00:00', '15:00:00')`)
 	exec(t, db, `INSERT INTO empleado_turno (empleado_id, turno_id, fecha_inicio_vigencia) VALUES (?, ?, '2020-01-01')`, emp, turno)
 	for _, d := range []struct {
@@ -45,7 +46,7 @@ VALUES (?, ?, ?, 'INDEFINIDO', 700000, 'DIURNA', '2020-01-01', '2020-01-01', ?)`
 		exec(t, db, `INSERT INTO calendario_laboral_dia (fecha, anio, es_habil, es_feriado, dia_semana) VALUES (?, 2026, ?, ?, ?)`, d.fecha, d.habil, d.feriado, d.dia)
 	}
 
-	svc, err := asistencia.NewService(db, dto.New(db), asistencia.Opciones{})
+	svc, err := asistencia.NewService(db, dto.New(db), parametros.NewGenerales(parametros.NewRepositorioSQL(db), 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,6 @@ WHERE h.empleado_id = ? AND h.fecha = ?`, emp, fecha)
 		return out
 	}
 
-	// Sin franja nocturna vigente: un día hábil con exceso no se registra.
 	if err := registrar("2026-03-10", "07:00", "17:00"); !errors.Is(err, asistencia.ErrFranjaNocturnaNoVigente) {
 		t.Fatalf("sin franja: %v", err)
 	}
@@ -83,7 +83,6 @@ WHERE h.empleado_id = ? AND h.fecha = ?`, emp, fecha)
 	if err := db.QueryRow(`SELECT COUNT(*) FROM registro_asistencia_detalle WHERE empleado_id = ?`, emp).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("el registro fallido no debe guardarse: %d, %v", n, err)
 	}
-	// Feriado y descanso no necesitan franja: todo doble.
 	if err := registrar("2026-03-11", "07:00", "17:00"); err != nil {
 		t.Fatalf("feriado: %v", err)
 	}
@@ -97,17 +96,14 @@ WHERE h.empleado_id = ? AND h.fecha = ?`, emp, fecha)
 		t.Errorf("descanso: %v", got)
 	}
 
-	// Franja de PRUEBA 19:00–05:00 (el valor legal no se siembra).
 	exec(t, db, `INSERT INTO parametros_franja_nocturna (hora_inicio, hora_fin, fuente_legal, fecha_inicio_vigencia, creado_por)
 VALUES ('19:00:00', '05:00:00', 'FIXTURE DE PRUEBA', '2026-01-01', 1)`)
-	// Turno 07–15, sale 20:00: exceso 5 h = 15–19 diurna (4 h) + 19–20 nocturna (1 h).
 	if err := registrar("2026-03-10", "07:00", "20:00"); err != nil {
 		t.Fatalf("día hábil: %v", err)
 	}
 	if got := tipificadas("2026-03-10"); len(got) != 2 || got["diurna"] != "4.00" || got["nocturna"] != "1.00" {
 		t.Errorf("día hábil: %v", got)
 	}
-	// Re-registrar sin exceso borra la tipificación del día.
 	if err := registrar("2026-03-10", "07:00", "15:00"); err != nil {
 		t.Fatal(err)
 	}

@@ -1,34 +1,3 @@
-// api/handlers/routes.go
-//
-// Wiring de rutas de la API bajo el grupo raíz (normalmente
-// router.Group("/api/v1")):
-//
-//   - Autenticación (internal/auth): login, refresh, logout, reset de
-//     contraseña (públicas) y gestión de sesiones/roles (protegidas).
-//   - Empleados / Contratos / Organización.
-//   - Asistencia y Vacaciones (internal/asistencia).
-//   - Préstamos / embargos / terceros (internal/prestamos).
-//   - Liquidaciones laborales.
-//   - Export bancario y boleta de pago (planilla).
-//   - Contabilización (internal/contabilidad): generar y consultar asientos.
-//   - Dashboard gerencial.
-//
-// Regla de middleware (ADR-000 sección 3):
-//
-//   - `publico`   → SIN middleware. Solo endpoints que por definición no
-//     tienen sesión: /auth/login, /auth/refresh, /auth/logout y el reset de
-//     contraseña. Todo lo demás va en `protegido`.
-//   - `protegido` → middleware.AuthPASETO (valida el access token y deja el
-//     *security.Payload en el contexto) y middleware.ExigirCambioPassword
-//     (bloquea todo salvo cambiar contraseña / logout / me mientras rcp=true).
-//   - Cada ruta agrega además middleware.RequirePermission(authz.PermXxx).
-//     Los códigos viven SOLO en internal/authz. Nunca se autoriza por nombre
-//     de rol. El test permisos_coherencia_test.go falla si una ruta protegida
-//     queda sin RequirePermission o exige un código que no está en authz.
-//
-// IMPORTANTE (main.go): middleware.ErrorHandler() debe estar montado
-// globalmente (después de gin.Recovery()), porque Fail/FailFromError solo
-// registran el error en el contexto; ErrorHandler es quien escribe el JSON.
 package handlers
 
 import (
@@ -38,35 +7,44 @@ import (
 	"planillas-ccdr/internal/asistencia"
 	"planillas-ccdr/internal/auth"
 	"planillas-ccdr/internal/authz"
+	"planillas-ccdr/internal/catalogos"
+	"planillas-ccdr/internal/credenciales"
+	"planillas-ccdr/internal/cripto"
 	"planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/observabilidad"
+	"planillas-ccdr/internal/parametros"
 	"planillas-ccdr/internal/planilla"
 	"planillas-ccdr/internal/prestamos"
-	"planillas-ccdr/internal/security"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/rrhh"
 
 	"github.com/gin-gonic/gin"
 )
 
-// Deps agrupa los servicios ya construidos de los módulos que no se arman
-// dentro de este archivo (dependen de sqlc, config de TTLs, hashing, etc.).
-// Se construyen en cmd/api/main.go (buildDeps) y se pasan acá; así routes.go
-// no tiene que adivinar los constructores de cada módulo.
+// Deps agrupa los servicios ya construidos que las rutas necesitan.
 type Deps struct {
 	Auth             *auth.Servicio
 	Asistencia       *asistencia.Service
 	Vacaciones       *asistencia.VacacionesService
 	HorasExtra       *asistencia.HorasExtraService
 	Prestamos        *prestamos.Service
-	Liquidacion      *services.LiquidacionService
-	Dashboard        *services.DashboardService
+	Liquidacion      *rrhh.LiquidacionService
+	Dashboard        *rrhh.DashboardService
 	PlanillaExport   *planilla.ExportService
 	PlanillaPeriodo  *planilla.PeriodoService
 	PlanillaDevengos *planilla.DevengosService
 	Contabilidad     *ContabilidadDeps
 
-	// Acumulados está construido pero aún sin rutas: lo reemplaza L19.
-	Acumulados *planilla.AcumuladosService
-	// F16 (S8): rate limiting. app.New los arma desde la config. Si un test arma
+	// Acumulados: POST /aguinaldo/:anio/ejecutar y /salario-escolar/:anio/ejecutar.
+	Acumulados *planilla.EjecutorAcumulados
+	// /parametros (propuesta y aprobación de parámetros legales).
+	Parametros *parametros.Propuestas
+	Catalogos  *catalogos.Service
+	// Ley 8968: llavero de cifrado de datos personales.
+	Llavero *cripto.Llavero
+	// /readyz (parámetros requeridos) y métricas Prometheus.
+	Generales *parametros.Generales
+	Metricas  *observabilidad.Metricas
+	// rate limiting. app.New los arma desde la config. Si un test arma
 	// Deps a mano y los deja nil, simplemente no se limita (en producción
 	// siempre los provee app.New).
 	//   LimiteAuth    -> grupo `publico` (login/refresh/logout/reset), por IP+ruta.
@@ -76,77 +54,54 @@ type Deps struct {
 }
 
 // RegisterRoutes monta todos los endpoints de la API.
-func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.TokenMaker, sesiones middleware.SesionVerificador, deps Deps) {
+func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker credenciales.TokenMaker, sesiones middleware.SesionVerificador, deps Deps) {
 	queries := dto.New(sqlDB)
-	// Grupo sin autenticación (solo endpoints públicos de auth).
 	publico := rg.Group("")
-	// F16/S8: el grupo `publico` contiene SOLO endpoints de auth sin sesión, que
-	// son el blanco de fuerza bruta/enumeración: límite por IP (y ruta).
 	if deps.LimiteAuth != nil {
 		publico.Use(deps.LimiteAuth)
 	}
 
-	// Grupo con sesión obligatoria.
 	protegido := rg.Group("")
 	protegido.Use(middleware.AuthPASETO(tokenMaker, sesiones))
-	// F14: mientras el token lleve rcp=true (contraseña temporal sin cambiar),
-	// toda ruta protegida responde 403 "cambio_password_requerido" salvo
-	// /auth/password/cambiar, /auth/logout y /auth/me. Va DESPUÉS de AuthPASETO
-	// (necesita el payload) y ANTES de cualquier ruta.
 	protegido.Use(middleware.ExigirCambioPassword())
 
-	// F16/S8: límite general por usuario autenticado (necesita el payload, por
-	// eso va después de AuthPASETO).
 	if deps.LimiteUsuario != nil {
 		protegido.Use(deps.LimiteUsuario)
 	}
 
-	// --- Auth ------------------------------------------------------------
 	NuevoAuthHandler(deps.Auth).RegistrarRutas(publico, protegido)
 	NewUsuariosHandler(deps.Auth).RegisterRoutes(protegido)
 	NewAuditoriaHandler(queries).RegisterRoutes(protegido)
 
-	// --- Empleados / Contratos / Organización ----------------------------
-	empleadoService := services.NewEmpleadoService(sqlDB)
-	contratoService := services.NewContratoService(sqlDB)
-	clasificacionService := services.NewClasificacionPuestoService(sqlDB)
-	programaService := services.NewProgramaPresupuestarioService(sqlDB)
-	unidadService := services.NewUnidadOrganizativaService(sqlDB)
-	puestoService := services.NewPuestoService(sqlDB)
+	empleadoService := rrhh.NewEmpleadoService(sqlDB, deps.Llavero)
+	contratoService := rrhh.NewContratoService(sqlDB)
+	clasificacionService := rrhh.NewClasificacionPuestoService(sqlDB)
+	programaService := rrhh.NewProgramaPresupuestarioService(sqlDB)
+	unidadService := rrhh.NewUnidadOrganizativaService(sqlDB)
+	puestoService := rrhh.NewPuestoService(sqlDB)
 
 	NewEmpleadoHandler(empleadoService).RegisterRoutes(protegido)
-	// Contratos: cada ruta ya lleva su RequirePermission (authz.PermContratos*)
-	// dentro de ContratoHandler.RegisterRoutes (crear/leer/actualizar).
+	NewAsignacionesHandler(rrhh.NewAsignacionesService(sqlDB)).RegisterRoutes(protegido)
+	NewHistoricoSalariosHandler(rrhh.NewHistoricoSalariosService(sqlDB)).RegisterRoutes(protegido)
 	NewContratoHandler(contratoService).RegisterRoutes(protegido)
 	NewOrganizacionHandler(clasificacionService, programaService, unidadService, puestoService).RegisterRoutes(protegido)
 
-	// --- Asistencia ------------------------------------------------------
-	// Rutas: /turnos, /calendario, /asistencia, /incapacidades.
-	// Pendiente: PUT /turnos/:id responde 501 (DTO de actualización sin
-	// definir en handler.actualizarTurno).
+	if deps.Catalogos != nil {
+		NewCatalogosHandler(deps.Catalogos).RegisterRoutes(protegido)
+	}
+	if deps.Parametros != nil {
+		NewParametrosHandler(deps.Parametros).RegisterRoutes(protegido)
+	}
+
 	asistencia.NewHandler(deps.Asistencia).RegisterRoutes(protegido)
-	// L13: /horas-extra (autorización previa).
 	if deps.HorasExtra != nil {
 		asistencia.NewHorasExtraHandler(deps.HorasExtra).RegisterRoutes(protegido)
 	}
 
-	// --- Vacaciones ------------------------------------------------------
-	// Rutas: /vacaciones/solicitudes (POST), /vacaciones/solicitudes/:id/
-	// {aprobar,rechazar,disfrute} (POST) y /vacaciones/empleados/:empleado_id/
-	// saldo (GET). Cada ruta aplica su RequirePermission dentro de
-	// VacacionesHandler.RegisterRoutes (authz.PermVacacionesSolicitar / Aprobar /
-	// RegistrarDisfrute / Ver).
 	asistencia.NewVacacionesHandler(deps.Vacaciones, queries).RegisterRoutes(protegido)
 
-	// --- Préstamos / embargos / terceros ---------------------------------
 	prestamos.RegisterRoutes(protegido, prestamos.NewHandler(deps.Prestamos))
 
-	// --- Liquidaciones ---------------------------------------------------
-	// No se usa LiquidacionHandler.RegisterRoutes: registra las dos rutas
-	// sin permisos. Acá se montan los mismos métodos con permiso propio por
-	// ruta, porque proyectar (simulación, no altera estado) y procesar
-	// (persiste, cierra contrato y desactiva el expediente) no deben
-	// compartir permiso.
 	liquidacionHandler := NewLiquidacionHandler(deps.Liquidacion)
 	liquidaciones := protegido.Group("/empleados")
 	{
@@ -156,9 +111,6 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 			middleware.RequirePermission(authz.PermLiquidacionesProcesar), liquidacionHandler.Procesar)
 	}
 
-	// --- Export bancario y boleta ----------------------------------------
-	// Permisos según el comentario de PlanillaExportHandler. No se usa su
-	// RegisterRoutes porque no aplica RequirePermission.
 	exportHandler := NewPlanillaExportHandler(deps.PlanillaExport, queries)
 	planillas := protegido.Group("/planillas")
 	{
@@ -166,25 +118,40 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker security.Toke
 			middleware.RequirePermission(authz.PermPlanillaExportarBancario), exportHandler.ExportarDispersionBancaria)
 		planillas.GET("/:id/boleta/:empleado_id",
 			middleware.RequireAnyPermission(authz.PermPlanillaVerBoleta, authz.PermPlanillaVerBoletaPropia), exportHandler.ObtenerBoletaPago)
+		planillas.GET("/:id/boleta/:empleado_id/pdf",
+			middleware.RequireAnyPermission(authz.PermPlanillaVerBoleta, authz.PermPlanillaVerBoletaPropia), exportHandler.ObtenerBoletaPagoPDF)
+		reportesOficiales := planilla.NewReportesService(sqlDB, descifrador(deps.Llavero))
+		reportes := NewReportesHandler(reportesOficiales)
+		NewReportesGestionHandler(planilla.NewReportesGestionService(sqlDB), reportesOficiales).RegisterRoutes(protegido)
+		planillas.GET("/:id/reportes/ccss", middleware.RequirePermission(authz.PermReportesCcss), reportes.generar(planilla.ReporteCCSS))
+		planillas.GET("/:id/reportes/ins", middleware.RequirePermission(authz.PermReportesIns), reportes.generar(planilla.ReporteINS))
+		planillas.GET("/:id/reportes/hacienda", middleware.RequirePermission(authz.PermReportesHacienda), reportes.generar(planilla.ReporteHacienda))
 		NewPlanillaPeriodoHandler(deps.PlanillaPeriodo).RegisterRoutes(planillas)
 		if deps.PlanillaDevengos != nil {
 			NewPlanillaDevengosHandler(deps.PlanillaDevengos).RegisterRoutes(planillas)
 		}
 	}
 
-	// --- Contabilidad ----------------------------------------------------
-	// Generar (escribe: asientos + período a 'contabilizada') y ver (solo
-	// lectura) llevan permisos distintos por segregación de funciones.
+	if deps.Acumulados != nil {
+		NewAcumuladosHandler(deps.Acumulados).RegisterRoutes(protegido)
+	}
+
 	contabilidadHandler := NewContabilidadHandler(*deps.Contabilidad)
 	protegido.POST("/planillas/:id/contabilizar",
 		middleware.RequirePermission(authz.PermAsientosContablesGenerar), contabilidadHandler.Generar)
 	protegido.GET("/asientos-contables",
 		middleware.RequirePermission(authz.PermAsientosContablesVer), contabilidadHandler.Listar)
 
-	// --- Dashboard -------------------------------------------------------
-	// GET /health (público) se monta en main.go a nivel raíz, fuera de
-	// /api/v1, para que los probes no pasen por AuthPASETO.
 	dashboardHandler := NewDashboardHandler(deps.Dashboard)
 	protegido.GET("/dashboard/metricas",
 		middleware.RequirePermission(authz.PermDashboardVer), dashboardHandler.GetMetricas)
+}
+
+// descifrador evita pasar un *cripto.Llavero nil envuelto en una interfaz
+// no nil.
+func descifrador(l *cripto.Llavero) planilla.Descifrador {
+	if l == nil {
+		return nil
+	}
+	return l
 }

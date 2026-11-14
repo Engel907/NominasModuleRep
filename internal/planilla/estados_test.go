@@ -28,7 +28,7 @@ func TestConjuntos(t *testing.T) {
 	if got := EstadosCerrados(); !reflect.DeepEqual(got, []EstadoPeriodo{"pagada", "contabilizada"}) {
 		t.Errorf("cerrados = %v", got)
 	}
-	EstadosCerrados()[0] = "x" // mutar la copia no afecta llamadas futuras
+	EstadosCerrados()[0] = "x"
 	if EstadosCerrados()[0] != EstadoPagada {
 		t.Error("los conjuntos no deben compartir estado")
 	}

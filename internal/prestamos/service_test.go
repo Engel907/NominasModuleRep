@@ -12,7 +12,7 @@ import (
 func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
 func i32(n int32) *int32         { return &n }
 
-// Las validaciones de coherencia corren ANTES de abrir la transacción, así
+// Las validaciones de coherencia corren antes de abrir la transacción, así
 // que se prueban sin base de datos (dbConn nil nunca se toca).
 func TestCrearPrestamo_ValidacionesPrevias(t *testing.T) {
 	s := &Service{}
@@ -51,15 +51,11 @@ func TestCrearPrestamo_ValidacionesPrevias(t *testing.T) {
 }
 
 func TestCuotasTolerancia(t *testing.T) {
-	// 100000 / 30000 = 3.33 -> ceil 4; 3, 4 y 5 dentro de ±1; 2 y 6 fuera.
 	s := &Service{}
 	for n, ok := range map[int32]bool{2: false, 3: true, 4: true, 5: true, 6: false} {
 		_, err := s.CrearPrestamo(context.Background(), 0, CrearPrestamoInput{
 			MontoTotal: d("100000"), CuotaPeriodica: d("30000"), CuotasTotales: i32(n),
 		})
-		// Con userID 0 las que pasan la validación previa fallan después en
-		// WithAuditContext (ErrNilUserID); lo que importa es NO recibir
-		// ErrCuotasIncoherentes cuando el número está dentro de tolerancia.
 		got := errors.Is(err, ErrCuotasIncoherentes)
 		if got == ok {
 			t.Fatalf("cuotas=%d: incoherente=%v, esperado %v", n, got, !ok)

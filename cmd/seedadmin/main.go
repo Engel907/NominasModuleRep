@@ -1,25 +1,4 @@
 // Command seedadmin crea el usuario administrador inicial del sistema.
-//
-// Reemplaza al usuario con contraseña conocida que sembraba la migración 000006
-// (F12). La lógica vive en internal/seedadmin (reutilizada por las pruebas de
-// integración, F13). Garantías:
-//   - la contraseña es ALEATORIA (crypto/rand, 24 caracteres) y se imprime UNA
-//     sola vez por stdout; no se escribe en ningún archivo ni log;
-//   - se guarda solo su hash argon2id (security.HashPassword);
-//   - el usuario queda con requiere_cambio_password=1 y el rol
-//     ADMINISTRADOR_SISTEMA;
-//   - es idempotente: si ya existe un administrador activo, se niega.
-//
-// Uso:
-//
-//	go run ./cmd/seedadmin -usuario jperez -correo jperez@ejemplo.cr
-//
-// También se aceptan SEEDADMIN_USUARIO, SEEDADMIN_CORREO y SEEDADMIN_NOMBRE.
-// La conexión sale de config.LoadConfig() (mismas variables DB_* y .env que la
-// API; también exige las variables PASETO_*).
-//
-// Salida: stdout contiene SOLO la contraseña (se puede capturar con $(...));
-// los mensajes para la persona van a stderr.
 package main
 
 import (
@@ -37,7 +16,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"planillas-ccdr/internal/config"
-	"planillas-ccdr/internal/security"
+	"planillas-ccdr/internal/credenciales"
 	"planillas-ccdr/internal/seedadmin"
 )
 
@@ -68,7 +47,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("generar contraseña: %w", err)
 	}
-	hash, err := security.HashPassword(password)
+	hash, err := credenciales.HashPassword(password)
 	if err != nil {
 		return fmt.Errorf("calcular hash de la contraseña: %w", err)
 	}
@@ -89,7 +68,6 @@ func run() error {
 		return err
 	}
 
-	// Solo después del COMMIT: si algo falló arriba, no se imprime nada.
 	fmt.Fprintf(os.Stderr, "Administrador %q creado con el rol %s. Debe cambiar la contraseña en el primer inicio de sesión.\n", *usuario, seedadmin.RolAdministrador)
 	fmt.Fprintln(os.Stderr, "Contraseña temporal (se muestra UNA sola vez, no se guarda en ningún lado):")
 	fmt.Println(password)

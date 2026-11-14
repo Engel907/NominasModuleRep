@@ -11,15 +11,6 @@ import (
 	"planillas-ccdr/internal/db/dto"
 )
 
-// Wiring (main.go / buildDeps):
-//
-//	contabilidad.NewRepositorio(sqlDB)
-//
-// Toda escritura pasa por db.WithAuditContext: fija @auditoria_usuario_id para
-// los triggers trg_aud_*, abre la transacción, hace commit/rollback y limpia la
-// variable de sesión antes de devolver la conexión al pool. Este paquete no
-// abre transacciones por su cuenta.
-
 type repositorio struct{ sqlDB *sql.DB }
 
 func NewRepositorio(sqlDB *sql.DB) Repositorio { return &repositorio{sqlDB: sqlDB} }
@@ -40,11 +31,11 @@ func (t *repoTx) ObtenerPeriodoParaContabilizar(ctx context.Context, periodoID i
 		}
 		return PeriodoContable{}, err
 	}
-	return PeriodoContable{ID: x.ID, FechaFin: x.FechaFin, Estado: x.Estado}, nil
+	return PeriodoContable{ID: x.ID, FechaFin: x.FechaFin, Estado: x.Estado, PagadoPorUsuarioID: x.PagadoPorUsuarioID}, nil
 }
 
-func (t *repoTx) ContarAsientosDelPeriodo(ctx context.Context, periodoID int64) (int64, error) {
-	return t.q.ContarAsientosDelPeriodo(ctx, periodoID)
+func (t *repoTx) ContarAsientosDelPeriodo(ctx context.Context, periodoID int64, excluirTipoCodigo string) (int64, error) {
+	return t.q.ContarAsientosDelPeriodo(ctx, periodoID, excluirTipoCodigo)
 }
 
 func (t *repoTx) ListarMapeosVigentesEnFecha(ctx context.Context, fecha time.Time) ([]MapeoConceptoCuenta, error) {
@@ -86,6 +77,6 @@ func (t *repoTx) GuardarAsiento(ctx context.Context, a AsientoContable) (int64, 
 	return id, nil
 }
 
-func (t *repoTx) MarcarPeriodoContabilizado(ctx context.Context, periodoID int64, estadoActual string) error {
-	return t.q.MarcarPeriodoContabilizado(ctx, periodoID, estadoActual)
+func (t *repoTx) MarcarPeriodoContabilizado(ctx context.Context, periodoID int64, estadoActual string, usuarioID int64) error {
+	return t.q.MarcarPeriodoContabilizado(ctx, periodoID, estadoActual, usuarioID)
 }

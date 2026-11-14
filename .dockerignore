@@ -1,0 +1,12 @@
+.git
+.github
+.claude
+.vscode
+.env
+*.env
+docs
+scripts
+README.md
+Makefile
+docker-compose.yml
+**/*_test.go

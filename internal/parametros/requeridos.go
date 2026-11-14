@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Claves de parametros_generales que el motor exige vigentes (L4).
+// Claves de parametros_generales que el motor exige vigentes.
 const (
 	ClaveDivisorDiasMes            = "DIVISOR_DIAS_MES"
 	ClaveSalarioMinimoInembargable = "SALARIO_MINIMO_INEMBARGABLE"
@@ -17,8 +17,6 @@ const (
 type Requerido struct{ Clave, Tipo, Descripcion string }
 
 // Requeridos lista los parámetros generales obligatorios.
-// HORAS_MENSUALES_ORDINARIAS está deprecada desde L12: el divisor de la hora
-// sale de parametros_jornada (por jornada) y nadie la lee.
 func Requeridos() []Requerido {
 	return []Requerido{
 		{
@@ -29,13 +27,13 @@ func Requeridos() []Requerido {
 		{
 			Clave:       ClaveSalarioMinimoInembargable,
 			Tipo:        TipoDecimal,
-			Descripcion: "Salario mínimo inembargable (monto global, D13 del ADR-001) para el cálculo de embargos",
+			Descripcion: "Salario mínimo inembargable (monto global) para el cálculo de embargos",
 		},
 	}
 }
 
 // Faltantes devuelve los requeridos sin valor vigente a la fecha, en el orden de
-// Requeridos(). Solo ErrParametroNoConfigurado cuenta como faltante: un tipo
+// Requeridos. Solo ErrParametroNoConfigurado cuenta como faltante: un tipo
 // incorrecto, un valor ilegible o un fallo de lectura se devuelven como error
 // y nunca se ocultan.
 func (g *Generales) Faltantes(ctx context.Context, fecha time.Time) ([]Requerido, error) {

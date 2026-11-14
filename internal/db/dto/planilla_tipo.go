@@ -1,6 +1,3 @@
-// internal/db/dto/planilla_tipo.go
-//
-// L3 — Lectura de tipos de planilla por id o por clase (D16).
 package dto
 
 import (

@@ -77,7 +77,7 @@ func (f *fixtureCalculo) contar(t *testing.T, periodoID int64) map[string]int {
 	return out
 }
 
-func TestL7EscribirYEliminarDetalle(t *testing.T) {
+func TestEscribirYEliminarDetalle(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	f.crearIncapacidad(t)
 	ctx := context.Background()
@@ -132,7 +132,7 @@ func TestL7EscribirYEliminarDetalle(t *testing.T) {
 	}
 }
 
-func TestL7DescuadreEnMemoriaNoInserta(t *testing.T) {
+func TestDescuadreEnMemoriaNoInserta(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	f.crearIncapacidad(t)
 	ctx := context.Background()
@@ -142,7 +142,7 @@ func TestL7DescuadreEnMemoriaNoInserta(t *testing.T) {
 		t.Fatal(err)
 	}
 	rs := f.resultadosManuales()
-	rs[1].Patronal = nil // la cuota patronal deja de cuadrar
+	rs[1].Patronal = nil
 	err = db.WithAuditContext(ctx, f.db, f.preparador, func(ctx context.Context, q *dto.Queries) error {
 		return (&EscritorDetalle{}).Escribir(ctx, q, p.ID, rs)
 	})

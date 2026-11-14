@@ -1,33 +1,3 @@
-// internal/db/dto/asistencia.go
-//
-// Fase 4 — Turnos, calendario laboral, tipos de ausencia, incapacidades y
-// registro diario de asistencia. Reemplaza las queries `-- name:` de
-// db/queries/asistencia_vacaciones.sql (sección turnos → registro de
-// asistencia); las de vacaciones están en vacaciones.go.
-//
-// NOTA DE MIGRACIÓN (mismo criterio que contratos.go / organizacion.go): se
-// verificó contra db/schema.sql, no contra el .sql de queries. Diferencias:
-//
-//   - `turnos` (v11 base, línea ~852) SOLO tiene id, codigo, nombre,
-//     hora_inicio, hora_fin. El CREATE TABLE IF NOT EXISTS de la migración
-//     000003 es un no-op porque la tabla ya existe, así que NO existen
-//     hora_entrada_almuerzo, hora_salida_almuerzo, dias_laborables,
-//     tolerancia_tardanza_minutos, activo, created_at ni updated_at. Las
-//     columnas hora_inicio/hora_fin se exponen como HoraEntrada/HoraSalida en
-//     los structs para no cambiar el contrato con internal/asistencia.
-//   - `tipos_ausencia` (v11 base) solo tiene id, codigo, nombre,
-//     requiere_documento_soporte (sin `activo`, sin afecta_salario, sin
-//     entidad_emisora).
-//   - `empleado_turno.es_vigente` es columna GENERADA (NULL cuando
-//     fecha_fin_vigencia no es NULL): no se puede escribir. Cerrar = poner
-//     fecha_fin_vigencia; abrir = insertar sin es_vigente. Tampoco tiene
-//     `creado_por` (la auditoría es vía trigger + WithAuditContext), por eso
-//     AbrirTurnoEmpleadoParams.CreadoPor se recibe pero no se persiste.
-//   - MySQL no soporta RETURNING: los Crear*/Upsert* insertan y releen la fila.
-//   - Las columnas TIME llegan del driver como []byte aunque parseTime=true;
-//     se leen con nullTimeOfDay y se escriben como "15:04:05".
-//   - Todas las FK de empleado_id de estas tablas apuntan a empleados(id)
-//     (fase 1A). creado_por / aprobado_por siguen siendo IDs de usuarios.
 package dto
 
 import (
@@ -38,10 +8,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ============================================================================
-// Helpers internos
-// ============================================================================
-
 // rowScanner lo implementan *sql.Row y *sql.Rows, así cada tabla tiene un solo
 // scanX en vez de uno para Row y otro para Rows.
 type rowScanner interface {
@@ -50,7 +16,7 @@ type rowScanner interface {
 
 // nullTimeOfDay lee una columna TIME (nullable o no) hacia *time.Time.
 // Solo hora/minuto/segundo son significativos (año 0000, igual que
-// time.Parse("15:04")); calcularHoras en service.go normaliza la fecha.
+// time.Parse("15:04")).
 type nullTimeOfDay struct {
 	V *time.Time
 }
@@ -74,7 +40,7 @@ func (n *nullTimeOfDay) Scan(src interface{}) error {
 }
 
 func (n *nullTimeOfDay) parse(s string) error {
-	t, err := time.Parse("15:04:05", s) // acepta fracciones de segundo
+	t, err := time.Parse("15:04:05", s)
 	if err != nil {
 		return fmt.Errorf("dto: TIME inválido %q: %w", s, err)
 	}
@@ -121,46 +87,41 @@ func int64PtrArg(p *int64) interface{} {
 	return *p
 }
 
-// ============================================================================
-// TURNOS
-// ============================================================================
-
-// Turno expone hora_inicio/hora_fin como HoraEntrada/HoraSalida (ver NOTA).
+// Turno expone hora_inicio/hora_fin como HoraEntrada/HoraSalida.
 type Turno struct {
-	ID          int64
-	Codigo      string
-	Nombre      string
-	HoraEntrada time.Time
-	HoraSalida  time.Time
+	ID                        int64
+	Codigo                    string
+	Nombre                    string
+	HoraEntrada               time.Time
+	HoraSalida                time.Time
+	ToleranciaTardanzaMinutos int
 }
 
-const columnasTurno = `id, codigo, nombre, hora_inicio, hora_fin`
+const columnasTurno = `id, codigo, nombre, hora_inicio, hora_fin, tolerancia_tardanza_minutos`
 
 func scanTurno(s rowScanner) (Turno, error) {
 	var t Turno
 	var he, hs nullTimeOfDay
-	if err := s.Scan(&t.ID, &t.Codigo, &t.Nombre, &he, &hs); err != nil {
+	if err := s.Scan(&t.ID, &t.Codigo, &t.Nombre, &he, &hs, &t.ToleranciaTardanzaMinutos); err != nil {
 		return Turno{}, err
 	}
 	t.HoraEntrada, t.HoraSalida = timeOrZero(he.V), timeOrZero(hs.V)
 	return t, nil
 }
 
-// CrearTurnoParams solo lleva lo que `turnos` puede persistir hoy. Los campos
-// de almuerzo, días laborables y tolerancia de CrearTurnoInput no tienen
-// columna: ver NOTA y el resumen de la fase.
 type CrearTurnoParams struct {
-	Codigo      string
-	Nombre      string
-	HoraEntrada time.Time
-	HoraSalida  time.Time
+	Codigo                    string
+	Nombre                    string
+	HoraEntrada               time.Time
+	HoraSalida                time.Time
+	ToleranciaTardanzaMinutos int
 }
 
 func (q *Queries) CrearTurno(ctx context.Context, arg CrearTurnoParams) (Turno, error) {
 	res, err := q.db.ExecContext(ctx, `
-INSERT INTO turnos (codigo, nombre, hora_inicio, hora_fin)
-VALUES (?, ?, ?, ?)`,
-		arg.Codigo, arg.Nombre, timeOfDayArg(arg.HoraEntrada), timeOfDayArg(arg.HoraSalida))
+INSERT INTO turnos (codigo, nombre, hora_inicio, hora_fin, tolerancia_tardanza_minutos)
+VALUES (?, ?, ?, ?, ?)`,
+		arg.Codigo, arg.Nombre, timeOfDayArg(arg.HoraEntrada), timeOfDayArg(arg.HoraSalida), arg.ToleranciaTardanzaMinutos)
 	if err != nil {
 		return Turno{}, err
 	}
@@ -176,8 +137,8 @@ func (q *Queries) ObtenerTurno(ctx context.Context, id int64) (Turno, error) {
 	return scanTurno(row)
 }
 
-// ListarTurnosParams conserva Activo porque filtros.go lo construye, pero
-// `turnos` no tiene columna `activo`: el filtro se ignora hasta que exista.
+// ListarTurnosParams filtra el listado de turnos. `turnos` no tiene columna
+// `activo`, así que Activo no filtra.
 type ListarTurnosParams struct {
 	Activo *bool
 	Limit  int32
@@ -215,26 +176,23 @@ func (q *Queries) ContarTurnos(ctx context.Context, activo *bool) (int64, error)
 }
 
 type ActualizarTurnoParams struct {
-	ID          int64
-	Nombre      string
-	HoraEntrada time.Time
-	HoraSalida  time.Time
+	ID                        int64
+	Nombre                    string
+	HoraEntrada               time.Time
+	HoraSalida                time.Time
+	ToleranciaTardanzaMinutos int
 }
 
 func (q *Queries) ActualizarTurno(ctx context.Context, arg ActualizarTurnoParams) (Turno, error) {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE turnos
-SET nombre = ?, hora_inicio = ?, hora_fin = ?
-WHERE id = ?`, arg.Nombre, timeOfDayArg(arg.HoraEntrada), timeOfDayArg(arg.HoraSalida), arg.ID)
+SET nombre = ?, hora_inicio = ?, hora_fin = ?, tolerancia_tardanza_minutos = ?
+WHERE id = ?`, arg.Nombre, timeOfDayArg(arg.HoraEntrada), timeOfDayArg(arg.HoraSalida), arg.ToleranciaTardanzaMinutos, arg.ID)
 	if err != nil {
 		return Turno{}, err
 	}
 	return q.ObtenerTurno(ctx, arg.ID)
 }
-
-// ============================================================================
-// EMPLEADO_TURNO (patrón de vigencia, transacción de 2 pasos — ADR-000 §2)
-// ============================================================================
 
 type EmpleadoTurno struct {
 	ID                  int64
@@ -247,20 +205,21 @@ type EmpleadoTurno struct {
 // ObtenerTurnoVigenteEmpleadoRow: ID es el de empleado_turno (et.id); el turno
 // asignado está en TurnoID.
 type ObtenerTurnoVigenteEmpleadoRow struct {
-	ID                  int64
-	EmpleadoID          int64
-	TurnoID             int64
-	FechaInicioVigencia time.Time
-	FechaFinVigencia    *time.Time
-	TurnoNombre         string
-	HoraEntrada         time.Time
-	HoraSalida          time.Time
+	ID                        int64
+	EmpleadoID                int64
+	TurnoID                   int64
+	FechaInicioVigencia       time.Time
+	FechaFinVigencia          *time.Time
+	TurnoNombre               string
+	HoraEntrada               time.Time
+	HoraSalida                time.Time
+	ToleranciaTardanzaMinutos int
 }
 
 func (q *Queries) ObtenerTurnoVigenteEmpleado(ctx context.Context, empleadoID int64) (ObtenerTurnoVigenteEmpleadoRow, error) {
 	row := q.db.QueryRowContext(ctx, `
 SELECT et.id, et.empleado_id, et.turno_id, et.fecha_inicio_vigencia, et.fecha_fin_vigencia,
-       t.nombre, t.hora_inicio, t.hora_fin
+       t.nombre, t.hora_inicio, t.hora_fin, t.tolerancia_tardanza_minutos
 FROM empleado_turno et
 JOIN turnos t ON t.id = et.turno_id
 WHERE et.empleado_id = ? AND et.es_vigente = 1
@@ -268,7 +227,7 @@ LIMIT 1`, empleadoID)
 	var r ObtenerTurnoVigenteEmpleadoRow
 	var he, hs nullTimeOfDay
 	if err := row.Scan(&r.ID, &r.EmpleadoID, &r.TurnoID, &r.FechaInicioVigencia, &r.FechaFinVigencia,
-		&r.TurnoNombre, &he, &hs); err != nil {
+		&r.TurnoNombre, &he, &hs, &r.ToleranciaTardanzaMinutos); err != nil {
 		return ObtenerTurnoVigenteEmpleadoRow{}, err
 	}
 	r.HoraEntrada, r.HoraSalida = timeOrZero(he.V), timeOrZero(hs.V)
@@ -318,10 +277,6 @@ FROM empleado_turno WHERE id = ?`, id).
 		Scan(&et.ID, &et.EmpleadoID, &et.TurnoID, &et.FechaInicioVigencia, &et.FechaFinVigencia)
 	return et, err
 }
-
-// ============================================================================
-// FERIADOS Y CALENDARIO LABORAL
-// ============================================================================
 
 type Feriado struct {
 	ID              int64
@@ -467,11 +422,7 @@ func (q *Queries) ExisteCalendarioGenerado(ctx context.Context, anio int32) (int
 	return total, err
 }
 
-// ============================================================================
-// TIPOS_AUSENCIA
-// ============================================================================
-
-// TiposAusencium conserva el nombre que generaba sqlc (lo usa service.go).
+// TiposAusencium es una fila de tipos_ausencia.
 type TiposAusencium struct {
 	ID                       int64
 	Codigo                   string
@@ -510,11 +461,7 @@ LIMIT 1`, codigo).Scan(&t.ID, &t.Codigo, &t.Nombre, &t.RequiereDocumentoSoporte)
 	return t, err
 }
 
-// ============================================================================
-// INCAPACIDADES (CCSS / INS) — empleado_id → empleados(id)
-// ============================================================================
-
-// Incapacidade conserva el nombre que generaba sqlc (lo usa service.go).
+// Incapacidade es una fila de incapacidades.
 type Incapacidade struct {
 	ID                int64
 	EmpleadoID        int64
@@ -632,10 +579,6 @@ WHERE empleado_id = ?
 		arg.EmpleadoID, entidad, entidad, datePtrArg(arg.FechaDesde), datePtrArg(arg.FechaHasta)).Scan(&total)
 	return total, err
 }
-
-// ============================================================================
-// REGISTRO_ASISTENCIA_DETALLE — empleado_id → empleados(id), único (empleado_id, fecha)
-// ============================================================================
 
 type RegistroAsistenciaDetalle struct {
 	ID              int64
@@ -818,7 +761,7 @@ WHERE empleado_id = ?
 	return total, err
 }
 
-// ListarAusenciasInjustificadasRango lo usa el motor de planilla (Fase 5+)
+// ListarAusenciasInjustificadasRango lo usa el motor de planilla
 // para deducciones por ausencia.
 func (q *Queries) ListarAusenciasInjustificadasRango(ctx context.Context, desde, hasta time.Time) ([]RegistroAsistenciaDetalle, error) {
 	rows, err := q.db.QueryContext(ctx, `

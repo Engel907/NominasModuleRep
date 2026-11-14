@@ -1,13 +1,3 @@
-// L14 — Tipificación de horas extra por minuto (enteros, sin float).
-//
-// SUPUESTOS A VALIDAR (RR. HH./Legal):
-//   - Son horas extra los ÚLTIMOS N minutos trabajados, con
-//     N = minutos trabajados − minutos de la jornada del turno. Así la suma
-//     tipificada coincide con ExcesoJornada (calcularHoras) y llegar tarde y
-//     salir tarde no genera extra.
-//   - Feriado o día de descanso: todo el exceso es "doble".
-//   - Si no: minuto dentro de la franja nocturna vigente → "nocturna", o
-//     "mixta" si la jornada del contrato es mixta; resto → "diurna".
 package asistencia
 
 import (
@@ -26,7 +16,7 @@ const (
 )
 
 // ErrFranjaNocturnaNoVigente: hay horas extra que tipificar fuera de feriado y
-// descanso pero no hay parametros_franja_nocturna vigente (D8: sin default).
+// descanso pero no hay parametros_franja_nocturna vigente (sin default).
 var ErrFranjaNocturnaNoVigente = errors.New("no hay franja nocturna vigente (parametros_franja_nocturna) para tipificar las horas extra")
 
 // FranjaNocturna: horas de reloj; puede cruzar la medianoche (22:00–05:00).
@@ -41,7 +31,7 @@ func (f FranjaNocturna) contiene(m int) bool {
 	if ini < fin {
 		return m >= ini && m < fin
 	}
-	return m >= ini || m < fin // cruza la medianoche
+	return m >= ini || m < fin
 }
 
 // HoraExtraTipificada: horas (2 decimales) de una clase en un día.

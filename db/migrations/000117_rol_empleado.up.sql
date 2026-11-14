@@ -1,4 +1,3 @@
--- S10/F17: fila mínima de permisos para cuentas vinculadas a un empleado.
 INSERT INTO roles (codigo, nombre, descripcion, activo)
 SELECT 'EMPLEADO', 'Empleado', 'Acceso del empleado a su propia boleta y solicitudes de vacaciones.', 1
 WHERE NOT EXISTS (SELECT 1 FROM roles WHERE codigo = 'EMPLEADO');

@@ -1,46 +1,23 @@
-// services/empleado_service.go
-//
-// Fase 3 — Dominio Empleados.
-//
-// F03 (esta revisión):
-//   - Firma real de db.WithAuditContext: callback func(ctx, q) con usuarioID
-//     int64. IDs int64 en toda la capa.
-//   - Paginación unificada en internal/pagination (20/100).
-//   - Toda escritura versionada (cerrar + abrir) toma primero un lock de fila
-//     sobre `empleados` (SELECT ... FOR UPDATE) dentro de la misma Tx, de modo
-//     que dos escrituras concurrentes sobre el mismo empleado se serialicen y
-//     el "leer vigente → cerrar → insertar" no tenga condición de carrera.
-//   - Validaciones: fecha efectiva posterior al inicio de la vigencia que se
-//     cierra (sin traslapes), salario > 0 con escala DECIMAL(14,2), campos
-//     requeridos tras TrimSpace, identificación / código interno duplicados
-//     (UNIQUE de la BD traducido a error tipado).
-//
-// Ver NOTA DE MIGRACIÓN en internal/db/dto/empleados.go para el porqué de la
-// forma de los DTOs (campos que viven en `empleados` vs. en los infotypes).
-package services
+package rrhh
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"planillas-ccdr/internal/cripto"
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 
 	"github.com/shopspring/decimal"
 )
 
 // ErrEmpleadoNoEncontrado se devuelve cuando el empleado_id no existe.
 var ErrEmpleadoNoEncontrado = errors.New("empleado no encontrado")
-
-// -----------------------------------------------------------------------------
-// DTOs de entrada/salida
-// -----------------------------------------------------------------------------
-
-// --- Empleado (creación de expediente completo) ---
 
 type CrearEmpleadoRequest struct {
 	CodigoInterno        string `json:"codigo_interno" binding:"required,max=10"`
@@ -56,8 +33,7 @@ type CrearEmpleadoRequest struct {
 	DatosBancarios  *DatosBancariosInput `json:"datos_bancarios"` // opcional al crear
 }
 
-// DatosPersonalesInput — solo los campos que empleado_datos_personales
-// realmente tiene (direccion, telefono, correo_electronico).
+// DatosPersonalesInput: dirección, teléfono y correo del empleado.
 type DatosPersonalesInput struct {
 	Direccion     string `json:"direccion" binding:"max=255"`
 	Telefono      string `json:"telefono" binding:"max=30"`
@@ -70,19 +46,23 @@ type DatosPersonalesInput struct {
 // si aún no hay contrato, trg_contratos_sync_salario_ai lo actualiza al crearlo.
 var salarioDerivadoPorBD = decimal.Zero
 
-// DatosLaboralesInput — TipoContratoID/ProgramaPresupuestarioID/SindicatoID.
+// DatosLaboralesInput: datos laborales versionados del empleado.
 type DatosLaboralesInput struct {
 	PuestoID int64 `json:"puesto_id" binding:"required,gt=0"`
-	// El salario NO se captura aquí (D5): la fuente única es
+	// El salario no se captura aquí: la fuente única es
 	// contratos.salario_pactado; empleado_datos_laborales.salario_base_nominal
 	// es una copia derivada que mantiene la BD (triggers de 000124).
 	TipoContratoID           int64  `json:"tipo_contrato_id" binding:"required,gt=0"`
 	ProgramaPresupuestarioID int64  `json:"programa_presupuestario_id" binding:"required,gt=0"`
 	SindicatoID              *int64 `json:"sindicato_id" binding:"omitempty,gt=0"` // opcional (afiliación sindical)
-	FechaEfectiva            string `json:"fecha_efectiva" binding:"required"`
+	// RegimenCCSSID: régimen CCSS para la base mínima contributiva.
+	// Opcional en la API (la asignación es dato humano), pero sin él el
+	// cálculo de planilla del empleado falla con empleado_sin_regimen_ccss.
+	RegimenCCSSID *int64 `json:"regimen_ccss_id" binding:"omitempty,gt=0"`
+	FechaEfectiva string `json:"fecha_efectiva" binding:"required"`
 }
 
-// DatosBancariosInput — BancoID (FK a `bancos`); tipo_cuenta es ENUM.
+// DatosBancariosInput: cuenta bancaria del empleado.
 type DatosBancariosInput struct {
 	BancoID       int64  `json:"banco_id" binding:"required,gt=0"`
 	TipoCuenta    string `json:"tipo_cuenta" binding:"required,oneof=corriente ahorros"`
@@ -90,9 +70,8 @@ type DatosBancariosInput struct {
 	FechaEfectiva string `json:"fecha_efectiva" binding:"required"`
 }
 
-// DatosFamiliarInput — declaración agregada (no una persona con nombre
-// propio): así es empleado_datos_familiares en el schema real. El conteo no
-// es un ID, conserva uint32 (igual que dto.EmpleadoDatosFamiliare).
+// DatosFamiliarInput: declaración familiar agregada (cónyuge e hijos
+// dependientes) para los créditos fiscales.
 type DatosFamiliarInput struct {
 	AplicaCreditoConyuge    bool   `json:"aplica_credito_conyuge"`
 	NumeroHijosDependientes uint32 `json:"numero_hijos_dependientes"`
@@ -106,21 +85,19 @@ type EmpleadoResponse struct {
 }
 
 type ListarEmpleadosRequest struct {
-	// Paginacion NO se bindea del query con gin: el handler la llena con
-	// pagination.Desde(c).
-	Paginacion    pagination.Parametros `form:"-"`
+	// Paginacion no se bindea del query con gin: el handler la llena con
+	// paginacion.Desde(c).
+	Paginacion    paginacion.Parametros `form:"-"`
 	Activo        *bool                 `form:"activo"`
 	CodigoInterno *string               `form:"codigo_interno"`
+	// SinRegimenCCSS: solo empleados sin regimen_ccss_id vigente.
+	SinRegimenCCSS bool `form:"sin_regimen_ccss"`
 }
 
 type ListarEmpleadosResponse struct {
 	Empleados  []EmpleadoResponse `json:"empleados"`
-	Paginacion pagination.Meta    `json:"paginacion"`
+	Paginacion paginacion.Meta    `json:"paginacion"`
 }
-
-// -----------------------------------------------------------------------------
-// Interfaz de servicio
-// -----------------------------------------------------------------------------
 
 type EmpleadoService interface {
 	CrearExpediente(ctx context.Context, usuarioID int64, req CrearEmpleadoRequest) (*EmpleadoResponse, error)
@@ -134,14 +111,70 @@ type EmpleadoService interface {
 	AgregarFamiliar(ctx context.Context, usuarioID, empleadoID int64, in DatosFamiliarInput) error
 	ActualizarFamiliar(ctx context.Context, usuarioID, familiarID int64, in DatosFamiliarInput) error
 	ListarFamiliaresVigentes(ctx context.Context, empleadoID int64) ([]dto.EmpleadoDatosFamiliare, error)
+
+	// DatosSensibles (Ley 8968): revela con permiso (y registra el
+	// acceso) o enmascara.
+	DatosSensibles(ctx context.Context, sol SolicitudDatosSensibles, empleadoID int64) (*DatosSensiblesResponse, error)
 }
 
 type empleadoService struct {
-	sqlDB *sql.DB
+	sqlDB   *sql.DB
+	llavero *cripto.Llavero
 }
 
-func NewEmpleadoService(sqlDB *sql.DB) EmpleadoService {
-	return &empleadoService{sqlDB: sqlDB}
+// NewEmpleadoService: llavero cifra los datos personales al escribir.
+// Sin llavero, escribir un dato sensible falla (nunca se guarda solo en claro
+// en silencio).
+func NewEmpleadoService(sqlDB *sql.DB, llavero *cripto.Llavero) EmpleadoService {
+	return &empleadoService{sqlDB: sqlDB, llavero: llavero}
+}
+
+// valorCifrado cifra un dato personal y calcula su hash de búsqueda.
+func (s *empleadoService) valorCifrado(c dto.CampoSensible, valor string) (dto.ValorCifrado, error) {
+	if s.llavero == nil {
+		return dto.ValorCifrado{}, cripto.ErrLlaveroNoProvisto
+	}
+	ct, kid, err := s.llavero.Cifrar(c.Campo(), valor)
+	if err != nil {
+		return dto.ValorCifrado{}, fmt.Errorf("cifrar %s: %w", c.Campo(), err)
+	}
+	return dto.ValorCifrado{Cifrado: ct, Hash: s.llavero.HashBusqueda(c.Campo(), valor), Kid: kid}, nil
+}
+
+// cifrar guarda X_cifrado/X_hash/X_kid de la fila recién escrita. Valor vacío
+// = nada que cifrar.
+func (s *empleadoService) cifrar(ctx context.Context, q *dto.Queries, c dto.CampoSensible, id int64, valor string) error {
+	if valor == "" {
+		return nil
+	}
+	v, err := s.valorCifrado(c, valor)
+	if err != nil {
+		return err
+	}
+	if err := q.GuardarCifrado(ctx, c, id, v); err != nil {
+		return fmt.Errorf("guardar cifrado de %s: %w", c.Campo(), err)
+	}
+	return nil
+}
+
+var (
+	campoIdentificacion = dto.CampoIdentificacion
+	campoDireccion      = dto.CampoDireccion
+	campoTelefono       = dto.CampoTelefono
+	campoCorreo         = dto.CampoCorreo
+	campoCuenta         = dto.CampoCuenta
+)
+
+func (s *empleadoService) cifrarPersonales(ctx context.Context, q *dto.Queries, id int64, in DatosPersonalesInput) error {
+	for _, x := range []struct {
+		c dto.CampoSensible
+		v string
+	}{{campoDireccion, in.Direccion}, {campoTelefono, in.Telefono}, {campoCorreo, in.Email}} {
+		if err := s.cifrar(ctx, q, x.c, id, x.v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 const layoutFecha = "2006-01-02"
@@ -167,14 +200,6 @@ func bloquearEmpleado(ctx context.Context, q *dto.Queries, empleadoID int64) err
 	}
 	return nil
 }
-
-// -----------------------------------------------------------------------------
-// CrearExpediente: alta de empleado + primera versión vigente de sus datos.
-// No hay "cerrar" porque es la primera fila — solo INSERT dentro de la
-// misma transacción auditada. Las UNIQUE de la BD (codigo_interno,
-// (tipo_identificacion_id, numero_identificacion)) son el árbitro de
-// duplicados; sus violaciones se traducen a errores tipados.
-// -----------------------------------------------------------------------------
 
 func (s *empleadoService) CrearExpediente(ctx context.Context, usuarioID int64, req CrearEmpleadoRequest) (*EmpleadoResponse, error) {
 	codigo, err := noVacio("codigo_interno", req.CodigoInterno)
@@ -217,30 +242,45 @@ func (s *empleadoService) CrearExpediente(ctx context.Context, usuarioID int64, 
 		}
 	}
 
+	identCifrada, err := s.valorCifrado(campoIdentificacion, numeroIdent)
+	if err != nil {
+		return nil, err
+	}
+	var cuentaCifrada dto.ValorCifrado
+	if req.DatosBancarios != nil {
+		if cuentaCifrada, err = s.valorCifrado(campoCuenta, numeroCuenta); err != nil {
+			return nil, err
+		}
+	}
+
 	var respuesta EmpleadoResponse
 
 	err = db.WithAuditContext(ctx, s.sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
-		empleadoID, err := q.CreateEmpleado(ctx, codigo, req.TipoIdentificacionID, numeroIdent, nombre, fechaIngreso)
+		empleadoID, err := q.CreateEmpleado(ctx, codigo, req.TipoIdentificacionID, identCifrada, nombre, fechaIngreso)
 		if err != nil {
 			return traducirErrorBD(err, "crear empleado")
 		}
 
-		if _, err := q.CrearVersionDatosPersonales(ctx, empleadoID,
-			req.DatosPersonales.Direccion, req.DatosPersonales.Telefono, req.DatosPersonales.Email,
-			fechaEfectivaPersonales); err != nil {
+		personalesID, err := q.CrearVersionDatosPersonales(ctx, empleadoID, fechaEfectivaPersonales)
+		if err != nil {
 			return traducirErrorBD(err, "crear datos personales")
 		}
+		if err := s.cifrarPersonales(ctx, q, personalesID, req.DatosPersonales); err != nil {
+			return err
+		}
 
-		// salario_base_nominal: lo deriva la BD del contrato vigente (D5).
+		if err := validarRegimenCCSS(ctx, q, "datos_laborales.regimen_ccss_id", req.DatosLaborales.RegimenCCSSID); err != nil {
+			return err
+		}
 		if _, err := q.CrearVersionDatosLaborales(ctx, empleadoID, req.DatosLaborales.PuestoID, salarioDerivadoPorBD,
 			req.DatosLaborales.TipoContratoID, req.DatosLaborales.ProgramaPresupuestarioID, req.DatosLaborales.SindicatoID,
-			fechaEfectivaLaborales); err != nil {
+			req.DatosLaborales.RegimenCCSSID, fechaEfectivaLaborales); err != nil {
 			return traducirErrorBD(err, "crear datos laborales")
 		}
 
 		if req.DatosBancarios != nil {
 			if _, err := q.CrearVersionDatosBancarios(ctx, empleadoID, req.DatosBancarios.BancoID,
-				req.DatosBancarios.TipoCuenta, numeroCuenta, fechaEfectivaBancarios); err != nil {
+				req.DatosBancarios.TipoCuenta, cuentaCifrada, fechaEfectivaBancarios); err != nil {
 				return traducirErrorBD(err, "crear datos bancarios")
 			}
 		}
@@ -270,11 +310,11 @@ func (s *empleadoService) ListarEmpleados(ctx context.Context, req ListarEmplead
 	pag := req.Paginacion.Normalizado()
 	q := dto.New(s.sqlDB)
 
-	rows, err := q.ListEmpleados(ctx, req.Activo, req.CodigoInterno, pag.Limit32(), pag.Offset32())
+	rows, err := q.ListEmpleados(ctx, req.Activo, req.CodigoInterno, req.SinRegimenCCSS, pag.Limit32(), pag.Offset32())
 	if err != nil {
 		return nil, fmt.Errorf("listar empleados: %w", err)
 	}
-	total, err := q.CountEmpleados(ctx, req.Activo, req.CodigoInterno)
+	total, err := q.CountEmpleados(ctx, req.Activo, req.CodigoInterno, req.SinRegimenCCSS)
 	if err != nil {
 		return nil, fmt.Errorf("contar empleados: %w", err)
 	}
@@ -286,25 +326,9 @@ func (s *empleadoService) ListarEmpleados(ctx context.Context, req ListarEmplead
 
 	return &ListarEmpleadosResponse{
 		Empleados:  out,
-		Paginacion: pagination.NuevaMeta(pag, total),
+		Paginacion: paginacion.NuevaMeta(pag, total),
 	}, nil
 }
-
-// -----------------------------------------------------------------------------
-// REGLA DE VIGENCIA DE 2 PASOS
-// Cada Actualizar* de abajo, dentro de la MISMA Tx auditada
-// (db.WithAuditContext, ADR-000 sección 2):
-//   0. bloquea la fila del empleado (FOR UPDATE) y verifica que exista;
-//   1. lee la versión vigente, valida que la fecha efectiva sea posterior a su
-//      inicio y la cierra con fecha_fin_vigencia = fecha efectiva;
-//   2. abre la nueva versión vigente.
-// Si no hay versión vigente (primera carga de ese infotype) solo se inserta.
-//
-// NOTA (convención de fin de vigencia): se conserva la convención previa del
-// proyecto — la versión cerrada termina EN la fecha efectiva de la nueva. Si
-// el resto del sistema trata fecha_fin_vigencia como inclusiva, ese día queda
-// cubierto por ambas versiones; ver informe F03 (punto dudoso).
-// -----------------------------------------------------------------------------
 
 func (s *empleadoService) ActualizarDatosPersonales(ctx context.Context, usuarioID, empleadoID int64, in DatosPersonalesInput) error {
 	fechaEfectiva, err := parseFecha("fecha_efectiva", in.FechaEfectiva)
@@ -323,21 +347,19 @@ func (s *empleadoService) ActualizarDatosPersonales(ctx context.Context, usuario
 			if err := validarNuevaVigencia("fecha_efectiva", fechaEfectiva, vigente.FechaInicioVigencia); err != nil {
 				return err
 			}
-			// Paso 1: cerrar vigente anterior.
 			if err := q.CerrarDatosPersonalesVigente(ctx, empleadoID, fechaEfectiva); err != nil {
 				return fmt.Errorf("cerrar datos personales vigentes: %w", err)
 			}
 		case errors.Is(err, sql.ErrNoRows):
-			// primera versión: nada que cerrar
 		default:
 			return fmt.Errorf("obtener datos personales vigentes: %w", err)
 		}
 
-		// Paso 2: abrir nueva versión vigente.
-		if _, err := q.CrearVersionDatosPersonales(ctx, empleadoID, in.Direccion, in.Telefono, in.Email, fechaEfectiva); err != nil {
+		id, err := q.CrearVersionDatosPersonales(ctx, empleadoID, fechaEfectiva)
+		if err != nil {
 			return traducirErrorBD(err, "crear version datos personales")
 		}
-		return nil
+		return s.cifrarPersonales(ctx, q, id, in)
 	})
 }
 
@@ -365,13 +387,31 @@ func (s *empleadoService) ActualizarDatosLaborales(ctx context.Context, usuarioI
 			return fmt.Errorf("obtener datos laborales vigentes: %w", err)
 		}
 
-		// salario_base_nominal: lo deriva la BD del contrato vigente (D5).
+		if err := validarRegimenCCSS(ctx, q, "regimen_ccss_id", in.RegimenCCSSID); err != nil {
+			return err
+		}
 		if _, err := q.CrearVersionDatosLaborales(ctx, empleadoID, in.PuestoID, salarioDerivadoPorBD,
-			in.TipoContratoID, in.ProgramaPresupuestarioID, in.SindicatoID, fechaEfectiva); err != nil {
+			in.TipoContratoID, in.ProgramaPresupuestarioID, in.SindicatoID, in.RegimenCCSSID, fechaEfectiva); err != nil {
 			return traducirErrorBD(err, "crear version datos laborales")
 		}
 		return nil
 	})
+}
+
+// validarRegimenCCSS: si viene, el régimen debe existir y estar activo (400).
+// nil se acepta y queda NULL (la asignación es dato humano).
+func validarRegimenCCSS(ctx context.Context, q *dto.Queries, campo string, id *int64) error {
+	if id == nil {
+		return nil
+	}
+	ok, err := q.ExisteRegimenCCSSActivo(ctx, *id)
+	if err != nil {
+		return fmt.Errorf("validar regimen_ccss_id: %w", err)
+	}
+	if !ok {
+		return validacion(campo, "el régimen CCSS no existe o no está activo")
+	}
+	return nil
 }
 
 func (s *empleadoService) ActualizarDatosBancarios(ctx context.Context, usuarioID, empleadoID int64, in DatosBancariosInput) error {
@@ -380,6 +420,10 @@ func (s *empleadoService) ActualizarDatosBancarios(ctx context.Context, usuarioI
 		return err
 	}
 	numeroCuenta, err := noVacio("numero_cuenta", in.NumeroCuenta)
+	if err != nil {
+		return err
+	}
+	cuentaCifrada, err := s.valorCifrado(campoCuenta, numeroCuenta)
 	if err != nil {
 		return err
 	}
@@ -403,19 +447,12 @@ func (s *empleadoService) ActualizarDatosBancarios(ctx context.Context, usuarioI
 			return fmt.Errorf("obtener datos bancarios vigentes: %w", err)
 		}
 
-		if _, err := q.CrearVersionDatosBancarios(ctx, empleadoID, in.BancoID, in.TipoCuenta, numeroCuenta, fechaEfectiva); err != nil {
+		if _, err := q.CrearVersionDatosBancarios(ctx, empleadoID, in.BancoID, in.TipoCuenta, cuentaCifrada, fechaEfectiva); err != nil {
 			return traducirErrorBD(err, "crear version datos bancarios")
 		}
 		return nil
 	})
 }
-
-// -----------------------------------------------------------------------------
-// Familiares: empleado_datos_familiares es una declaración AGREGADA por
-// empleado (aplica_credito_conyuge + numero_hijos_dependientes), con como
-// máximo una fila vigente por empleado_id (uk_edf_una_vigente). Por eso
-// AgregarFamiliar sigue el mismo patrón de 2 pasos que el resto de infotypes.
-// -----------------------------------------------------------------------------
 
 func (s *empleadoService) AgregarFamiliar(ctx context.Context, usuarioID, empleadoID int64, in DatosFamiliarInput) error {
 	fechaEfectiva, err := parseFecha("fecha_efectiva", in.FechaEfectiva)
@@ -433,7 +470,6 @@ func (s *empleadoService) AgregarFamiliar(ctx context.Context, usuarioID, emplea
 			return fmt.Errorf("obtener declaracion familiar vigente: %w", err)
 		}
 		if len(vigentes) > 0 {
-			// uk_edf_una_vigente garantiza a lo sumo una.
 			if err := validarNuevaVigencia("fecha_efectiva", fechaEfectiva, vigentes[0].FechaInicioVigencia); err != nil {
 				return err
 			}
@@ -456,9 +492,6 @@ func (s *empleadoService) ActualizarFamiliar(ctx context.Context, usuarioID, fam
 	}
 
 	return db.WithAuditContext(ctx, s.sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
-		// Se lee primero (sin lock) solo para saber a qué empleado pertenece;
-		// luego se bloquea al empleado y se RELEE la versión, por si otra Tx la
-		// cerró entre ambas lecturas.
 		previa, err := q.GetDatosFamiliarVigentePorID(ctx, familiarID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrFamiliarNoEncontrado
@@ -483,12 +516,10 @@ func (s *empleadoService) ActualizarFamiliar(ctx context.Context, usuarioID, fam
 			return err
 		}
 
-		// Paso 1: cerrar la versión puntual de ESTA declaración.
 		if err := q.CerrarDatosFamiliarVigentePorID(ctx, familiarID, fechaEfectiva); err != nil {
 			return fmt.Errorf("cerrar declaracion familiar vigente: %w", err)
 		}
 
-		// Paso 2: abrir nueva versión, bajo el mismo empleado_id original.
 		if _, err := q.CrearVersionDatosFamiliares(ctx, familiarVigente.EmpleadoID, in.AplicaCreditoConyuge, in.NumeroHijosDependientes, fechaEfectiva); err != nil {
 			return traducirErrorBD(err, "crear version declaracion familiar")
 		}
@@ -503,7 +534,97 @@ func (s *empleadoService) ListarFamiliaresVigentes(ctx context.Context, empleado
 		return nil, fmt.Errorf("listar familiares vigentes: %w", err)
 	}
 	if out == nil {
-		out = []dto.EmpleadoDatosFamiliare{} // JSON [] en vez de null
+		out = []dto.EmpleadoDatosFamiliare{}
 	}
 	return out, nil
+}
+
+// SolicitudDatosSensibles: quién pide y si tiene datos_personales.ver_sensible.
+type SolicitudDatosSensibles struct {
+	UsuarioID   int64
+	VerSensible bool
+	Recurso     string
+	IP          string
+	RequestID   string
+}
+
+// DatosSensiblesResponse: valores revelados o enmascarados.
+type DatosSensiblesResponse struct {
+	EmpleadoID           int64  `json:"empleado_id"`
+	Revelado             bool   `json:"revelado"`
+	NumeroIdentificacion string `json:"numero_identificacion"`
+	Direccion            string `json:"direccion"`
+	Telefono             string `json:"telefono"`
+	CorreoElectronico    string `json:"correo_electronico"`
+	NumeroCuenta         string `json:"numero_cuenta"`
+}
+
+// DatosSensibles lee y descifra los datos vigentes. Sin permiso devuelve máscaras y no
+// registra acceso; con permiso revela e inserta una fila en
+// registro_accesos_datos con los campos revelados.
+func (s *empleadoService) DatosSensibles(ctx context.Context, sol SolicitudDatosSensibles, empleadoID int64) (*DatosSensiblesResponse, error) {
+	if sol.UsuarioID <= 0 {
+		return nil, validacion("usuario", "usuario autenticado requerido")
+	}
+	row, err := dto.New(s.sqlDB).LeerDatosSensibles(ctx, empleadoID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrEmpleadoNoEncontrado
+	}
+	if err != nil {
+		return nil, fmt.Errorf("leer datos sensibles del empleado %d: %w", empleadoID, err)
+	}
+	out := &DatosSensiblesResponse{EmpleadoID: empleadoID, Revelado: sol.VerSensible}
+	var revelados []string
+	for _, x := range []struct {
+		c    dto.CampoSensible
+		v    dto.ValorSensible
+		tipo cripto.TipoDato
+		dst  *string
+	}{
+		{campoIdentificacion, row.NumeroIdentificacion, cripto.DatoIdentificacion, &out.NumeroIdentificacion},
+		{campoDireccion, row.Direccion, cripto.DatoDireccion, &out.Direccion},
+		{campoTelefono, row.Telefono, cripto.DatoTelefono, &out.Telefono},
+		{campoCorreo, row.Correo, cripto.DatoCorreo, &out.CorreoElectronico},
+		{campoCuenta, row.NumeroCuenta, cripto.DatoCuenta, &out.NumeroCuenta},
+	} {
+		valor, err := s.valorSensible(x.c, x.v)
+		if err != nil {
+			return nil, err
+		}
+		if valor == "" {
+			continue
+		}
+		if sol.VerSensible {
+			*x.dst = valor
+			revelados = append(revelados, x.c.Columna)
+		} else {
+			*x.dst = cripto.Enmascarar(x.tipo, valor)
+		}
+	}
+	if sol.VerSensible && len(revelados) > 0 {
+		err := db.WithAuditContext(ctx, s.sqlDB, sol.UsuarioID, func(ctx context.Context, q *dto.Queries) error {
+			return q.InsertarRegistroAcceso(ctx, dto.RegistroAcceso{
+				UsuarioID: sol.UsuarioID, EmpleadoID: empleadoID, Recurso: sol.Recurso,
+				Campos: strings.Join(revelados, ","), IP: sol.IP, RequestID: sol.RequestID,
+			})
+		})
+		if err != nil {
+			return nil, fmt.Errorf("registrar acceso a datos sensibles: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func (s *empleadoService) valorSensible(c dto.CampoSensible, v dto.ValorSensible) (string, error) {
+	if len(v.Cifrado) == 0 {
+		return "", nil
+	}
+	if s.llavero == nil {
+		return "", cripto.ErrLlaveroNoProvisto
+	}
+	valor, err := s.llavero.Descifrar(c.Campo(), v.Cifrado, v.Kid.String)
+	if err != nil {
+		return "", fmt.Errorf("descifrar %s: %w", c.Campo(), err)
+	}
+	return valor, nil
 }

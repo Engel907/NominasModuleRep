@@ -1,17 +1,5 @@
--- L14 — Tipificación de horas extra (diurna, nocturna, mixta, doble).
---
--- Hallazgo: la API de asistencia escribe registro_asistencia_detalle (un solo
--- "exceso" sin tipo) y la planilla leía las columnas tipificadas de
--- registro_asistencia, que ninguna API llena. Desde aquí la asistencia
--- tipifica el exceso al registrarse y lo guarda en
--- asistencia_hora_extra_tipificada, que es lo que suma la planilla (con el
--- tope de autorización de L13).
---
--- parametros_franja_nocturna NO se siembra (valor legal): sin franja vigente,
--- registrar un día con horas extra que no sea feriado ni descanso da error
--- explícito. Cárguese con una migración de datos (cierre + inserción, fuente_legal).
 ALTER TABLE tipos_hora_extra
-  ADD COLUMN clase ENUM('diurna','nocturna','mixta','doble') NULL COMMENT 'Regla de tipificación; Go no usa codigo',
+  ADD COLUMN clase ENUM('diurna','nocturna','mixta','doble') NULL COMMENT 'Regla de tipificación',
   ADD UNIQUE KEY uk_the_clase (clase);
 UPDATE tipos_hora_extra SET clase = LOWER(codigo) WHERE LOWER(codigo) IN ('diurna','nocturna','mixta','doble') AND clase IS NULL;
 
@@ -19,7 +7,7 @@ CREATE TABLE parametros_franja_nocturna (
   id                    BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador',
   hora_inicio           TIME NOT NULL COMMENT 'Inicio de la franja nocturna',
   hora_fin              TIME NOT NULL COMMENT 'Fin de la franja nocturna (puede cruzar medianoche)',
-  fuente_legal          VARCHAR(150) NOT NULL COMMENT 'Base legal o PENDIENTE VALIDAR',
+  fuente_legal          VARCHAR(150) NOT NULL COMMENT 'Base legal del valor',
   fecha_inicio_vigencia DATE NOT NULL COMMENT 'Inicio',
   fecha_fin_vigencia    DATE NULL COMMENT 'NULL = vigente',
   es_vigente TINYINT GENERATED ALWAYS AS (CASE WHEN fecha_fin_vigencia IS NULL THEN 1 ELSE NULL END) STORED COMMENT 'Técnica',
@@ -42,8 +30,6 @@ CREATE TABLE asistencia_hora_extra_tipificada (
   UNIQUE KEY uk_ahet (empleado_id, fecha, tipo_hora_extra_id)
 ) ENGINE=InnoDB COMMENT='Horas extra tipificadas por día';
 
--- Inmutabilidad de la franja (scripts/gen_inmutabilidad_parametros.sh).
--- parametros_franja_nocturna: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_franja_nocturna_inmut_bu BEFORE UPDATE ON parametros_franja_nocturna
 FOR EACH ROW
 BEGIN
@@ -68,8 +54,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_franja_nocturna no se borra; se cierra la vigencia';
 END;
 
-
--- Auditoría (scripts/gen_auditoria.sh).
 DROP TRIGGER IF EXISTS trg_aud_parametros_franja_nocturna_ins;
 CREATE TRIGGER trg_aud_parametros_franja_nocturna_ins AFTER INSERT ON parametros_franja_nocturna
 FOR EACH ROW

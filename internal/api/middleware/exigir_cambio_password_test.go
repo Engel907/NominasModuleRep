@@ -8,10 +8,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"planillas-ccdr/internal/security"
+	"planillas-ccdr/internal/credenciales"
 )
 
-// Supuesto: ErrorHandler() (ver routes.go) escribe el JSON de lo que Fail
+// Supuesto: ErrorHandler escribe el JSON de lo que Fail
 // registra, y Fail aborta la cadena. Ambos existen en este paquete.
 func routerExigirCambio(rcp bool) (*gin.Engine, *int) {
 	gin.SetMode(gin.TestMode)
@@ -20,7 +20,7 @@ func routerExigirCambio(rcp bool) (*gin.Engine, *int) {
 	r.Use(ErrorHandler())
 	api := r.Group("/api/v1")
 	api.Use(func(c *gin.Context) {
-		c.Set(CtxKeyPayload, &security.Payload{UsuarioID: 7, RequiereCambioPassword: rcp})
+		c.Set(CtxKeyPayload, &credenciales.Payload{UsuarioID: 7, RequiereCambioPassword: rcp})
 		c.Next()
 	})
 	api.Use(ExigirCambioPassword())

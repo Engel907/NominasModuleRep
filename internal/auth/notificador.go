@@ -1,8 +1,5 @@
 package auth
 
-// Notificador (F14 / S2): canal por el que el servicio entrega al usuario el
-// token en claro del reset de contraseña. El servicio solo persiste el hash.
-
 import (
 	"context"
 	"crypto/tls"
@@ -46,10 +43,6 @@ func NuevoNotificador(cfg *config.Config, logger *slog.Logger) (Notificador, err
 	return nil, fmt.Errorf("auth: sin SMTP_HOST y APP_ENV=%q: no hay forma de entregar el token de reset", cfg.App.Env)
 }
 
-// ----------------------------------------------------------------------------
-// LogNotificador (solo desarrollo)
-// ----------------------------------------------------------------------------
-
 type LogNotificador struct {
 	logger  *slog.Logger
 	urlBase string
@@ -76,14 +69,11 @@ func (n *LogNotificador) EnviarResetPassword(ctx context.Context, correo, nombre
 	return nil
 }
 
-// ----------------------------------------------------------------------------
-// SMTPNotificador
-// ----------------------------------------------------------------------------
-
 type SMTPNotificador struct {
 	host, port, user, pass string
 	from                   mail.Address
 	urlBase                string
+	sistema                string
 	timeout                time.Duration
 }
 
@@ -101,6 +91,9 @@ func NuevoSMTPNotificador(cfg config.SMTPConfig) (*SMTPNotificador, error) {
 	if cfg.URLBaseReset == "" {
 		faltan = append(faltan, "URL_BASE_RESET")
 	}
+	if strings.TrimSpace(cfg.NombreSistema) == "" {
+		faltan = append(faltan, "NOMBRE_SISTEMA")
+	}
 	if len(faltan) > 0 {
 		return nil, fmt.Errorf("auth: configuración SMTP incompleta, faltan %v", faltan)
 	}
@@ -110,12 +103,11 @@ func NuevoSMTPNotificador(cfg config.SMTPConfig) (*SMTPNotificador, error) {
 	}
 	return &SMTPNotificador{
 		host: cfg.Host, port: cfg.Port, user: cfg.User, pass: cfg.Pass,
-		from: *from, urlBase: cfg.URLBaseReset, timeout: 15 * time.Second,
+		from: *from, urlBase: cfg.URLBaseReset, sistema: limpiarCabecera(cfg.NombreSistema), timeout: 15 * time.Second,
 	}, nil
 }
 
 func (n *SMTPNotificador) EnviarResetPassword(ctx context.Context, correo, nombre, token string, expira time.Time) error {
-	// mail.ParseAddress rechaza CR/LF: evita inyección de cabeceras vía correo.
 	destino, err := mail.ParseAddress(correo)
 	if err != nil {
 		return fmt.Errorf("auth: correo de destino inválido: %w", err)
@@ -123,23 +115,22 @@ func (n *SMTPNotificador) EnviarResetPassword(ctx context.Context, correo, nombr
 	nombre = limpiarCabecera(nombre)
 	destino.Name = nombre
 
-	// Costa Rica no tiene horario de verano: UTC-6 fijo evita depender de tzdata.
 	hora := expira.In(time.FixedZone("CR", -6*3600)).Format("02/01/2006 15:04")
 	saludo := "Hola"
 	if nombre != "" {
 		saludo = "Hola " + nombre
 	}
 	cuerpo := fmt.Sprintf("%s,\r\n\r\n"+
-		"Recibimos una solicitud para restablecer la contraseña de su cuenta en Planillas CCDR Liberia.\r\n"+
+		"Recibimos una solicitud para restablecer la contraseña de su cuenta en %s.\r\n"+
 		"Use el siguiente enlace antes del %s (hora de Costa Rica); sirve una sola vez:\r\n\r\n"+
 		"%s\r\n\r\n"+
 		"Si usted no hizo la solicitud, ignore este mensaje: su contraseña no cambiará.\r\n",
-		saludo, hora, enlaceReset(n.urlBase, token))
+		saludo, n.sistema, hora, enlaceReset(n.urlBase, token))
 
 	var msg strings.Builder
 	fmt.Fprintf(&msg, "From: %s\r\n", n.from.String())
 	fmt.Fprintf(&msg, "To: %s\r\n", destino.String())
-	fmt.Fprintf(&msg, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", "Restablecer su contraseña - Planillas CCDR"))
+	fmt.Fprintf(&msg, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", "Restablecer su contraseña - "+n.sistema))
 	fmt.Fprintf(&msg, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	msg.WriteString("MIME-Version: 1.0\r\n")
 	msg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
@@ -219,8 +210,6 @@ func (n *SMTPNotificador) enviar(ctx context.Context, destino string, msg []byte
 	}
 	return c.Quit()
 }
-
-// ----------------------------------------------------------------------------
 
 // enlaceReset arma URL_BASE_RESET?token=<token>. Sin URL base devuelve "".
 func enlaceReset(urlBase, token string) string {

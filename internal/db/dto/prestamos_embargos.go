@@ -1,24 +1,3 @@
-// internal/db/dto/prestamos_embargos.go
-//
-// Fase 5 — Préstamos, Embargos y Terceros. Estilo D2: SQL plano con `?`,
-// Scan manual, decimal.Decimal para todo DECIMAL y sql.Null* /
-// decimal.NullDecimal para columnas nullable. Helpers (rowScanner) en
-// asistencia.go.
-//
-// F05: este archivo ahora está verificado columna por columna contra el
-// DDL real de db/schema.sql (tablas `terceros`, `prestamos`, `embargos`,
-// `parametros_tipos_embargo`, `empleados`, `contratos`). La versión anterior
-// se había escrito contra "supuestos de esquema" que NO existen en el DDL
-// (p. ej. prestamos.descripcion/cuotas_totales/cuotas_pagadas/creado_por,
-// terceros.activo/identificacion, embargos.creado_por, estado 'cancelado'
-// en embargos) y omitía columnas NOT NULL (embargos.prioridad_aplicacion).
-//
-// RECORDATORIO ADR-000: `embargos` y `prestamos` NO usan el patrón de
-// vigencia de 2 pasos; su ciclo de vida es por `estado`.
-//
-// Métodos *ParaActualizar: SELECT ... FOR UPDATE. Solo tienen sentido dentro
-// de una transacción (db.WithAuditContext); fuera de ella el lock se libera
-// al terminar la sentencia y no protege nada.
 package dto
 
 import (
@@ -29,14 +8,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ============================================================================
-// TERCEROS  (DDL: id, nombre, tipo ENUM('juzgado','entidad_financiera','otro'))
-// ============================================================================
-
 type Tercero struct {
 	ID     int64
 	Nombre string
-	Tipo   string // juzgado | entidad_financiera | otro
+	Tipo   string // juzgado | entidad_financiera | asociacion_solidarista | sindicato | aseguradora | cooperativa | otro
 }
 
 const columnasTercero = `id, nombre, tipo`
@@ -126,10 +101,6 @@ func (q *Queries) UpdateTercero(ctx context.Context, arg UpdateTerceroParams) er
 	return err
 }
 
-// ============================================================================
-// EMPLEADOS / CONTRATOS — solo las lecturas que necesita este módulo
-// ============================================================================
-
 // EmpleadoEstado es la proyección mínima de `empleados` para validar altas.
 type EmpleadoEstado struct {
 	ID     int64
@@ -148,7 +119,7 @@ func (q *Queries) GetEmpleadoParaActualizar(ctx context.Context, id int64) (Empl
 
 // ExisteContratoVigente: hay una versión de contrato vigente (es_vigente = 1,
 // o sea fecha_fin_vigencia IS NULL) cuya fecha_fin_contrato, si existe, no ha
-// pasado. Se evalúa contra CURDATE() del servidor de BD.
+// pasado. Se evalúa contra CURDATE del servidor de BD.
 func (q *Queries) ExisteContratoVigente(ctx context.Context, empleadoID int64) (bool, error) {
 	var existe bool
 	err := q.db.QueryRowContext(ctx, `
@@ -162,15 +133,6 @@ SELECT EXISTS (
 	return existe, err
 }
 
-// ============================================================================
-// PRESTAMOS
-// DDL: id, empleado_id, tercero_id (NOT NULL), monto_total, cuota_periodica,
-//      saldo_pendiente, fecha_inicio, fecha_fin_estimada, estado
-//      ENUM('activo','cancelado','suspendido'), origen_carga
-//      ENUM('operacion','migracion_inicial'), registrado_por_usuario_id.
-//      CHECK: 0 <= saldo_pendiente <= monto_total.
-// ============================================================================
-
 type Prestamo struct {
 	ID                     int64
 	EmpleadoID             int64
@@ -180,7 +142,7 @@ type Prestamo struct {
 	SaldoPendiente         decimal.Decimal
 	FechaInicio            time.Time
 	FechaFinEstimada       sql.NullTime
-	Estado                 string // activo | cancelado | suspendido
+	Estado                 string // activo | cancelado | suspendido | pagado
 	OrigenCarga            string // operacion | migracion_inicial
 	RegistradoPorUsuarioID sql.NullInt64
 }
@@ -307,7 +269,7 @@ WHERE empleado_id = ?
 	return total, err
 }
 
-// ListPrestamosActivosPorEmpleado: usado por el motor de planilla (F23) para
+// ListPrestamosActivosPorEmpleado: usado por el motor de planilla para
 // aplicar la cuota del período.
 func (q *Queries) ListPrestamosActivosPorEmpleado(ctx context.Context, empleadoID int64) ([]Prestamo, error) {
 	rows, err := q.db.QueryContext(ctx, `
@@ -322,15 +284,14 @@ ORDER BY fecha_inicio ASC, id ASC`, empleadoID)
 	return scanPrestamos(rows)
 }
 
-// AplicarAbonoPrestamoParams: SaldoPendiente es el MONTO A DESCONTAR del saldo
-// (nombre heredado de sqlc), no el saldo nuevo.
+// AplicarAbonoPrestamoParams: SaldoPendiente es el monto a descontar del
+// saldo, no el saldo nuevo.
 type AplicarAbonoPrestamoParams struct {
 	SaldoPendiente decimal.Decimal
 	ID             int64
 }
 
-// AplicarAbonoPrestamo descuenta el monto del saldo. El schema no tiene
-// cuotas_pagadas. El CHECK chk_pr_saldo (saldo >= 0) hace fallar el UPDATE si
+// AplicarAbonoPrestamo descuenta el monto del saldo. El CHECK chk_pr_saldo (saldo >= 0) hace fallar el UPDATE si
 // el monto excede el saldo; el servicio lo valida antes bajo FOR UPDATE.
 func (q *Queries) AplicarAbonoPrestamo(ctx context.Context, arg AplicarAbonoPrestamoParams) error {
 	_, err := q.db.ExecContext(ctx, `
@@ -341,11 +302,12 @@ WHERE id = ? AND estado = 'activo'`, arg.SaldoPendiente, arg.ID)
 }
 
 // CerrarPrestamoSiSaldoEnCero: idempotente; solo cierra si el saldo llegó a 0.
-// El ENUM no tiene 'pagado'/'liquidado': el cierre por pago total usa
-// 'cancelado' (igual que la cancelación manual).
+// Desde (000131) trg_prestamos_saldado_bu ya pasa a 'pagado' el préstamo
+// en el mismo UPDATE que lleva el saldo a 0; esto queda como red para filas
+// heredadas con saldo 0 aún activas.
 func (q *Queries) CerrarPrestamoSiSaldoEnCero(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, `
-UPDATE prestamos SET estado = 'cancelado'
+UPDATE prestamos SET estado = 'pagado'
 WHERE id = ? AND saldo_pendiente <= 0 AND estado = 'activo'`, id)
 	return err
 }
@@ -356,10 +318,6 @@ UPDATE prestamos SET estado = 'cancelado'
 WHERE id = ? AND estado IN ('activo', 'suspendido')`, id)
 	return err
 }
-
-// ============================================================================
-// TIPOS DE EMBARGO (parametros_tipos_embargo, versionado por vigencia)
-// ============================================================================
 
 type TipoEmbargo struct {
 	ID               int64
@@ -377,15 +335,6 @@ FROM parametros_tipos_embargo WHERE id = ?`, id).
 	return t, err
 }
 
-// ============================================================================
-// EMBARGOS
-// DDL: id, empleado_id, tercero_id, tipo_embargo_id, numero_expediente,
-//      porcentaje DECIMAL(5,2), monto_fijo, prioridad_aplicacion (NOT NULL),
-//      fecha_inicio_vigencia, fecha_fin_vigencia, estado
-//      ENUM('activo','finalizado','suspendido').
-//      CHECK: porcentaje XOR monto_fijo; 0 < porcentaje <= 100.
-// ============================================================================
-
 type Embargo struct {
 	ID                  int64
 	EmpleadoID          int64
@@ -394,6 +343,7 @@ type Embargo struct {
 	NumeroExpediente    sql.NullString
 	Porcentaje          decimal.NullDecimal
 	MontoFijo           decimal.NullDecimal
+	TopeMensual         decimal.NullDecimal // NULL = sin tope propio
 	PrioridadAplicacion int32
 	FechaInicioVigencia time.Time
 	FechaFinVigencia    sql.NullTime
@@ -401,18 +351,18 @@ type Embargo struct {
 }
 
 const columnasEmbargo = `id, empleado_id, tercero_id, tipo_embargo_id, numero_expediente,
-       porcentaje, monto_fijo, prioridad_aplicacion, fecha_inicio_vigencia,
+       porcentaje, monto_fijo, tope_mensual, prioridad_aplicacion, fecha_inicio_vigencia,
        fecha_fin_vigencia, estado`
 
 // Misma lista con alias `e.` para la query con JOIN.
 const columnasEmbargoAlias = `e.id, e.empleado_id, e.tercero_id, e.tipo_embargo_id, e.numero_expediente,
-       e.porcentaje, e.monto_fijo, e.prioridad_aplicacion, e.fecha_inicio_vigencia,
+       e.porcentaje, e.monto_fijo, e.tope_mensual, e.prioridad_aplicacion, e.fecha_inicio_vigencia,
        e.fecha_fin_vigencia, e.estado`
 
 func scanEmbargoExtra(s rowScanner, e *Embargo, extra ...interface{}) error {
 	dest := []interface{}{
 		&e.ID, &e.EmpleadoID, &e.TerceroID, &e.TipoEmbargoID, &e.NumeroExpediente,
-		&e.Porcentaje, &e.MontoFijo, &e.PrioridadAplicacion, &e.FechaInicioVigencia,
+		&e.Porcentaje, &e.MontoFijo, &e.TopeMensual, &e.PrioridadAplicacion, &e.FechaInicioVigencia,
 		&e.FechaFinVigencia, &e.Estado,
 	}
 	return s.Scan(append(dest, extra...)...)
@@ -431,6 +381,7 @@ type CreateEmbargoParams struct {
 	NumeroExpediente    sql.NullString
 	Porcentaje          decimal.NullDecimal
 	MontoFijo           decimal.NullDecimal
+	TopeMensual         decimal.NullDecimal
 	PrioridadAplicacion int32
 	FechaInicioVigencia time.Time
 	FechaFinVigencia    sql.NullTime
@@ -440,11 +391,11 @@ func (q *Queries) CreateEmbargo(ctx context.Context, arg CreateEmbargoParams) (i
 	res, err := q.db.ExecContext(ctx, `
 INSERT INTO embargos (
     empleado_id, tercero_id, tipo_embargo_id, numero_expediente,
-    porcentaje, monto_fijo, prioridad_aplicacion,
+    porcentaje, monto_fijo, tope_mensual, prioridad_aplicacion,
     fecha_inicio_vigencia, fecha_fin_vigencia, estado
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo')`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo')`,
 		arg.EmpleadoID, arg.TerceroID, arg.TipoEmbargoID, arg.NumeroExpediente,
-		arg.Porcentaje, arg.MontoFijo, arg.PrioridadAplicacion,
+		arg.Porcentaje, arg.MontoFijo, arg.TopeMensual, arg.PrioridadAplicacion,
 		arg.FechaInicioVigencia, arg.FechaFinVigencia)
 	if err != nil {
 		return 0, err

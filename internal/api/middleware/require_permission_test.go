@@ -1,23 +1,3 @@
-// Pruebas unitarias de middleware.RequirePermission.
-//
-// SUPUESTO IMPORTANTE: RequirePermission ya fue implementado en Fase 1
-// (firma dada: middleware.RequirePermission(perm string) gin.HandlerFunc)
-// y no está en este contexto, por lo que estas pruebas no pueden ver su
-// código fuente. Se asume el contrato más estándar para este tipo de
-// middleware en el proyecto:
-//
-//  1. Lee *security.Payload desde el gin.Context con la clave CtxKeyPayload
-//     (ver context.go) — el mismo payload que AuthPASETO deja seteado.
-//  2. Si no hay payload -> 401 Unauthorized y Abort().
-//  3. Si el payload existe pero payload.Permisos no contiene `perm` -> 403
-//     Forbidden y Abort().
-//  4. Si `perm` está presente -> deja pasar (next handler se ejecuta).
-//
-// Si la implementación real de Fase 1 usa otra clave de contexto, otro
-// código de estado, o compara contra roles en vez de permisos, ajustar
-// estas pruebas para que reflejen el contrato real — el valor de este
-// archivo es la cobertura de los 3 casos (sin sesión / sin permiso / con
-// permiso), no los números exactos de status si difieren.
 package middleware
 
 import (
@@ -29,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 
-	"planillas-ccdr/internal/security"
+	"planillas-ccdr/internal/credenciales"
 )
 
 func init() {
@@ -40,7 +20,7 @@ func init() {
 // RequirePermission(permisoRequerido). `payload` (puede ser nil) se
 // inyecta antes del middleware bajo prueba, simulando lo que AuthPASETO
 // dejaría en el contexto tras verificar el token.
-func construirRouter(permisoRequerido string, payload *security.Payload) *gin.Engine {
+func construirRouter(permisoRequerido string, payload *credenciales.Payload) *gin.Engine {
 	router := gin.New()
 	router.Use(ErrorHandler())
 	router.GET("/protegido",
@@ -70,7 +50,7 @@ func TestRequirePermission_SinPayload_Retorna401(t *testing.T) {
 }
 
 func TestRequirePermission_PermisoAusente_Retorna403(t *testing.T) {
-	payload := &security.Payload{
+	payload := &credenciales.Payload{
 		UsuarioID:     1,
 		NombreUsuario: "jgarcia",
 		Permisos:      []string{"empleados.leer", "asistencia.leer"},
@@ -87,7 +67,7 @@ func TestRequirePermission_PermisoAusente_Retorna403(t *testing.T) {
 }
 
 func TestRequirePermission_PermisoPresente_DejaPasar(t *testing.T) {
-	payload := &security.Payload{
+	payload := &credenciales.Payload{
 		UsuarioID:     1,
 		NombreUsuario: "jgarcia",
 		Permisos:      []string{"empleados.leer", "planilla.calcular"},
@@ -104,10 +84,7 @@ func TestRequirePermission_PermisoPresente_DejaPasar(t *testing.T) {
 }
 
 func TestRequirePermission_ListaDePermisosVacia_Retorna403(t *testing.T) {
-	// Caso borde: usuario con token válido pero sin ningún permiso
-	// resuelto (p.ej. todos sus roles fueron desactivados entre la emisión
-	// del token y su expiración) — no debe autorizar por default.
-	payload := &security.Payload{
+	payload := &credenciales.Payload{
 		UsuarioID:     2,
 		NombreUsuario: "sin.permisos",
 		Permisos:      []string{},

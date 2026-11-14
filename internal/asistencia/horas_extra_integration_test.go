@@ -27,9 +27,9 @@ func exec(t *testing.T, db *sql.DB, q string, args ...any) int64 {
 	return id
 }
 
-// L13: quien solicita no puede resolver (403 en Go, CHECK en la BD); una
+// quien solicita no puede resolver (403 en Go, CHECK en la BD); una
 // autorización se resuelve una sola vez; candidatas = días sin autorización.
-func TestL13SegregacionAutorizacion(t *testing.T) {
+func TestSegregacionAutorizacion(t *testing.T) {
 	db := testutil.NuevaBD(t)
 	ctx := context.Background()
 	var u [3]int64
@@ -41,8 +41,7 @@ func TestL13SegregacionAutorizacion(t *testing.T) {
 	if err := db.QueryRow(`SELECT id FROM tipos_identificacion WHERE codigo='CEDULA_NACIONAL'`).Scan(&tipoIdent); err != nil {
 		t.Fatal(err)
 	}
-	emp := exec(t, db, `INSERT INTO empleados (codigo_interno, tipo_identificacion_id, numero_identificacion, nombre_completo, fecha_ingreso)
-VALUES ('HE1', ?, 'HE-0001', 'Empleado HE', '2020-01-01')`, tipoIdent)
+	emp := testutil.InsertarEmpleado(t, db, "HE1", tipoIdent, "HE-0001", "Empleado HE", "2020-01-01")
 
 	he := asistencia.NewHorasExtraService(db)
 	dia := time.Date(2026, 3, 12, 0, 0, 0, 0, time.UTC)
@@ -59,7 +58,6 @@ VALUES ('HE1', ?, 'HE-0001', 'Empleado HE', '2020-01-01')`, tipoIdent)
 	if _, err := he.Autorizar(ctx, u[0], sol.ID); !errors.Is(err, asistencia.ErrSegregacionHorasExtra) {
 		t.Fatalf("el solicitante no puede autorizar: %v", err)
 	}
-	// Defensa en profundidad: el CHECK rechaza aunque se salte Go.
 	_, err = db.Exec(`UPDATE horas_extra_autorizadas SET estado = 'autorizada', resuelto_por = solicitado_por WHERE id = ?`, sol.ID)
 	var me *mysql.MySQLError
 	if !errors.As(err, &me) || me.Number != 3819 {

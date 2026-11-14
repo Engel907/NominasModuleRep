@@ -1,14 +1,3 @@
--- 000121 (L2): integridad en BD. Mismo estilo que 000119 (cuerpos BEGIN..END sin cambiar el delimitador).
--- Prefijos de mensaje que traduce el servicio Go:
---   detalle_descuadrado | periodo_inmutable | vigencia_traslapada | parametro_inmutable
--- REQUISITO: fn_detalle_cuadra es una FUNCION. Con binlog activo, MySQL exige
--- log_bin_trust_function_creators=1 o que el usuario de migraciones tenga SUPER
--- (si no: ERROR 1419). La funcion declara READS SQL DATA, que es lo que pide el binlog.
-
--- ---------------------------------------------------------------------------
--- 1) Cuadre del detalle: 1 solo si hay >=1 linea y cada linea cuadra con sus conceptos
---    (total_ingresos, total_deducciones) y con planilla_detalle_patronal (cuota_patronal_ccss).
--- ---------------------------------------------------------------------------
 CREATE FUNCTION fn_detalle_cuadra(p_periodo BIGINT UNSIGNED) RETURNS TINYINT(1)
 READS SQL DATA
 RETURN IF(
@@ -36,9 +25,6 @@ RETURN IF(
   ),
   1, 0);
 
--- ---------------------------------------------------------------------------
--- 2) Aprobar exige detalle cuadrado. Corre DESPUES de trg_pp_ciclo_bu (transiciones y segregacion).
--- ---------------------------------------------------------------------------
 CREATE TRIGGER trg_pp_cuadre_bu BEFORE UPDATE ON periodos_planilla
 FOR EACH ROW FOLLOWS trg_pp_ciclo_bu
 BEGIN
@@ -47,11 +33,6 @@ BEGIN
   END IF;
 END;
 
--- ---------------------------------------------------------------------------
--- 3) Inmutabilidad de los detalles hijos: se rechaza si el periodo padre no esta en borrador/calculada.
---    (LOCK IN SHARE MODE: igual que 000119, evita leer un estado obsoleto del periodo.)
--- ---------------------------------------------------------------------------
--- planilla_detalle_embargo
 CREATE TRIGGER trg_pdemb_inmutable_bi BEFORE INSERT ON planilla_detalle_embargo
 FOR EACH ROW
 BEGIN
@@ -94,7 +75,6 @@ BEGIN
   END IF;
 END;
 
--- planilla_detalle_patronal
 CREATE TRIGGER trg_pdpat_inmutable_bi BEFORE INSERT ON planilla_detalle_patronal
 FOR EACH ROW
 BEGIN
@@ -137,7 +117,6 @@ BEGIN
   END IF;
 END;
 
--- planilla_detalle_incapacidad
 CREATE TRIGGER trg_pdinc_inmutable_bi BEFORE INSERT ON planilla_detalle_incapacidad
 FOR EACH ROW
 BEGIN
@@ -180,7 +159,6 @@ BEGIN
   END IF;
 END;
 
--- planilla_detalle_prestamo
 CREATE TRIGGER trg_pdpre_inmutable_bi BEFORE INSERT ON planilla_detalle_prestamo
 FOR EACH ROW
 BEGIN
@@ -194,7 +172,6 @@ BEGIN
   END IF;
 END;
 
--- prestamo: en periodo aprobado/pagado/contabilizado solo se permite aplicado_en NULL -> valor
 CREATE TRIGGER trg_pdpre_inmutable_bu BEFORE UPDATE ON planilla_detalle_prestamo
 FOR EACH ROW
 BEGIN
@@ -229,9 +206,6 @@ BEGIN
   END IF;
 END;
 
--- ---------------------------------------------------------------------------
--- 4) Vigencias. parametros_generales: sin traslape de rangos para la misma clave (rangos inclusivos; fin NULL = abierto).
--- ---------------------------------------------------------------------------
 CREATE TRIGGER trg_pg_vigencia_bi BEFORE INSERT ON parametros_generales
 FOR EACH ROW
 BEGIN
@@ -270,9 +244,6 @@ BEGIN
   END IF;
 END;
 
--- Inmutabilidad de las 8 tablas parametricas (salida de scripts/gen_inmutabilidad_parametros.sh;
--- columnas = todas salvo fecha_fin_vigencia y es_vigente).
--- parametros_generales: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_generales_inmut_bu BEFORE UPDATE ON parametros_generales
 FOR EACH ROW
 BEGIN
@@ -299,7 +270,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_generales no se borra; se cierra la vigencia';
 END;
 
--- parametros_cargas_sociales: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_cargas_sociales_inmut_bu BEFORE UPDATE ON parametros_cargas_sociales
 FOR EACH ROW
 BEGIN
@@ -324,7 +294,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_cargas_sociales no se borra; se cierra la vigencia';
 END;
 
--- parametros_tramos_renta: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_tramos_renta_inmut_bu BEFORE UPDATE ON parametros_tramos_renta
 FOR EACH ROW
 BEGIN
@@ -348,7 +317,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_tramos_renta no se borra; se cierra la vigencia';
 END;
 
--- parametros_creditos_fiscales_renta: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_creditos_fiscales_renta_inmut_bu BEFORE UPDATE ON parametros_creditos_fiscales_renta
 FOR EACH ROW
 BEGIN
@@ -371,7 +339,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_creditos_fiscales_renta no se borra; se cierra la vigencia';
 END;
 
--- parametros_horas_extra: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_horas_extra_inmut_bu BEFORE UPDATE ON parametros_horas_extra
 FOR EACH ROW
 BEGIN
@@ -393,7 +360,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_horas_extra no se borra; se cierra la vigencia';
 END;
 
--- parametros_base_minima_contributiva: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_base_minima_contributiva_inmut_bu BEFORE UPDATE ON parametros_base_minima_contributiva
 FOR EACH ROW
 BEGIN
@@ -415,7 +381,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_base_minima_contributiva no se borra; se cierra la vigencia';
 END;
 
--- parametros_subsidios_incapacidad: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_subsidios_incapacidad_inmut_bu BEFORE UPDATE ON parametros_subsidios_incapacidad
 FOR EACH ROW
 BEGIN
@@ -440,7 +405,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_subsidios_incapacidad no se borra; se cierra la vigencia';
 END;
 
--- parametros_embargo_escala: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_embargo_escala_inmut_bu BEFORE UPDATE ON parametros_embargo_escala
 FOR EACH ROW
 BEGIN
@@ -466,9 +430,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_embargo_escala no se borra; se cierra la vigencia';
 END;
 
--- ---------------------------------------------------------------------------
--- 5) Vista de resumen por periodo (dashboard/reportes). LEFT JOIN: un periodo sin lineas sale con ceros.
--- ---------------------------------------------------------------------------
 CREATE SQL SECURITY INVOKER VIEW v_planilla_resumen_periodo AS
 SELECT pp.id                                  AS periodo_planilla_id,
        pp.tipo_planilla_id                    AS tipo_planilla_id,

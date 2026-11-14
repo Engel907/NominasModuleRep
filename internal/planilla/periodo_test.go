@@ -52,7 +52,6 @@ func TestVerificarSegregacion(t *testing.T) {
 			t.Errorf("%s: err=%v, quiereError=%v", c.nombre, err, c.quiereError)
 		}
 	}
-	// Sin participantes previos nadie queda bloqueado.
 	if err := VerificarSegregacion(EstadoAprobada, 1, Participantes{}); err != nil {
 		t.Errorf("sin participantes: %v", err)
 	}
@@ -86,7 +85,6 @@ func TestTraducirErrorBD(t *testing.T) {
 }
 
 func TestErrDetalleDescuadrado(t *testing.T) {
-	// Un SIGNAL con el prefijo detalle_descuadrado se traduce al error de dominio.
 	err := traducirErrorBD(&mysql.MySQLError{Number: 1644, Message: "detalle_descuadrado: el detalle no cuadra"})
 	if !errors.Is(err, ErrDetalleDescuadrado) {
 		t.Fatalf("errors.Is(err, ErrDetalleDescuadrado)=false, err=%v", err)
@@ -95,11 +93,9 @@ func TestErrDetalleDescuadrado(t *testing.T) {
 	if !errors.As(err, &ec) || ec.HTTP != 409 || ec.Codigo != "detalle_descuadrado" {
 		t.Errorf("esperaba ErrorCiclo 409 detalle_descuadrado, got %+v", ec)
 	}
-	// No se confunde con otros errores de dominio del ciclo.
 	if errors.Is(err, ErrPeriodoInmutable) || errors.Is(err, ErrPeriodoSinDetalle) {
 		t.Error("detalle_descuadrado no debe coincidir con otros errores de ciclo")
 	}
-	// Con otro número de error MySQL el mensaje no se traduce.
 	otro := &mysql.MySQLError{Number: 1062, Message: "detalle_descuadrado: x"}
 	if got := traducirErrorBD(otro); errors.Is(got, ErrDetalleDescuadrado) {
 		t.Error("solo el error 1644 (SIGNAL) debe traducirse")

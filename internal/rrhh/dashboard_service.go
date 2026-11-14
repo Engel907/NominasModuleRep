@@ -1,15 +1,4 @@
-// Package services agrupa lógica de negocio que orquesta acceso a datos
-// sin ejecutar SQL directamente.
-//
-// Fase 8 — Dashboard gerencial y monitoreo operativo.
-//
-// Principio de diseño (mismo que internal/planilla/service.go, Fase 6):
-// el servicio depende de una INTERFAZ de repositorio, no de *dto.Queries ni
-// de *sql.DB para las queries de negocio. Esto
-// permite testear ObtenerMetricasGenerales con un mock (table-driven
-// tests) sin una BD real. La excepción es VerificarEstadoSistema, que sí
-// necesita el pool *sql.DB porque su trabajo ES verificar la conexión.
-package services
+package rrhh
 
 import (
 	"context"
@@ -19,15 +8,9 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	// Alias dbdto: en este archivo varias funciones usan `dto` como nombre de
-	// variable local (el DTO de salida), lo que sombrearía el paquete.
 	dbdto "planillas-ccdr/internal/db/dto"
 	"planillas-ccdr/internal/planilla"
 )
-
-// ============================================================================
-// DTOs de salida
-// ============================================================================
 
 // DashboardMetricsDTO es el payload que consume el handler de
 // GET /api/v1/dashboard/metricas. GeneradoEn permite al frontend saber
@@ -41,10 +24,7 @@ type DashboardMetricsDTO struct {
 	GeneradoEn                      time.Time       `json:"generado_en"`
 }
 
-// SystemHealthDTO es el payload de GET /health. Sirve tanto de liveness
-// (¿el proceso responde?) como de readiness (¿tiene BD disponible?) en un
-// solo DTO — hay una sola dependencia externa relevante (MySQL), así que
-// separar dos structs sería complejidad sin beneficio.
+// SystemHealthDTO es el payload de GET /health (liveness y readiness).
 type SystemHealthDTO struct {
 	Status        string        `json:"status"` // "ok" | "degradado"
 	BaseDeDatosOK bool          `json:"base_de_datos_ok"`
@@ -52,18 +32,11 @@ type SystemHealthDTO struct {
 	VerificadoEn  time.Time     `json:"verificado_en"`
 }
 
-// ============================================================================
-// Repositorio
-// ============================================================================
-
 // MetricasDashboardRow es la fila cruda de las métricas del dashboard,
 // modelada aquí para que la interfaz DashboardRepository (y los mocks de los
 // tests) no dependan del paquete dto. El adaptador de más abajo
 // (dashboardRepo) implementa DashboardRepository llamando a
 // (*dbdto.Queries).ObtenerMetricasDashboard y convirtiendo su Row a este tipo.
-//
-// "Último período cerrado" usa planilla.EstadosCerrados() (pagada |
-// contabilizada, D4): ya no existe el estado 'cerrado' en el ENUM.
 type MetricasDashboardRow struct {
 	TotalEmpleadosActivos           int64
 	UltimoPeriodoCerradoID          sql.NullInt64
@@ -83,18 +56,12 @@ type dashboardRepo struct {
 	q *dbdto.Queries
 }
 
-// NewDashboardRepository construye la implementación real de
-// DashboardRepository. Wiring en main.go:
-//
-//	dashboardService := services.NewDashboardService(
-//	    services.NewDashboardRepository(dbdto.New(sqlDB)), sqlDB, 3*time.Second)
+// NewDashboardRepository construye el DashboardRepository sobre dto.Queries.
 func NewDashboardRepository(q *dbdto.Queries) DashboardRepository {
 	return &dashboardRepo{q: q}
 }
 
 func (r *dashboardRepo) ObtenerMetricasDashboard(ctx context.Context, fechaReferencia time.Time) (MetricasDashboardRow, error) {
-	// El paquete dto no puede importar planilla (ciclo), así que la lista de
-	// estados se traduce aquí, una sola vez por llamada.
 	cerrados := planilla.EstadosCerrados()
 	estados := make([]string, len(cerrados))
 	for i, e := range cerrados {
@@ -113,15 +80,8 @@ func (r *dashboardRepo) ObtenerMetricasDashboard(ctx context.Context, fechaRefer
 	}, nil
 }
 
-// ============================================================================
-// Servicio
-// ============================================================================
-
-// DashboardService agrupa las dos responsabilidades de Fase 8. El ping de
-// salud se hace directo contra *sql.DB (no vía DashboardRepository) a
-// propósito: es una verificación de infraestructura, no de dominio, y así
-// /health sigue funcionando aunque hubiera un bug de mapeo en el
-// repositorio de métricas.
+// DashboardService entrega las métricas gerenciales y el estado de salud. El
+// ping de salud va directo contra *sql.DB, independiente del repositorio.
 type DashboardService struct {
 	repo        DashboardRepository
 	db          *sql.DB
@@ -130,8 +90,7 @@ type DashboardService struct {
 
 // NewDashboardService construye el servicio. pingTimeout acota cuánto
 // puede tardar /health antes de reportar "degradado" — evita que un probe
-// de Kubernetes se cuelgue si la BD está lenta pero no caída del todo.
-// Default: 3s (igual al timeout que main.go ya usa en /healthz).
+// de Kubernetes se cuelgue si la BD está lenta. Si es <= 0 se usan 3 s.
 func NewDashboardService(repo DashboardRepository, db *sql.DB, pingTimeout time.Duration) *DashboardService {
 	if pingTimeout <= 0 {
 		pingTimeout = 3 * time.Second
@@ -140,10 +99,8 @@ func NewDashboardService(repo DashboardRepository, db *sql.DB, pingTimeout time.
 }
 
 // ObtenerMetricasGenerales consolida las métricas del dashboard gerencial
-// en un único DTO. fechaReferencia se recibe explícita (no time.Now()
-// dentro del repositorio) por el mismo criterio de testabilidad que
-// CalculoEmpleadoInput.FechaEfectiva en el motor de planilla — el llamador
-// (el handler HTTP) decide la fecha, normalmente time.Now().
+// en un único DTO. fechaReferencia se recibe explícita (no time.Now
+// dentro del repositorio): el llamador decide la fecha.
 func (s *DashboardService) ObtenerMetricasGenerales(ctx context.Context, fechaReferencia time.Time) (*DashboardMetricsDTO, error) {
 	fila, err := s.repo.ObtenerMetricasDashboard(ctx, fechaReferencia)
 	if err != nil {
@@ -158,9 +115,6 @@ func (s *DashboardService) ObtenerMetricasGenerales(ctx context.Context, fechaRe
 		GeneradoEn:                      time.Now().UTC(),
 	}
 
-	// UltimoPeriodoCerradoID puede ser NULL (todavía no se ha cerrado
-	// ningún período) — se traduce explícitamente a *int64 nil en vez de
-	// dejar pasar un 0 que un consumidor podría confundir con un ID real.
 	if fila.UltimoPeriodoCerradoID.Valid {
 		id := fila.UltimoPeriodoCerradoID.Int64
 		dto.UltimoPeriodoCerradoID = &id
@@ -170,7 +124,7 @@ func (s *DashboardService) ObtenerMetricasGenerales(ctx context.Context, fechaRe
 }
 
 // VerificarEstadoSistema hace un PingContext acotado por pingTimeout y
-// retorna el estado operativo de la API. NUNCA retorna error: un fallo de
+// retorna el estado operativo de la API. Nunca retorna error: un fallo de
 // BD es un resultado válido de healthcheck ("degradado"), no una
 // excepción del servicio — el handler HTTP decide el código HTTP (200 vs
 // 503) a partir de dto.Status / dto.BaseDeDatosOK.

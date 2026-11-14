@@ -30,7 +30,7 @@ services:
       retries: 20
       start_period: 20s
 
-  # Solo pruebas de integración (F13): perfil "test", puerto 3307, datos en
+  # Solo pruebas de integración: perfil "test", puerto 3307, datos en
   # tmpfs (se pierden al bajar el contenedor). Los tests crean y borran su
   # propia base temporal con el usuario root.
   mysql_test:

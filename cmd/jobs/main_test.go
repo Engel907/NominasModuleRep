@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"planillas-ccdr/internal/asistencia"
 	"planillas-ccdr/internal/parametros"
 )
 
@@ -71,4 +72,22 @@ func TestVerificar(t *testing.T) {
 			t.Fatalf("codigo=%d stdout=%q stderr=%q", codigo, stdout.String(), stderr.String())
 		}
 	})
+}
+
+func TestAcumularVacacionesUsoEInforme(t *testing.T) {
+	var stdout, stderr strings.Builder
+	if c := ejecutar(context.Background(), []string{"acumular-vacaciones"}, &stdout, &stderr); c != codigoError || !strings.Contains(stderr.String(), "--usuario-id") {
+		t.Fatalf("sin --usuario-id: código %d, stderr %q", c, stderr.String())
+	}
+	fecha := time.Date(2026, time.December, 1, 0, 0, 0, 0, time.UTC)
+	stdout.Reset()
+	ok := asistencia.ResumenAcumulacion{Acreditados: 2, YaRegistrados: 1, Errores: map[int64]string{}}
+	if c := informarAcumulacion(ok, nil, "aniversario", fecha, &stdout, &stderr); c != codigoOK || !strings.Contains(stdout.String(), "2 acreditados, 1 ya registrados") {
+		t.Fatalf("informe ok: %d %q", c, stdout.String())
+	}
+	stdout.Reset()
+	malo := asistencia.ResumenAcumulacion{Errores: map[int64]string{7: "sin escala"}}
+	if c := informarAcumulacion(malo, nil, "mensual", fecha, &stdout, &stderr); c != codigoFaltantes || !strings.Contains(stdout.String(), "empleado 7: sin escala") {
+		t.Fatalf("informe con errores: %d %q", c, stdout.String())
+	}
 }

@@ -12,10 +12,10 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
-// HorasExtraHandler expone /horas-extra (L13).
+// HorasExtraHandler expone /horas-extra.
 type HorasExtraHandler struct{ svc *HorasExtraService }
 
 func NewHorasExtraHandler(svc *HorasExtraService) *HorasExtraHandler {
@@ -60,14 +60,14 @@ func aAutorizacionResponse(r dto.HoraExtraAutorizacionRow) autorizacionResponse 
 func fallarHE(c *gin.Context, err error) {
 	var e *ErrorHorasExtra
 	if errors.As(err, &e) {
-		c.AbortWithStatusJSON(e.HTTP, gin.H{"error": gin.H{"codigo": e.Codigo, "mensaje": e.Mensaje}})
+		middleware.Fail(c, e.HTTP, e.Codigo, e.Mensaje, nil)
 		return
 	}
 	_ = c.Error(err)
 }
 
 func invalido(c *gin.Context, mensaje string) {
-	c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"codigo": "solicitud_invalida", "mensaje": mensaje}})
+	middleware.Fail(c, http.StatusBadRequest, "solicitud_invalida", mensaje, nil)
 }
 
 type solicitarHorasExtraRequest struct {
@@ -187,7 +187,7 @@ func (h *HorasExtraHandler) listar(c *gin.Context) {
 	if f.Hasta, ok = fechaQueryHE(c, "hasta"); !ok {
 		return
 	}
-	pag := pagination.Desde(c)
+	pag := paginacion.Desde(c)
 	filas, total, err := h.svc.Listar(c.Request.Context(), f, pag)
 	if err != nil {
 		fallarHE(c, err)
@@ -197,7 +197,7 @@ func (h *HorasExtraHandler) listar(c *gin.Context) {
 	for i, r := range filas {
 		datos[i] = aAutorizacionResponse(r)
 	}
-	c.JSON(http.StatusOK, gin.H{"data": datos, "meta": pagination.NuevaMeta(pag, total)})
+	c.JSON(http.StatusOK, gin.H{"data": datos, "meta": paginacion.NuevaMeta(pag, total)})
 }
 
 func (h *HorasExtraHandler) candidatas(c *gin.Context) {

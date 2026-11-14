@@ -109,7 +109,7 @@ func TestAplicarSobreMonto(t *testing.T) {
 		base, pct, esperado string
 	}{
 		{"500000", "10.83", "54150.00"},
-		{"431288.73", "12.5", "53911.09"}, // caso de calculator_test.go: fondo embargo 1/8
+		{"431288.73", "12.5", "53911.09"},
 		{"123456.78", "8.33", "10283.95"},
 	}
 	for _, c := range casos {

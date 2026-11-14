@@ -1,6 +1,3 @@
-// Escritor de detalle: persiste el resultado del cálculo de un período en las
-// tablas planilla_detalle_* y el snapshot de parámetros. No calcula: recibe
-// lo que produjo el motor. Corre dentro de la transacción del cálculo.
 package planilla
 
 import (
@@ -8,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/shopspring/decimal"
 
 	"planillas-ccdr/internal/db/dto"
 )
 
-// LineaPatronal: cuota patronal persistida (D20). Porcentaje en FRACCIÓN.
+// LineaPatronal: cuota patronal persistida. Porcentaje en FRACCIÓN.
 type LineaPatronal struct {
 	ConceptoSalarialID int64
 	Base               decimal.Decimal
@@ -23,15 +21,15 @@ type LineaPatronal struct {
 }
 
 // LineaPrestamo: cuota de un préstamo en el período. MontoRetenido <=
-// CuotaCalculada (L17 puede reducirlo por tope de neto).
+// CuotaCalculada (puede reducirse por el tope de neto).
 type LineaPrestamo struct {
 	PrestamoID     int64
 	CuotaCalculada decimal.Decimal
 	MontoRetenido  decimal.Decimal
 }
 
-// LineaIncapacidad: tramo de subsidio de una incapacidad dentro del período
-// (L11). MontoEntidadInformativo no se paga por planilla.
+// LineaIncapacidad: tramo de subsidio de una incapacidad dentro del período.
+// MontoEntidadInformativo no se paga por planilla.
 type LineaIncapacidad struct {
 	IncapacidadID           int64
 	DiaSerieDesde           int32
@@ -49,6 +47,20 @@ type ResultadoPersistible struct {
 	Patronal                 []LineaPatronal
 	Incapacidad              []LineaIncapacidad
 	Prestamos                []LineaPrestamo
+	Acumulado                *AcumuladoPersistible // aguinaldo / salario escolar
+	VacacionesCompensadas    []int64               // movimientos 'compensacion' pagados por el período
+	LiquidacionID            int64                 // liquidación que paga el período (0 = ninguna)
+}
+
+// AcumuladoPersistible: fila del año en aguinaldos o salarios_escolares que
+// deja el cálculo de un período de esa clase (estado 'proyectado').
+type AcumuladoPersistible struct {
+	Clase        ClaseTipoPlanilla
+	Anio         int32
+	Desde, Hasta time.Time
+	TotalBase    decimal.Decimal
+	Monto        decimal.Decimal
+	Porcentaje   decimal.Decimal // solo salario escolar
 }
 
 // ErrDetalleNoCuadra: el resultado en memoria no cuadra (Σ líneas ≠ totales);
@@ -62,7 +74,7 @@ func (e ErrDetalleNoCuadra) Error() string {
 	return fmt.Sprintf("planilla: detalle del empleado_id=%d no cuadra: %s", e.EmpleadoID, e.Motivo)
 }
 
-// EscritorDetalle implementa EliminadorDetalle (F19).
+// EscritorDetalle implementa EliminadorDetalle.
 type EscritorDetalle struct{}
 
 var _ EliminadorDetalle = (*EscritorDetalle)(nil)
@@ -106,6 +118,7 @@ func (e *EscritorDetalle) Escribir(ctx context.Context, q *dto.Queries, periodoI
 			BaseAguinaldo:             d.BaseAguinaldo,
 			BaseCesantia:              d.BaseCesantia,
 			BaseVacaciones:            d.BaseVacaciones,
+			BaseEmbargo:               d.BaseEmbargo,
 			CuotaObreraCCSS:           d.CuotaObreroCCSS,
 			CuotaPatronalCCSS:         d.CuotaPatronalCCSS,
 			RentaBruta:                d.ImpuestoRentaBruto,
@@ -137,6 +150,9 @@ func (e *EscritorDetalle) Escribir(ctx context.Context, q *dto.Queries, periodoI
 			c := dto.DetalleConceptoInsert{DetalleEmpleadoID: pdeID, ConceptoSalarialID: l.ConceptoSalarialID, Monto: l.Monto}
 			if f, ok := d.FormulaPorConcepto[l.ConceptoSalarialID]; ok && f != 0 {
 				c.FormulaID = &f
+			}
+			if f, ok := d.FormulaEmpleadoPorConcepto[l.ConceptoSalarialID]; ok && f != 0 {
+				c.FormulaEmpleadoID = &f
 			}
 			if !l.Cantidad.IsZero() {
 				cant := l.Cantidad
@@ -186,10 +202,68 @@ func (e *EscritorDetalle) Escribir(ctx context.Context, q *dto.Queries, periodoI
 			return fmt.Errorf("planilla: insertando %s: %w", p.tabla, err)
 		}
 	}
+	if err := e.escribirAcumulados(ctx, q, periodoID, rs); err != nil {
+		return err
+	}
+	for _, r := range rs {
+		if r.LiquidacionID == 0 {
+			continue
+		}
+		err := q.LigarLiquidacionPeriodo(ctx, r.LiquidacionID, periodoID)
+		if errors.Is(err, dto.ErrLiquidacionNoDisponible) {
+			return &ErrorCiclo{Codigo: "liquidacion_no_disponible", HTTP: 409,
+				Mensaje: fmt.Sprintf("la liquidación %d del empleado %d ya la paga otro período", r.LiquidacionID, r.Detalle.EmpleadoID)}
+		}
+		if err != nil {
+			return fmt.Errorf("planilla: ligando liquidación %d: %w", r.LiquidacionID, err)
+		}
+	}
+	for _, r := range rs {
+		for _, mov := range r.VacacionesCompensadas {
+			err := q.LigarCompensacionVacaciones(ctx, mov, periodoID)
+			if errors.Is(err, dto.ErrCompensacionNoDisponible) {
+				return &ErrorCiclo{Codigo: "compensacion_no_disponible", HTTP: 409,
+					Mensaje: fmt.Sprintf("la compensación de vacaciones %d del empleado %d ya fue pagada o la tomó otro período", mov, r.Detalle.EmpleadoID)}
+			}
+			if err != nil {
+				return fmt.Errorf("planilla: ligando compensación de vacaciones %d: %w", mov, err)
+			}
+		}
+	}
 	return nil
 }
 
-// verificarCuadre replica en memoria fn_detalle_cuadra (L2) y los CHECK de
+// escribirAcumulados: upsert 'proyectado' en aguinaldos / salarios_escolares
+// (UNIQUE empleado+año). Una fila ya 'procesado' por otro período → 409.
+func (e *EscritorDetalle) escribirAcumulados(ctx context.Context, q *dto.Queries, periodoID int64, rs []ResultadoPersistible) error {
+	for _, r := range rs {
+		a := r.Acumulado
+		if a == nil {
+			continue
+		}
+		fila := dto.AcumuladoProyectado{EmpleadoID: r.Detalle.EmpleadoID, Anio: a.Anio, PeriodoID: periodoID,
+			Desde: a.Desde, Hasta: a.Hasta, TotalBase: a.TotalBase, Monto: a.Monto, Porcentaje: a.Porcentaje}
+		var err error
+		switch a.Clase {
+		case ClaseAguinaldo:
+			err = q.GuardarAguinaldoProyectado(ctx, fila)
+		case ClaseSalarioEscolar:
+			err = q.GuardarSalarioEscolarProyectado(ctx, fila)
+		default:
+			return fmt.Errorf("planilla: acumulado de clase %q no persistible", a.Clase)
+		}
+		if errors.Is(err, dto.ErrAcumuladoYaProcesado) {
+			return &ErrorCiclo{Codigo: ErrAcumuladoYaProcesado.Codigo, HTTP: ErrAcumuladoYaProcesado.HTTP,
+				Mensaje: fmt.Sprintf("el empleado %d ya tiene el %s %d procesado por otro período", r.Detalle.EmpleadoID, a.Clase, a.Anio)}
+		}
+		if err != nil {
+			return fmt.Errorf("planilla: guardando %s del empleado_id=%d: %w", a.Clase, r.Detalle.EmpleadoID, err)
+		}
+	}
+	return nil
+}
+
+// verificarCuadre replica en memoria fn_detalle_cuadra y los CHECK de
 // las tablas hijas, para fallar con un mensaje claro antes de insertar.
 func verificarCuadre(r ResultadoPersistible) error {
 	d := r.Detalle
@@ -240,11 +314,20 @@ func verificarCuadre(r ResultadoPersistible) error {
 	return nil
 }
 
-// EliminarDetalle borra el detalle de las 6 tablas del período (F19:
+// EliminarDetalle borra el detalle de las 6 tablas del período (
 // descartar / recalcular).
 func (e *EscritorDetalle) EliminarDetalle(ctx context.Context, q *dto.Queries, periodoID int64) error {
 	if err := q.EliminarDetallePeriodo(ctx, periodoID); err != nil {
 		return fmt.Errorf("planilla: eliminando detalle del período %d: %w", periodoID, err)
+	}
+	if err := q.EliminarAcumuladosProyectadosPeriodo(ctx, periodoID); err != nil {
+		return fmt.Errorf("planilla: eliminando acumulados proyectados del período %d: %w", periodoID, err)
+	}
+	if err := q.DesligarCompensacionesVacacionesPeriodo(ctx, periodoID); err != nil {
+		return fmt.Errorf("planilla: desligando compensaciones de vacaciones del período %d: %w", periodoID, err)
+	}
+	if err := q.DesligarLiquidacionesPeriodo(ctx, periodoID); err != nil {
+		return fmt.Errorf("planilla: desligando liquidaciones del período %d: %w", periodoID, err)
 	}
 	return nil
 }

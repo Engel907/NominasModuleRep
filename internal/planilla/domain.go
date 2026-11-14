@@ -1,14 +1,4 @@
 // Package planilla implementa el motor de cálculo de planilla (PayrollEngine).
-//
-// Fase 6a — Diseño de interfaces, DTOs y estrategia de concurrencia.
-// Ver ADR-000 (Documento de Decisiones de Arquitectura) para el contexto
-// completo de esquema, patrón de vigencia y modelo de autorización.
-//
-// Principio de diseño: separar la ORQUESTACIÓN (acceso a BD, locking,
-// transacciones — orquestador, F20) del CÁLCULO PURO (domain.go + la función
-// CalcularEmpleado), que opera solo sobre datos ya
-// hidratados en memoria. Esto permite testear el motor con tablas de casos
-// (table-driven tests) sin necesidad de una BD real.
 package planilla
 
 import (
@@ -17,55 +7,102 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ============================================================================
-// INPUT: datos de entrada para calcular la planilla de UN empleado en UN
-// periodo
-// ============================================================================
-
 // CalculoEmpleadoInput agrupa todo lo que el motor necesita para calcular
 // un empleado en un período específico. Debe llegar completamente hidratado
-// desde el repositorio ANTES de invocar CalcularEmpleado — la función de
-// cálculo en sí no hace queries a la BD (ver nota de diseño arriba).
+// desde el repositorio antes de invocar CalcularEmpleado — la función de
+// cálculo en sí no hace queries a la BD.
 type CalculoEmpleadoInput struct {
 	EmpleadoID int64
 	PeriodoID  int64
 
 	// TipoPlanillaID filtra los conceptos que calcula el tipo de planilla
-	// (tipo_planilla_concepto, D18).
+	// (tipo_planilla_concepto).
 	TipoPlanillaID int64
 
-	// FechaEfectiva es la fecha contra la cual se resuelven TODOS los
+	// FechaEfectiva es la fecha contra la cual se resuelven todos los
 	// parámetros vigentes (cargas sociales, tramos de renta, salario
-	// mínimo, etc.) vía el patrón fecha_inicio_vigencia/fecha_fin_vigencia
-	// (ADR-000 §2). Normalmente es la fecha de fin del período, pero se
-	// modela explícita porque en recálculos retroactivos puede diferir.
+	// mínimo, etc.). Normalmente es la fecha de fin del período, pero en
+	// recálculos retroactivos puede diferir.
 	FechaEfectiva      time.Time
 	FechaInicioPeriodo time.Time
 	FechaFinPeriodo    time.Time
 
 	// Datos laborales vigentes del empleado al momento del cálculo. El salario
-	// NO viene de aquí: sale de los contratos (D5, Segmentos).
+	// no viene de aquí: sale de los contratos (Segmentos).
 	ClasificacionPuestoID int64 // FK para resolver parametros_salario_minimo
 	RegimenCCSSID         int64 // FK para resolver parametros_base_minima_contributiva
 
-	// Segmentos del período con contrato y salario (L10): ingreso, cese y
+	// Segmentos del período con contrato y salario: ingreso, cese y
 	// aumentos a mitad de período parten el salario por días comerciales.
 	Segmentos []SegmentoSalario
 
 	// Asistencia del período. DiasTrabajados = días comerciales con contrato
-	// (Σ Segmentos.Dias); L11 le descuenta la incapacidad.
+	// (Σ Segmentos.Dias); le descuenta la incapacidad.
 	DiasTrabajados decimal.Decimal
 	HorasExtra     []HoraExtraInput
-	Incapacidades  []IncapacidadInput // ver incapacidad.go (L11)
+	// Horas ordinarias trabajadas en feriados del período.
+	FeriadosLaborados []FeriadoLaboradoInput
+	Incapacidades     []IncapacidadInput // ver incapacidad.go
+	// Días con asistencia y feriados de pago obligatorio del período: solo se
+	// cargan si algún segmento es diario o por hora (modalidad_salario.go).
+	Asistencia              []DiaAsistencia
+	FeriadosPagoObligatorio []time.Time
 
 	// Devengos adicionales que no se derivan de una fórmula automática
 	// (ej. bonos discrecionales, comisiones capturadas manualmente).
 	DevengosManuales []ConceptoDevengoManualInput
 
+	// Vacaciones: compensaciones pendientes de pago y días de
+	// vacaciones aprobadas dentro del período (recortados al período).
+	VacacionesCompensacion []CompensacionVacacionesInput
+	VacacionesDisfrute     []RangoVacaciones
+
+	// Bases acumuladas: solo en períodos de clase aguinaldo /
+	// salario_escolar; Σ base_aguinaldo de los períodos regulares aprobados
+	// de la ventana de cálculo.
+	BaseAguinaldoAcumulada      decimal.Decimal
+	BaseSalarioEscolarAcumulada decimal.Decimal
+
+	// Asignaciones: conceptos recurrentes del empleado vigentes a la fecha
+	// efectiva (solo en períodos regulares).
+	Asignaciones []AsignacionInput
+
+	// RentaMesPrevia: lo ya gravado y retenido al empleado en otros períodos
+	// aprobados del mismo mes calendario (el impuesto al salario es mensual).
+	RentaMesPrevia RentaAcumuladaMes
+
+	// Liquidación: solo en períodos de clase liquidacion; montos por
+	// rubro ya calculados y persistidos en `liquidaciones` (internal/liquidacion).
+	Liquidacion *LiquidacionEmpleadoInput
+
 	// Deducciones de terceros.
 	Prestamos        []PrestamoDeduccionInput
 	Embargos         []EmbargoInput
 	CreditosFiscales []CreditoFiscalInput
+
+	// EmbargoMesPrevio: líquido embargable y embargos ya aplicados en los
+	// otros períodos aprobados del mes. Solo en la planilla de liquidación:
+	// con él los embargos se calculan sobre el mes completo (regla_embargo.go).
+	EmbargoMesPrevio *EmbargoMesPrevio
+}
+
+// EmbargoMesPrevio: acumulado del mes por embargo (lo pedido y lo retenido).
+type EmbargoMesPrevio struct {
+	Base       decimal.Decimal
+	PorEmbargo map[int64]EmbargoPrevio
+}
+
+type EmbargoPrevio struct {
+	Calculado decimal.Decimal
+	Aplicado  decimal.Decimal
+}
+
+// LiquidacionEmpleadoInput: liquidación 'procesada' que paga el período.
+// Rubros: clave = expresion_formula.rubro de los conceptos LIQ_*.
+type LiquidacionEmpleadoInput struct {
+	LiquidacionID int64
+	FechaSalida   time.Time
+	Rubros        map[string]decimal.Decimal
 }
 
 type HoraExtraInput struct {
@@ -76,7 +113,7 @@ type HoraExtraInput struct {
 // ConceptoDevengoManualInput inyecta un monto ya decidido para un
 // concepto_salarial puntual (ej. bono discrecional) sin pasar por
 // concepto_salarial_formula. El motor lo trata como un concepto más dentro
-// del flujo de orden_calculo_concepto (ver evaluarConcepto),
+// del flujo de orden_calculo_concepto,
 // pero sin recalcular su fórmula.
 type ConceptoDevengoManualInput struct {
 	ConceptoSalarialID int64
@@ -90,27 +127,25 @@ type PrestamoDeduccionInput struct {
 	SaldoPendiente decimal.Decimal
 }
 
-// EmbargoInput trae ya resuelta la prioridad legal (1: Pensión Alimentaria,
-// 2: Judicial, 3: Hacienda, 4: CCSS — ver Fases 1-5) para que el motor
-// pueda aplicar los embargos en orden estricto de prioridad cuando el neto
-// disponible no alcanza para todos.
+// EmbargoInput: embargo activo del empleado con los datos de su tipo
+// (parametros_tipos_embargo) ya resueltos (todo desde BD).
 type EmbargoInput struct {
-	EmbargoID     int64
-	TipoEmbargoID int64
-	Prioridad     int32           // 1 = mayor prioridad
-	Porcentaje    decimal.Decimal // cero si aplica MontoFijo en su lugar
-	MontoFijo     decimal.Decimal // cero si aplica Porcentaje en su lugar
-	TopeMensual   decimal.Decimal // límite legal, si aplica (cero = sin tope explícito en este embargo)
+	EmbargoID, TipoEmbargoID int64
+	Prioridad                int32 // embargos.prioridad_aplicacion (1 = mayor)
+	PrioridadLegal           int32 // parametros_tipos_embargo.prioridad_legal
+	EsPension                bool  // parametros_tipos_embargo.es_pension_alimentaria
+	// TopePctLiquido: tope del tipo sobre el líquido embargable, en FRACCIÓN
+	// (0 = sin tope). En pensiones el tope es ACUMULADO sobre todas ellas.
+	TopePctLiquido decimal.Decimal
+	Porcentaje     decimal.Decimal // fracción; cero si aplica MontoFijo
+	MontoFijo      decimal.Decimal // cero si aplica Porcentaje
+	TopeMensual    decimal.Decimal // embargos.tope_mensual (cero = sin tope propio)
 }
 
 type CreditoFiscalInput struct {
 	TipoCreditoFiscalID int64
 	Cantidad            int32 // ej. número de hijos aplicables
 }
-
-// ============================================================================
-// OUTPUT: resultado del cálculo de UN empleado
-// ============================================================================
 
 // ResultadoEmpleadoOutput es la salida completa y auditable del cálculo.
 // Se persiste 1:1 (a nivel de agregados) en planilla_detalle_empleado y
@@ -119,13 +154,15 @@ type ResultadoEmpleadoOutput struct {
 	EmpleadoID int64
 	PeriodoID  int64
 
-	// Bases gravables acumuladas a lo largo del flujo de conceptos
-	// (ver evaluarConcepto / afecta_base_*).
+	// Bases gravables acumuladas a lo largo del flujo de conceptos.
 	BaseCCSS       decimal.Decimal
 	BaseRenta      decimal.Decimal
 	BaseAguinaldo  decimal.Decimal
 	BaseCesantia   decimal.Decimal
 	BaseVacaciones decimal.Decimal
+	// BaseEmbargo: líquido embargable del período (ingresos con
+	// afecta_base_embargo − CCSS obrera − renta neta).
+	BaseEmbargo decimal.Decimal
 
 	CuotaObreroCCSS   decimal.Decimal
 	CuotaPatronalCCSS decimal.Decimal
@@ -159,7 +196,7 @@ type EmbargoAplicadoOutput struct {
 
 type ConceptoCalculadoOutput struct {
 	ConceptoSalarialID int64
-	Codigo             string // conceptos_salariales.codigo (ver seed Fase 3.5)
+	Codigo             string // conceptos_salariales.codigo
 	Naturaleza         string // ingreso | deduccion (conceptos_salariales.naturaleza)
 	OrdenCalculo       int32
 	Monto              decimal.Decimal
@@ -170,11 +207,13 @@ type ConceptoCalculadoOutput struct {
 	AfectaBaseAguinaldo  bool
 	AfectaBaseCesantia   bool
 	AfectaBaseVacaciones bool
+	AfectaBaseEmbargo    bool // integra el líquido embargable
+
+	EsDeduccionObligatoria bool // no se topa por el neto
 }
 
 // ResultadoPeriodoOutput agrega los resultados de todos los empleados de un
-// período, más metadatos de la corrida (auditoría y estado de
-// periodos_planilla — estrategia de bloqueo, F20).
+// período, más metadatos de la corrida.
 type ResultadoPeriodoOutput struct {
 	PeriodoID             int64
 	EjecutadoPorUsuarioID int64
@@ -183,10 +222,7 @@ type ResultadoPeriodoOutput struct {
 
 	Resultados []ResultadoEmpleadoOutput
 
-	// EmpleadosConError permite reportar fallos parciales (ej. falta un
-	// parámetro vigente para un empleado puntual) sin descartar el resto
-	// del período — decisión de negocio a confirmar en Fase 6b: ¿el
-	// período completo falla si UN empleado falla, o se reporta parcial?
+	// EmpleadosConError lista los empleados que no se pudieron calcular.
 	EmpleadosConError []EmpleadoErrorOutput
 }
 
@@ -198,22 +234,14 @@ type EmpleadoErrorOutput struct {
 	Mensaje    string `json:"mensaje"`
 }
 
-// ============================================================================
-// Parámetros vigentes resueltos por el repositorio (fecha-dependientes)
-// ============================================================================
-
 // ConceptoOrdenCalculo es la fila resultante de unir orden_calculo_concepto +
 // concepto_salarial_formula + conceptos_salariales (flags afecta_base_*),
 // vigente a la fecha efectiva del cálculo.
 type ConceptoOrdenCalculo struct {
 	ConceptoSalarialID int64
-	Codigo             string // conceptos_salariales.codigo (seed Fase 3.5: SAL_BASE, CCSS_OBR, CCSS_PAT, IMP_RENTA, HRS_EXTRA, SUB_INCAP, AGUINALDO, VACACIONES, CESANTIA)
+	Codigo             string // conceptos_salariales.codigo
 	OrdenCalculo       int32
 
-	// NOTA (asunción a confirmar en Fase 6b): ADR-000 §4 solo documenta
-	// concepto_salarial_formula.monto_fijo DECIMAL(14,4); no detalla cómo
-	// se distingue fijo / porcentaje-de-base / fórmula dinámica en el
-	// esquema real. Se modela aquí de forma provisional.
 	MontoFijo *decimal.Decimal // nil si el concepto no usa monto fijo directo
 
 	AfectaBaseCCSS       bool
@@ -221,10 +249,17 @@ type ConceptoOrdenCalculo struct {
 	AfectaBaseAguinaldo  bool
 	AfectaBaseCesantia   bool
 	AfectaBaseVacaciones bool
+	AfectaBaseEmbargo    bool // integra el líquido embargable
+
+	EsDeduccionObligatoria bool // no se topa por el neto
 }
 
+// ParametroCargaSocial: tasa vigente de un concepto de carga social, en
+// fracción. RegimenCCSSID = 0 es la tasa general del concepto; una fila con
+// régimen la sustituye para los empleados de ese régimen.
 type ParametroCargaSocial struct {
 	ConceptoSalarialID int64
+	RegimenCCSSID      int64
 	PorcentajePatronal decimal.Decimal
 	PorcentajeObrero   decimal.Decimal
 }
@@ -249,8 +284,32 @@ type ParametroHoraExtra struct {
 
 // PeriodoPlanillaEstado modela el subconjunto de columnas de
 // periodos_planilla relevante para la estrategia de bloqueo (ver
-// PayrollEngine.CalcularPeriodo, F20).
+// PayrollEngine.CalcularPeriodo).
 type PeriodoPlanillaEstado struct {
 	PeriodoID int64
-	Estado    string // valor de EstadoPeriodo (ver estados.go); coincide con el ENUM de periodos_planilla.estado
+	Estado    string // valor de EstadoPeriodo; coincide con el ENUM de periodos_planilla.estado
+}
+
+// RentaAcumuladaMes: Σ de base de renta, impuesto bruto, créditos aplicados e
+// impuesto neto de los períodos aprobados de un mes.
+type RentaAcumuladaMes struct {
+	Base     decimal.Decimal
+	Bruta    decimal.Decimal
+	Creditos decimal.Decimal
+	Neta     decimal.Decimal
+}
+
+// Modos de empleado_conceptos_asignados.modo.
+const (
+	AsignacionMonto      = "monto"
+	AsignacionPorcentaje = "porcentaje"
+)
+
+// AsignacionInput: concepto recurrente de un empleado. Valor es el monto
+// mensual (modo monto) o la FRACCIÓN (modo porcentaje: 0.05 = 5 %).
+type AsignacionInput struct {
+	AsignacionID       int64
+	ConceptoSalarialID int64
+	Modo               string
+	Valor              decimal.Decimal
 }

@@ -14,13 +14,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"planillas-ccdr/internal/authz"
+	"planillas-ccdr/internal/credenciales"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/security"
 )
-
-// ----------------------------------------------------------------------------
-// Fakes
-// ----------------------------------------------------------------------------
 
 // fakeStore implementa Store en memoria. Cada método toma el mutex entero, lo
 // que le da las mismas garantías de atomicidad que un UPDATE condicional en BD
@@ -101,7 +97,7 @@ func (f *fakeStore) RehashPasswordHash(_ context.Context, id int64, anterior, nu
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if u := f.usuarios[id]; u.PasswordHash == anterior {
-		u.PasswordHash = nuevo // NO toca RequiereCambioPassword
+		u.PasswordHash = nuevo
 	}
 	return nil
 }
@@ -334,10 +330,6 @@ func (n *fakeNotificador) copia() []envioReset {
 	return append([]envioReset(nil), n.envios...)
 }
 
-// ----------------------------------------------------------------------------
-// Entorno de prueba
-// ----------------------------------------------------------------------------
-
 const (
 	claveValida = "Correcta-clave-2026!"
 	claveNueva  = "caballo-azul-nube-47"
@@ -353,12 +345,12 @@ var (
 	hashClave     string
 )
 
-// hashDeClave calcula UNA vez el argon2id de claveValida: cada hash cuesta
+// hashDeClave calcula una vez el argon2id de claveValida: cada hash cuesta
 // ~64 MiB y cientos de ms, y todos los usuarios de prueba comparten clave.
 func hashDeClave(t *testing.T) string {
 	t.Helper()
 	hashClaveOnce.Do(func() {
-		h, err := security.HashPassword(claveValida)
+		h, err := credenciales.HashPassword(claveValida)
 		if err != nil {
 			panic(err)
 		}
@@ -371,7 +363,7 @@ type entorno struct {
 	s         *Servicio
 	fs        *fakeStore
 	notif     *fakeNotificador
-	maker     *security.PasetoMaker
+	maker     *credenciales.PasetoMaker
 	verifCall atomic.Int64 // veces que Login/Cambiar verificaron una contraseña
 }
 
@@ -387,7 +379,7 @@ func nuevoEntorno(t *testing.T) *entorno {
 	fs.usuarios[idTemporal] = &dto.Usuario{ID: idTemporal, NombreUsuario: "temporal", Correo: "temporal@ccdr.go.cr", PasswordHash: h, Activo: true, PermisosVersion: 1,
 		RequiereCambioPassword: true}
 
-	maker, err := security.NuevoPasetoMaker(security.ConfigPaseto{
+	maker, err := credenciales.NuevoPasetoMaker(credenciales.ConfigPaseto{
 		Claves:    map[string][]byte{"k1": []byte("0123456789abcdef0123456789abcdef")},
 		KIDActivo: "k1",
 		Issuer:    "planillas-test",
@@ -430,14 +422,10 @@ func (e *entorno) refresh(tok string) (*RefreshResponse, error) {
 	return e.s.Refresh(context.Background(), RefreshRequest{RefreshToken: tok})
 }
 
-// ----------------------------------------------------------------------------
-// LOGIN (S5)
-// ----------------------------------------------------------------------------
-
 func TestLogin_RespuestasUniformes(t *testing.T) {
 	casos := []struct {
 		nombre, usuario, pass string
-		cuentaFallo           bool // ¿debe sumar al contador de intentos?
+		cuentaFallo           bool
 	}{
 		{"usuario inexistente", "no.existe", claveValida, false},
 		{"contraseña incorrecta", "ana.lopez", "otra-clave-cualquiera", true},
@@ -451,16 +439,12 @@ func TestLogin_RespuestasUniformes(t *testing.T) {
 			e := nuevoEntorno(t)
 			resp, err := e.s.Login(context.Background(), LoginRequest{NombreUsuario: tc.usuario, Password: tc.pass})
 
-			// Mismo valor de error en todos los casos => el handler produce
-			// idéntico código y cuerpo HTTP.
 			if err != ErrCredencialesInvalidas { //nolint:errorlint // se exige identidad, no solo errors.Is
 				t.Fatalf("err = %v, se esperaba exactamente ErrCredencialesInvalidas", err)
 			}
 			if resp != nil {
 				t.Fatal("no debe devolverse sesión")
 			}
-			// Todos los caminos pagan UNA verificación argon2id (la del usuario
-			// o la del hash señuelo): el tiempo no distingue los casos.
 			if n := e.verifCall.Load(); n != 1 {
 				t.Fatalf("verificaciones de contraseña = %d, se esperaba 1", n)
 			}
@@ -478,7 +462,7 @@ func TestLogin_Exito_ClaimRcp(t *testing.T) {
 	if normal.RequiereCambioPassword {
 		t.Fatal("ana no requiere cambio de contraseña")
 	}
-	p, err := e.maker.VerificarToken(normal.AccessToken, security.TipoTokenAcceso)
+	p, err := e.maker.VerificarToken(normal.AccessToken, credenciales.TipoTokenAcceso)
 	if err != nil || p.RequiereCambioPassword {
 		t.Fatalf("access token de ana: rcp debe ser false (err=%v)", err)
 	}
@@ -487,11 +471,11 @@ func TestLogin_Exito_ClaimRcp(t *testing.T) {
 	if !temporal.RequiereCambioPassword {
 		t.Fatal("la respuesta debe indicar requiere_cambio_password")
 	}
-	p, err = e.maker.VerificarToken(temporal.AccessToken, security.TipoTokenAcceso)
+	p, err = e.maker.VerificarToken(temporal.AccessToken, credenciales.TipoTokenAcceso)
 	if err != nil || !p.RequiereCambioPassword {
 		t.Fatalf("access token de cuenta temporal: rcp debe ser true (err=%v)", err)
 	}
-	r, _ := e.maker.VerificarToken(temporal.RefreshToken, security.TipoTokenRefresco)
+	r, _ := e.maker.VerificarToken(temporal.RefreshToken, credenciales.TipoTokenRefresco)
 	if r.RequiereCambioPassword {
 		t.Fatal("el refresh token no lleva rcp")
 	}
@@ -499,7 +483,7 @@ func TestLogin_Exito_ClaimRcp(t *testing.T) {
 
 func TestLogin_BloqueoTrasUmbral(t *testing.T) {
 	e := nuevoEntorno(t)
-	for i := 0; i < 3; i++ { // MaxIntentosFallidos = 3
+	for i := 0; i < 3; i++ {
 		if _, err := e.s.Login(context.Background(), LoginRequest{NombreUsuario: "ana.lopez", Password: "mala"}); err != ErrCredencialesInvalidas { //nolint:errorlint
 			t.Fatalf("intento %d: %v", i+1, err)
 		}
@@ -507,7 +491,6 @@ func TestLogin_BloqueoTrasUmbral(t *testing.T) {
 	if !e.fs.usuario(idAna).BloqueadoHasta.Valid {
 		t.Fatal("la cuenta debe quedar bloqueada al llegar al umbral")
 	}
-	// Con la clave CORRECTA sigue rechazada (y con el mismo error).
 	if _, err := e.s.Login(context.Background(), LoginRequest{NombreUsuario: "ana.lopez", Password: claveValida}); err != ErrCredencialesInvalidas { //nolint:errorlint
 		t.Fatalf("cuenta bloqueada: err = %v", err)
 	}
@@ -538,10 +521,6 @@ func TestLogin_RehashBcryptNoLimpiaElCambioObligatorio(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// REFRESH (S6)
-// ----------------------------------------------------------------------------
-
 func TestRefresh_RotaYDetectaReutilizacion(t *testing.T) {
 	e := nuevoEntorno(t)
 	p1 := e.login(t, "ana.lopez", claveValida)
@@ -554,11 +533,9 @@ func TestRefresh_RotaYDetectaReutilizacion(t *testing.T) {
 		t.Fatal("la rotación debe emitir un refresh token distinto")
 	}
 
-	// Reutilizar el token viejo => 401 genérico...
 	if _, err := e.refresh(p1.RefreshToken); !errors.Is(err, ErrRefreshTokenInvalido) {
 		t.Fatalf("reutilización: err = %v", err)
 	}
-	// ...y la familia entera queda revocada: el token NUEVO (p2) ya no sirve.
 	if _, err := e.refresh(p2.RefreshToken); !errors.Is(err, ErrRefreshTokenInvalido) {
 		t.Fatalf("tras la reutilización la familia debe estar revocada: err = %v", err)
 	}
@@ -569,13 +546,13 @@ func TestRefresh_RotaYDetectaReutilizacion(t *testing.T) {
 
 func TestRefresh_ReutilizacionNoAfectaOtraFamilia(t *testing.T) {
 	e := nuevoEntorno(t)
-	a := e.login(t, "ana.lopez", claveValida) // sesión 1 (familia A)
-	b := e.login(t, "ana.lopez", claveValida) // sesión 2, otro dispositivo (familia B)
+	a := e.login(t, "ana.lopez", claveValida)
+	b := e.login(t, "ana.lopez", claveValida)
 
 	if _, err := e.refresh(a.RefreshToken); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = e.refresh(a.RefreshToken) // reutilización: solo cae la familia A
+	_, _ = e.refresh(a.RefreshToken)
 
 	if _, err := e.refresh(b.RefreshToken); err != nil {
 		t.Fatalf("la familia B debe seguir viva: %v", err)
@@ -617,7 +594,7 @@ func TestRefresh_Concurrente_SoloUnoGana(t *testing.T) {
 func TestRefresh_FilaDeOtroUsuarioSeRechaza(t *testing.T) {
 	e := nuevoEntorno(t)
 	sesion := e.login(t, "ana.lopez", claveValida)
-	e.fs.refresh[0].UsuarioID = idTemporal // fila y payload dejan de coincidir
+	e.fs.refresh[0].UsuarioID = idTemporal
 
 	if _, err := e.refresh(sesion.RefreshToken); !errors.Is(err, ErrRefreshTokenInvalido) {
 		t.Fatalf("err = %v", err)
@@ -642,22 +619,17 @@ func TestRefresh_MantieneElClaimRcp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, _ := e.maker.VerificarToken(r.AccessToken, security.TipoTokenAcceso)
+	p, _ := e.maker.VerificarToken(r.AccessToken, credenciales.TipoTokenAcceso)
 	if !p.RequiereCambioPassword {
 		t.Fatal("refrescar no debe sacar a la cuenta del cambio obligatorio")
 	}
 }
-
-// ----------------------------------------------------------------------------
-// CAMBIO DE CONTRASEÑA (S1)
-// ----------------------------------------------------------------------------
 
 func TestCambiarPassword(t *testing.T) {
 	e := nuevoEntorno(t)
 	vieja := e.login(t, "temporal", claveValida)
 	ctx := context.Background()
 
-	// Contraseña actual incorrecta: error específico y cuenta como fallo.
 	if _, err := e.s.CambiarPassword(ctx, idTemporal, CambiarPasswordRequest{PasswordActual: "equivocada", NuevaPassword: claveNueva}); !errors.Is(err, ErrPasswordActualIncorrecta) {
 		t.Fatalf("actual incorrecta: err = %v", err)
 	}
@@ -665,12 +637,10 @@ func TestCambiarPassword(t *testing.T) {
 		t.Fatal("una contraseña actual incorrecta debe sumar al contador de intentos")
 	}
 
-	// Nueva contraseña que incumple la política.
 	var pe *ErrPoliticaPassword
 	if _, err := e.s.CambiarPassword(ctx, idTemporal, CambiarPasswordRequest{PasswordActual: claveValida, NuevaPassword: "password1234"}); !errors.As(err, &pe) || pe.Motivo != MotivoComun {
 		t.Fatalf("política: err = %v", err)
 	}
-	// Igual a la actual.
 	if _, err := e.s.CambiarPassword(ctx, idTemporal, CambiarPasswordRequest{PasswordActual: claveValida, NuevaPassword: claveValida}); !errors.As(err, &pe) || pe.Motivo != MotivoIgualActual {
 		t.Fatalf("igual a la actual: err = %v", err)
 	}
@@ -682,7 +652,7 @@ func TestCambiarPassword(t *testing.T) {
 	if nueva.RequiereCambioPassword {
 		t.Fatal("tras el cambio, rcp debe ser false")
 	}
-	p, _ := e.maker.VerificarToken(nueva.AccessToken, security.TipoTokenAcceso)
+	p, _ := e.maker.VerificarToken(nueva.AccessToken, credenciales.TipoTokenAcceso)
 	if p.RequiereCambioPassword {
 		t.Fatal("el access token nuevo no debe llevar rcp")
 	}
@@ -691,24 +661,17 @@ func TestCambiarPassword(t *testing.T) {
 	if u.RequiereCambioPassword || u.IntentosFallidos != 0 {
 		t.Fatalf("flag/contador sin limpiar: %+v", u)
 	}
-	// Sesión anterior revocada; la nueva sí funciona.
 	if _, err := e.refresh(vieja.RefreshToken); !errors.Is(err, ErrRefreshTokenInvalido) {
 		t.Fatalf("la sesión anterior debe estar revocada: %v", err)
 	}
-	// (esa reutilización revocó la familia vieja, no la nueva)
 	if _, err := e.refresh(nueva.RefreshToken); err != nil {
 		t.Fatalf("la sesión nueva debe funcionar: %v", err)
 	}
-	// La clave vieja ya no entra; la nueva sí.
 	if _, err := e.s.Login(ctx, LoginRequest{NombreUsuario: "temporal", Password: claveValida}); err != ErrCredencialesInvalidas { //nolint:errorlint
 		t.Fatalf("clave vieja: err = %v", err)
 	}
 	e.login(t, "temporal", claveNueva)
 }
-
-// ----------------------------------------------------------------------------
-// RESET POR CORREO (S2)
-// ----------------------------------------------------------------------------
 
 func TestResetPassword_FlujoCompleto(t *testing.T) {
 	e := nuevoEntorno(t)
@@ -727,14 +690,12 @@ func TestResetPassword_FlujoCompleto(t *testing.T) {
 	}
 	token := envios[0].token
 
-	// En BD solo existe el hash, nunca el token en claro.
 	for _, r := range e.fs.resets {
 		if r.TokenHash == token || r.TokenHash != hashToken(token) {
 			t.Fatal("solo debe persistirse hashToken(token)")
 		}
 	}
 
-	// Política incumplida: no quema el token.
 	var pe *ErrPoliticaPassword
 	if err := e.s.ConfirmarResetPassword(ctx, ConfirmarResetPasswordRequest{Token: token, NuevaPassword: "corta"}); !errors.As(err, &pe) {
 		t.Fatalf("política: err = %v", err)
@@ -743,11 +704,9 @@ func TestResetPassword_FlujoCompleto(t *testing.T) {
 	if err := e.s.ConfirmarResetPassword(ctx, ConfirmarResetPasswordRequest{Token: token, NuevaPassword: claveNueva}); err != nil {
 		t.Fatalf("confirmar: %v", err)
 	}
-	// Un solo uso.
 	if err := e.s.ConfirmarResetPassword(ctx, ConfirmarResetPasswordRequest{Token: token, NuevaPassword: claveNueva + "x"}); !errors.Is(err, ErrTokenResetInvalido) {
 		t.Fatalf("segundo uso: err = %v", err)
 	}
-	// Revoca sesiones, limpia el bloqueo y la clave nueva funciona.
 	if _, err := e.refresh(sesion.RefreshToken); !errors.Is(err, ErrRefreshTokenInvalido) {
 		t.Fatalf("las sesiones deben quedar revocadas: %v", err)
 	}
@@ -764,7 +723,7 @@ func TestResetPassword_ConfirmacionesConcurrentes_GanaUna(t *testing.T) {
 	e.s.EsperarEnvios()
 	token := e.notif.copia()[0].token
 
-	const n = 3 // cada confirmación calcula un argon2id de 64 MiB antes de la Tx
+	const n = 3
 	var ok atomic.Int64
 	var wg sync.WaitGroup
 	start := make(chan struct{})

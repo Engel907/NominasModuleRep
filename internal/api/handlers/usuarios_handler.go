@@ -12,7 +12,7 @@ import (
 	"planillas-ccdr/internal/auth"
 	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
 type UsuariosHandler struct {
@@ -55,7 +55,7 @@ func (h *UsuariosHandler) crear(c *gin.Context) {
 }
 
 func (h *UsuariosHandler) listar(c *gin.Context) {
-	p := pagination.Desde(c)
+	p := paginacion.Desde(c)
 	var activo *bool
 	if raw := c.Query("activo"); raw != "" {
 		value, err := strconv.ParseBool(raw)
@@ -77,7 +77,7 @@ func (h *UsuariosHandler) listar(c *gin.Context) {
 	for _, u := range users {
 		data = append(data, publicUser(u))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data, "paginacion": pagination.NuevaMeta(p, total)})
+	c.JSON(http.StatusOK, gin.H{"data": data, "paginacion": paginacion.NuevaMeta(p, total)})
 }
 
 func (h *UsuariosHandler) obtener(c *gin.Context) {
@@ -219,8 +219,6 @@ func responderErrorAdministracion(c *gin.Context, err error) {
 		middleware.Fail(c, http.StatusNotFound, "not_found", "El recurso solicitado no existe.", nil)
 	case errors.Is(err, auth.ErrUltimoAdministrador):
 		middleware.Fail(c, http.StatusConflict, "last_administrator", "No se puede quitar el último rol de administración.", nil)
-	case errors.Is(err, auth.ErrNoEmpleadoVinculado):
-		middleware.Fail(c, http.StatusUnprocessableEntity, "employee_not_linked", "El usuario no tiene un empleado vinculado.", nil)
 	default:
 		middleware.RespondWithError(c, err)
 	}

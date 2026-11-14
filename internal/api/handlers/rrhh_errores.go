@@ -1,16 +1,3 @@
-// api/handlers/rrhh_errores.go
-//
-// F03 — Traducción única de errores de los servicios de RRHH (empleados,
-// contratos, organización) a respuestas HTTP.
-//
-// Reglas:
-//   - Los errores de negocio tipados (services/rrhh_errores.go) salen con un
-//     status y un mensaje REDACTADO aquí, y solo con detalle estructurado
-//     construido a partir de campos tipados (nunca err.Error()).
-//   - Todo lo demás (errores técnicos / de BD) sale por
-//     middleware.FailFromError con el status/código de respaldo que pase el
-//     handler; el error interno nunca se vuelca con c.JSON.
-//   - Cada función responde UNA sola vez; el handler solo hace `return`.
 package handlers
 
 import (
@@ -18,7 +5,7 @@ import (
 	"net/http"
 
 	"planillas-ccdr/internal/api/middleware"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/rrhh"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
@@ -46,36 +33,35 @@ func responderErrorBind(c *gin.Context, mensaje string, err error) {
 // respaldo para errores no tipados, que salen por middleware.FailFromError.
 func responderErrorRRHH(c *gin.Context, err error, status int, code, msg string) {
 	var (
-		errVal *services.ErrValidacion
-		errSal *services.SalarioInferiorError
-		errSNP *services.SalarioMinimoNoParametrizadoError
-		errVig *services.VigenciaTraslapadaError
+		errVal *rrhh.ErrValidacion
+		errSal *rrhh.SalarioInferiorError
+		errSNP *rrhh.SalarioMinimoNoParametrizadoError
+		errVig *rrhh.VigenciaTraslapadaError
 	)
 
 	switch {
-	// --- 400: entrada inválida
 	case errors.As(err, &errVal):
 		middleware.Fail(c, http.StatusBadRequest, "validation_error", "datos inválidos",
 			gin.H{"campo": errVal.Campo, "detalle": errVal.Mensaje})
 	case errors.As(err, &errSal):
 		middleware.Fail(c, http.StatusBadRequest, "validation_error", "salario pactado inferior al salario mínimo vigente",
 			gin.H{
-				"puesto_id":       errSal.PuestoID,
-				"salario_pactado": errSal.Pactado.String(),
-				"salario_minimo":  errSal.Minimo.String(),
+				"puesto_id":           errSal.PuestoID,
+				"salario_pactado":     errSal.Pactado.String(),
+				"modalidad_salario":   errSal.Modalidad,
+				"equivalente_mensual": errSal.EquivalenteMensual.String(),
+				"salario_minimo":      errSal.Minimo.String(),
 			})
 
-	// --- 404
-	case errors.Is(err, services.ErrEmpleadoNoEncontrado):
+	case errors.Is(err, rrhh.ErrEmpleadoNoEncontrado):
 		middleware.Fail(c, http.StatusNotFound, "not_found", "empleado no encontrado", nil)
-	case errors.Is(err, services.ErrContratoNoEncontrado):
+	case errors.Is(err, rrhh.ErrContratoNoEncontrado):
 		middleware.Fail(c, http.StatusNotFound, "not_found", "el empleado no tiene contrato vigente", nil)
-	case errors.Is(err, services.ErrFamiliarNoEncontrado):
+	case errors.Is(err, rrhh.ErrFamiliarNoEncontrado):
 		middleware.Fail(c, http.StatusNotFound, "not_found", "declaración familiar vigente no encontrada", nil)
-	case errors.Is(err, services.ErrNoEncontrado):
+	case errors.Is(err, rrhh.ErrNoEncontrado):
 		middleware.Fail(c, http.StatusNotFound, "not_found", "recurso no encontrado", nil)
 
-	// --- 409: conflicto con el estado actual
 	case errors.As(err, &errVig):
 		middleware.Fail(c, http.StatusConflict, "conflict", "la fecha efectiva traslapa o precede la vigencia actual",
 			gin.H{
@@ -83,32 +69,29 @@ func responderErrorRRHH(c *gin.Context, err error, status int, code, msg string)
 				"fecha_efectiva":         errVig.FechaEfectiva.Format("2006-01-02"),
 				"inicio_vigencia_actual": errVig.InicioVigencia.Format("2006-01-02"),
 			})
-	case errors.Is(err, services.ErrContratoVigenteExiste):
+	case errors.Is(err, rrhh.ErrContratoVigenteExiste):
 		middleware.Fail(c, http.StatusConflict, "conflict", "el empleado ya tiene un contrato vigente; use actualizar contrato", nil)
-	case errors.Is(err, services.ErrIdentificacionDuplicada):
+	case errors.Is(err, rrhh.ErrIdentificacionDuplicada):
 		middleware.Fail(c, http.StatusConflict, "conflict", "ya existe un empleado con ese tipo y número de identificación", nil)
-	case errors.Is(err, services.ErrCodigoInternoDuplicado):
+	case errors.Is(err, rrhh.ErrCodigoInternoDuplicado):
 		middleware.Fail(c, http.StatusConflict, "conflict", "ya existe un empleado con ese código interno", nil)
-	case errors.Is(err, services.ErrRegistroDuplicado):
+	case errors.Is(err, rrhh.ErrRegistroDuplicado):
 		middleware.Fail(c, http.StatusConflict, "conflict", "ya existe un registro con ese código", nil)
 
-	// --- 422: la solicitud es válida pero no procesable con los datos actuales
 	case errors.As(err, &errSNP):
-		// D8: sin salario mínimo parametrizado NO se acepta el salario ni se
-		// asume un valor por defecto; el cliente puede distinguir este caso.
 		det := gin.H{"puesto_id": errSNP.PuestoID}
 		if errSNP.ClasificacionPuestoID != nil {
 			det["clasificacion_puesto_id"] = *errSNP.ClasificacionPuestoID
 		}
 		middleware.Fail(c, http.StatusUnprocessableEntity, "salario_minimo_no_parametrizado",
 			"no hay salario mínimo vigente parametrizado para la clasificación del puesto", det)
-	case errors.Is(err, services.ErrPuestoNoEncontrado):
+	case errors.Is(err, rrhh.ErrPuestoNoEncontrado):
 		middleware.Fail(c, http.StatusUnprocessableEntity, "unprocessable_entity", "el puesto indicado no existe", nil)
-	case errors.Is(err, services.ErrPuestoInactivo):
+	case errors.Is(err, rrhh.ErrPuestoInactivo):
 		middleware.Fail(c, http.StatusUnprocessableEntity, "unprocessable_entity", "el puesto indicado está inactivo", nil)
-	case errors.Is(err, services.ErrReferenciaInvalida):
+	case errors.Is(err, rrhh.ErrReferenciaInvalida):
 		middleware.Fail(c, http.StatusUnprocessableEntity, "unprocessable_entity", "una referencia indicada no existe (puesto, banco, tipo de contrato, régimen, etc.)", nil)
-	case errors.Is(err, services.ErrJerarquiaCiclica):
+	case errors.Is(err, rrhh.ErrJerarquiaCiclica):
 		middleware.Fail(c, http.StatusUnprocessableEntity, "unprocessable_entity", "la unidad padre indicada generaría un ciclo en la jerarquía", nil)
 
 	default:

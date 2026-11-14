@@ -1,23 +1,3 @@
-// api/handlers/contabilidad_handler.go
-//
-// Fase 11B: exposición HTTP del módulo de contabilización (internal/contabilidad).
-//
-// Endpoints (montados en routes.go, grupo `protegido`):
-//
-//   - POST /planillas/:id/contabilizar   → asientos_contables.generar
-//     Genera y persiste los asientos de un período en estado 'pagada' (uno por
-//     tipo_asiento) y lo marca 'contabilizada'. Todo ocurre en UNA transacción
-//     auditada (db.WithAuditContext) dentro de
-//     contabilidad.Service.ContabilizarPeriodo; cualquier otro estado → 409.
-//   - GET  /asientos-contables?periodo_id=&tipo=   → asientos_contables.ver
-//     Consulta asientos ya generados, filtrando por período y/o por código de
-//     tipo de asiento (al menos un filtro es obligatorio).
-//
-// Partida doble: este handler NO reimplementa la validación. Service llama a
-// GenerarAsientos → ValidarPartidaDoble ANTES de abrir cualquier INSERT; si
-// no cuadra (por empleado, por programa o en toda la corrida) retorna
-// *DescuadreError, se hace rollback y aquí se traduce a 422 sin que quede
-// nada persistido.
 package handlers
 
 import (
@@ -31,7 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/contabilidad"
+	"planillas-ccdr/internal/planilla"
 )
 
 // ContabilidadServicio es lo que el handler necesita de contabilidad.Service.
@@ -41,11 +23,6 @@ type ContabilidadServicio interface {
 }
 
 // DetallesCorrida entrega el resultado en memoria de la corrida del período.
-//
-// Nota: contabilidad.DetallePlanilla exige Calculo.CuotaPatronalCCSS, que NO se
-// persiste. contabilidad.DetallesSQL (sql_adapters.go) la deriva de lo
-// persistido con la misma fórmula del motor y la valida contra la cuota obrera
-// guardada; ver su comentario para los supuestos.
 type DetallesCorrida interface {
 	DetallesParaContabilizar(ctx context.Context, periodoID int64) ([]contabilidad.DetallePlanilla, error)
 }
@@ -56,8 +33,7 @@ type LectorAsientos interface {
 	ListarAsientos(ctx context.Context, filtro contabilidad.FiltroAsientos) ([]contabilidad.AsientoContable, error)
 }
 
-// ContabilidadDeps agrupa las dependencias del handler. Se construye en
-// cmd/api/main.go (buildDeps).
+// ContabilidadDeps agrupa las dependencias del handler.
 type ContabilidadDeps struct {
 	Servicio ContabilidadServicio
 	Detalles DetallesCorrida
@@ -75,10 +51,6 @@ type ContabilidadHandler struct {
 func NewContabilidadHandler(d ContabilidadDeps) *ContabilidadHandler {
 	return &ContabilidadHandler{d: d}
 }
-
-// ---------------------------------------------------------------------------
-// DTOs de respuesta (montos como string con 2 decimales: nunca float).
-// ---------------------------------------------------------------------------
 
 type asientoLineaDTO struct {
 	ID                       int64  `json:"id"`
@@ -140,10 +112,6 @@ func aAsientosDTO(as []contabilidad.AsientoContable) []asientoDTO {
 	return out
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
 // Generar: POST /planillas/:id/contabilizar
 func (h *ContabilidadHandler) Generar(c *gin.Context) {
 	periodoID, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -198,16 +166,8 @@ func (h *ContabilidadHandler) Listar(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": aAsientosDTO(asientos)})
 }
 
-// ---------------------------------------------------------------------------
-// Traducción de errores
-// ---------------------------------------------------------------------------
-
 func contabResponder(c *gin.Context, status int, codigo, mensaje string, detalle any) {
-	body := gin.H{"codigo": codigo, "mensaje": mensaje}
-	if detalle != nil {
-		body["detalle"] = detalle
-	}
-	c.AbortWithStatusJSON(status, gin.H{"error": body})
+	middleware.Fail(c, status, codigo, mensaje, detalle)
 }
 
 // contabResponderError mapea los errores centinela de contabilidad a HTTP.
@@ -215,6 +175,7 @@ func contabResponder(c *gin.Context, status int, codigo, mensaje string, detalle
 // interno al cliente).
 func contabResponderError(c *gin.Context, err error) {
 	var desc *contabilidad.DescuadreError
+	var ciclo *planilla.ErrorCiclo
 	switch {
 	case errors.As(err, &desc):
 		contabResponder(c, http.StatusUnprocessableEntity, "asiento_descuadrado",
@@ -238,9 +199,9 @@ func contabResponderError(c *gin.Context, err error) {
 		contabResponder(c, http.StatusConflict, "periodo_estado_invalido", err.Error(), nil)
 	case errors.Is(err, contabilidad.ErrAsientosYaGenerados):
 		contabResponder(c, http.StatusConflict, "asientos_ya_generados", err.Error(), nil)
+	case errors.As(err, &ciclo):
+		contabResponder(c, ciclo.HTTP, ciclo.Codigo, ciclo.Mensaje, nil)
 	default:
-		// ErrConfigInvalida y cualquier error de infraestructura caen aquí.
-		// El detalle va al log (el cliente solo recibe el mensaje genérico).
 		slog.Error("contabilidad: error no mapeado", slog.String("error", err.Error()))
 		contabResponder(c, http.StatusInternalServerError, "error_interno", "error interno al procesar la contabilización", nil)
 	}

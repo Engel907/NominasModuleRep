@@ -1,66 +1,16 @@
--- ============================================================================
--- Origen: Fase 3B — Sembrado de catálogos paramétricos restantes
---
--- Sigue el mismo patrón que la Fase 3A (000002_seed_catalogos.up.sql):
--- idempotente vía ON DUPLICATE KEY UPDATE donde la tabla tiene el índice
--- único uk_*_una_vigente, o vía NOT EXISTS donde la tabla no tiene índice
--- único propio (plantillas_asiento_linea). Todos los INSERT resuelven IDs
--- por SELECT ... WHERE codigo = '...', nunca IDs numéricos fijos a mano.
---
--- NO se reinsertan aquí (ya sembrados en fases previas, ver notas de cada
--- migración): conceptos_salariales, cuentas_contables, mapeo_concepto_cuenta
--- (Fase 3A) y tipos_asiento (sembrado junto con cuentas_contables/mapeo en
--- el mismo bloque de Fase 3A, aunque el enunciado de esta fase lo listara
--- de nuevo por error de alcance -- ya tiene DEVENGO_GASTO_PLANILLA y
--- DEVENGO_PASIVO_PLANILLA con ON DUPLICATE KEY UPDATE, así que reinsertarlo
--- sería redundante).
---
--- Deliberadamente NO se sacan filas de regimen_concepto_aplicable en este
--- bloque (instrucción explícita del alcance de esta fase): los conceptos
--- exclusivos de empleo público (ANUALIDAD, CARRERA_PROFESIONAL,
--- DEDICACION_EXCLUSIVA, PROHIBICION) no existen todavía en
--- conceptos_salariales. Tampoco se siembran LEY_MARCO_EMPLEO_PUBLICO ni
--- ESTATUTO_SERVICIO_CIVIL en regimenes_laborales (pendientes de validación
--- legal con el CCDR).
---
--- ASUNCIÓN A CONFIRMAR — creado_por: parametros_preaviso_escala y
--- parametros_salario_escolar exigen creado_por INT NOT NULL, pero no hay
--- todavía ninguna fila sembrada en `usuarios` (ni FK real declarada sobre
--- esa columna en el DDL de esas dos tablas). Se usa el valor 1 como
--- placeholder de "usuario de sistema / carga inicial" -- confirmar con el
--- equipo el id real una vez existan cuentas de usuario, y corregir estas
--- filas si no coincide.
---
--- ASUNCIÓN A CONFIRMAR — parametros_base_minima_contributiva.monto: se
--- siembra ₡232,441.00 como base mínima contributiva SEM/IVM de referencia;
--- no se pudo verificar el monto oficial vigente 2026 contra una circular
--- de la CCSS en este entorno. Ajustar con el monto oficial antes de usar en
--- producción.
--- ============================================================================
 SET @fecha_vigencia_2026 = COALESCE(@fecha_vigencia_2026, '2026-01-01');
 
--- -----------------------------------------------------------------------------
--- 1) regimenes_laborales — Código de Trabajo (régimen general, no versionado).
---    LEY_MARCO_EMPLEO_PUBLICO y ESTATUTO_SERVICIO_CIVIL quedan pendientes.
--- -----------------------------------------------------------------------------
 INSERT INTO regimenes_laborales (codigo, nombre, descripcion, activo)
 VALUES (
     'CODIGO_TRABAJO',
     'Código de Trabajo',
-    'Régimen laboral general regido por el Código de Trabajo; aplica por defecto mientras se valida con el CCDR la aplicabilidad de la Ley Marco de Empleo Público y el Estatuto de Servicio Civil.',
+    'Régimen laboral general regido por el Código de Trabajo',
     1
 )
 ON DUPLICATE KEY UPDATE
     nombre      = VALUES(nombre),
     descripcion = VALUES(descripcion);
 
--- -----------------------------------------------------------------------------
--- 2) parametros_cesantia_escala — Art. 29 Código de Trabajo, ligada a
---    CODIGO_TRABAJO por regimen_laboral_id (resuelto por codigo, no a mano).
---    tope_anios = 8 en todos los tramos (tope legal de años reconocidos para
---    el cálculo de cesantía tras la reforma de la Ley de Protección al
---    Trabajador) -- ASUNCIÓN A CONFIRMAR si el CCDR aplica un tope distinto.
--- -----------------------------------------------------------------------------
 INSERT INTO parametros_cesantia_escala
     (regimen_laboral_id, anios_servicio_desde, anios_servicio_hasta, dias_por_anio, tope_anios, fecha_inicio_vigencia, fecha_fin_vigencia)
 SELECT rl.id, v.anios_desde, v.anios_hasta, v.dias_por_anio, 8.00, @fecha_vigencia_2026, NULL
@@ -84,10 +34,6 @@ ON DUPLICATE KEY UPDATE
     dias_por_anio = VALUES(dias_por_anio),
     tope_anios    = VALUES(tope_anios);
 
--- -----------------------------------------------------------------------------
--- 3) parametros_preaviso_escala — Art. 28 Código de Trabajo, ligada a
---    CODIGO_TRABAJO por regimen_laboral_id (resuelto por codigo).
--- -----------------------------------------------------------------------------
 INSERT INTO parametros_preaviso_escala
     (regimen_laboral_id, antiguedad_meses_desde, antiguedad_meses_hasta, dias_preaviso, fecha_inicio_vigencia, fecha_fin_vigencia, creado_por)
 SELECT rl.id, v.meses_desde, v.meses_hasta, v.dias_preaviso, @fecha_vigencia_2026, NULL, 1
@@ -102,11 +48,6 @@ WHERE rl.codigo = 'CODIGO_TRABAJO'
 ON DUPLICATE KEY UPDATE
     dias_preaviso = VALUES(dias_preaviso);
 
--- -----------------------------------------------------------------------------
--- 4) parametros_horas_extra — factor de recargo por tipo de hora extra
---    (Art. 139 CT: 50% de recargo para jornada extraordinaria ordinaria;
---    DOBLE se siembra al 100% de recargo para trabajo en feriado/descanso).
--- -----------------------------------------------------------------------------
 INSERT INTO parametros_horas_extra
     (tipo_hora_extra_id, factor_recargo, fecha_inicio_vigencia, fecha_fin_vigencia)
 SELECT the.id, v.factor_recargo, @fecha_vigencia_2026, NULL
@@ -120,12 +61,6 @@ JOIN (
 ON DUPLICATE KEY UPDATE
     factor_recargo = VALUES(factor_recargo);
 
--- -----------------------------------------------------------------------------
--- 5) parametros_vacaciones_escala — mínimo legal Art. 153 CT: 2 semanas
---    (12 días hábiles) por año para jornada de 6 días. Un solo tramo
---    cubriendo todos los años de servicio; ajustar/agregar tramos si el
---    CCDR reconoce escalas superiores por convención colectiva.
--- -----------------------------------------------------------------------------
 INSERT INTO parametros_vacaciones_escala
     (anios_servicio_desde, anios_servicio_hasta, dias_vacaciones, fecha_inicio_vigencia, fecha_fin_vigencia)
 VALUES
@@ -133,11 +68,6 @@ VALUES
 ON DUPLICATE KEY UPDATE
     dias_vacaciones = VALUES(dias_vacaciones);
 
--- -----------------------------------------------------------------------------
--- 6) parametros_subsidios_incapacidad — CCSS (enfermedad): días 1-3 a cargo
---    del patrono (50%), desde el día 4 a cargo de la CCSS (60%). INS
---    (riesgos del trabajo): 100% a cargo del INS desde el día 1.
--- -----------------------------------------------------------------------------
 INSERT INTO parametros_subsidios_incapacidad
     (entidad_emisora_id, dia_desde, dia_hasta, porcentaje_patronal, porcentaje_entidad, fecha_inicio_vigencia, fecha_fin_vigencia)
 SELECT eei.id, v.dia_desde, v.dia_hasta, v.porcentaje_patronal, v.porcentaje_entidad, @fecha_vigencia_2026, NULL
@@ -151,10 +81,6 @@ ON DUPLICATE KEY UPDATE
     porcentaje_patronal = VALUES(porcentaje_patronal),
     porcentaje_entidad  = VALUES(porcentaje_entidad);
 
--- -----------------------------------------------------------------------------
--- 7) parametros_base_minima_contributiva — base mínima contributiva SEM/IVM.
---    Ver ASUNCIÓN A CONFIRMAR sobre el monto, al inicio de este archivo.
--- -----------------------------------------------------------------------------
 INSERT INTO parametros_base_minima_contributiva
     (regimen_ccss_id, monto, fecha_inicio_vigencia, fecha_fin_vigencia)
 SELECT rc.id, 232441.00, @fecha_vigencia_2026, NULL
@@ -163,10 +89,6 @@ WHERE rc.codigo IN ('SEM', 'IVM')
 ON DUPLICATE KEY UPDATE
     monto = VALUES(monto);
 
--- -----------------------------------------------------------------------------
--- 8) parametros_salario_escolar — 1/12 (8.33%) del total de salarios brutos
---    del período anual, patrón estándar de Salario Escolar en Costa Rica.
--- -----------------------------------------------------------------------------
 INSERT INTO parametros_salario_escolar
     (porcentaje, fecha_inicio_vigencia, fecha_fin_vigencia, creado_por)
 VALUES
@@ -174,14 +96,6 @@ VALUES
 ON DUPLICATE KEY UPDATE
     porcentaje = VALUES(porcentaje);
 
--- -----------------------------------------------------------------------------
--- 9) concepto_salarial_formula — una versión vigente por cada concepto de
---    tipo_calculo = 'formula' (los de tipo_calculo = 'captura_manual' no
---    llevan fórmula, se digitan a mano en cada corrida; ninguno es 'fijo'
---    todavía). expresion_formula es un JSON descriptivo/placeholder que
---    referencia de qué tabla de parámetros toma el cálculo -- el motor de
---    cálculo real deberá reemplazarlo por el DSL que finalmente adopte.
--- -----------------------------------------------------------------------------
 INSERT INTO concepto_salarial_formula
     (concepto_salarial_id, monto_fijo, expresion_formula, fecha_inicio_vigencia, fecha_fin_vigencia)
 SELECT cs.id, NULL, v.expresion_formula, @fecha_vigencia_2026, NULL
@@ -202,12 +116,6 @@ JOIN (
 ON DUPLICATE KEY UPDATE
     expresion_formula = VALUES(expresion_formula);
 
--- -----------------------------------------------------------------------------
--- 10) orden_calculo_concepto — secuencia base -> horas extra -> bases
---     especiales -> deducciones legales -> deducciones de terceros ->
---     aportes patronales, para los 19 conceptos ya sembrados en Fase 3A.
---     Incrementos de 10 para poder insertar conceptos futuros sin renumerar.
--- -----------------------------------------------------------------------------
 INSERT INTO orden_calculo_concepto
     (concepto_salarial_id, orden, fecha_inicio_vigencia, fecha_fin_vigencia)
 SELECT cs.id, v.orden, @fecha_vigencia_2026, NULL
@@ -236,14 +144,6 @@ JOIN (
 ON DUPLICATE KEY UPDATE
     orden = VALUES(orden);
 
--- -----------------------------------------------------------------------------
--- 11) plantillas_asiento_linea — líneas por tipo de asiento, alineadas 1 a 1
---     con las cuentas ya usadas en mapeo_concepto_cuenta (Fase 3A): 5101-5106
---     al debe de DEVENGO_GASTO_PLANILLA, 2101-2106 al haber de
---     DEVENGO_PASIVO_PLANILLA. Esta tabla no tiene índice único propio, así
---     que la idempotencia se protege con NOT EXISTS en vez de
---     ON DUPLICATE KEY UPDATE.
--- -----------------------------------------------------------------------------
 INSERT INTO plantillas_asiento_linea
     (tipo_asiento_id, descripcion_linea, tipo_movimiento, orden)
 SELECT ta.id, v.descripcion_linea, v.tipo_movimiento, v.orden

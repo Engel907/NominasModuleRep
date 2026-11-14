@@ -16,24 +16,25 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/asistencia"
 	"planillas-ccdr/internal/auth"
+	"planillas-ccdr/internal/catalogos"
 	"planillas-ccdr/internal/config"
 	"planillas-ccdr/internal/contabilidad"
+	"planillas-ccdr/internal/credenciales"
 	"planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/liquidacion"
+	"planillas-ccdr/internal/observabilidad"
 	"planillas-ccdr/internal/parametros"
 	"planillas-ccdr/internal/planilla"
 	"planillas-ccdr/internal/planilla/infra"
 	"planillas-ccdr/internal/prestamos"
-	"planillas-ccdr/internal/security"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/rrhh"
 
 	"github.com/gin-gonic/gin"
 )
 
 // New construye los servicios y devuelve el engine de Gin listo para servir.
 // Falla rápido si algún servicio no se puede armar (error de despliegue).
-func New(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (*gin.Engine, error) {
-	// F16: errores de validación con el nombre del tag json (una sola vez,
-	// antes de servir tráfico).
+func New(cfg *config.Config, sqlDB *sql.DB, tokenMaker credenciales.TokenMaker) (*gin.Engine, error) {
 	middleware.ConfigurarValidador()
 
 	deps, err := buildDeps(cfg, sqlDB, tokenMaker)
@@ -41,7 +42,6 @@ func New(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (*gi
 		return nil, fmt.Errorf("deps: %w", err)
 	}
 
-	// F16 (S8): limitadores en memoria (una réplica; ver middleware/ratelimit.go).
 	limAuth, err := middleware.NuevoLimitador(cfg.RateLimit.AuthPorMin, cfg.RateLimit.AuthBurst)
 	if err != nil {
 		return nil, fmt.Errorf("rate limit auth: %w", err)
@@ -53,7 +53,6 @@ func New(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (*gi
 	deps.LimiteAuth = middleware.LimitarPorIP(limAuth)
 	deps.LimiteUsuario = middleware.LimitarPorUsuario(limUsuario)
 
-	// F15: verificador de sesión (activo + permisos_version) con caché de TTL corto.
 	queries := dto.New(sqlDB)
 	sesiones := middleware.NuevoSesionCache(func(ctx context.Context, id int64) (bool, uint32, error) {
 		e, err := queries.GetEstadoSesion(ctx, id)
@@ -64,82 +63,104 @@ func New(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (*gi
 
 // NewTokenMaker arma el PasetoMaker real desde el llavero configurado
 // (PASETO_LOCAL_KEYS_HEX / PASETO_ACTIVE_KID, o la clave legada), con issuer y
-// audience que se firman y se exigen (F15). config.validate() ya lo comprobó,
+// audience que se firman y se exigen. config.validate ya lo comprobó,
 // pero se revalida por si se llama fuera de ese flujo (tests).
-func NewTokenMaker(authCfg config.AuthConfig) (security.TokenMaker, error) {
+func NewTokenMaker(authCfg config.AuthConfig) (credenciales.TokenMaker, error) {
 	claves, activo, err := authCfg.ClavesPaseto()
 	if err != nil {
 		return nil, err
 	}
-	return security.NuevoPasetoMaker(security.ConfigPaseto{
+	return credenciales.NuevoPasetoMaker(credenciales.ConfigPaseto{
 		Claves: claves, KIDActivo: activo,
 		Issuer: authCfg.Issuer, Audience: authCfg.Audience,
 	})
 }
 
-// buildDeps construye los servicios que dependen de la capa de datos
-// (internal/db/dto) y los agrupa en handlers.Deps. Es el único lugar donde se
-// conecta la capa de datos con los servicios: routes.go solo monta rutas. Los
-// servicios de empleados, contratos y organización se arman dentro de
-// handlers.RegisterRoutes porque reciben *sql.DB directo.
-func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker) (handlers.Deps, error) {
+// buildDeps construye los servicios que dependen de la capa de datos y los
+// agrupa en handlers.Deps.
+func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker credenciales.TokenMaker) (handlers.Deps, error) {
 	queries := dto.New(sqlDB)
 
-	// L8: cálculo del período. El orquestador corre dentro de la transacción
-	// de PeriodoService; el escritor también borra el detalle al recalcular.
+	llavero, err := cfg.Datos.Llavero()
+	if err != nil {
+		return handlers.Deps{}, fmt.Errorf("datos personales: %w", err)
+	}
+
 	escritor := &planilla.EscritorDetalle{}
+	repoParametros := parametros.NewRepositorioSQL(sqlDB)
+	generales := parametros.NewGenerales(repoParametros, cfg.Parametros.CacheTTL).ConValoresPorEmpleado(repoParametros)
+	ventanas := planilla.NewVentanas(generales)
+	metricas := observabilidad.Nuevas()
 	orquestador := planilla.NewOrquestador(
 		planilla.NewHidratador(queries),
 		planilla.NewMotorEmpleado(infra.NewMotorRepository(queries)),
-		planilla.NewCargadorParametros(infra.NewFuenteParametros(queries),
-			parametros.NewGenerales(parametros.NewRepositorioSQL(sqlDB), cfg.Parametros.CacheTTL)),
+		planilla.NewCargadorParametros(infra.NewFuenteParametros(queries), generales).
+			ConAjustesPorEmpleado(queries, func(id int64) planilla.GeneralesLector { return generales.ParaEmpleado(id) }),
 		escritor,
 		queries,
-	)
+		ventanas,
+	).ConObservador(metricas)
+	cfgConta := contabilidad.ConfigGeneracion{
+		ConceptoAnclaNeto: "SAL_BASE",
+		TipoAsientoPago:   "PAGO_PLANILLA",
+	}
+	ganchoPago, err := contabilidad.NewGanchoPago(cfgConta)
+	if err != nil {
+		return handlers.Deps{}, fmt.Errorf("contabilidad: %w", err)
+	}
+	ganchosPeriodo := planilla.PeriodoGanchos{
+		Calculador: orquestador,
+		Eliminador: escritor,
+		AlAprobar:  planilla.GanchosAlAprobar{planilla.NewAplicadorPrestamos(), planilla.NewAplicadorAcumulados(), planilla.NewAplicadorVacaciones()},
+		AlPagar:    ganchoPago,
+	}
+	periodoSvc := planilla.NewPeriodoService(sqlDB, ganchosPeriodo)
 
-	asistenciaSvc, err := asistencia.NewService(sqlDB, queries, asistencia.Opciones{
-		ToleranciaTardanzaMin: cfg.Asistencia.ToleranciaTardanzaMin,
-	})
+	asistenciaSvc, err := asistencia.NewService(sqlDB, queries, generales)
 	if err != nil {
 		return handlers.Deps{}, fmt.Errorf("asistencia: %w", err)
 	}
 
-	cfgConta := contabilidad.ConfigGeneracion{
-		ConceptoAnclaNeto:         "SAL_BASE",
-		ConceptoCuotaPatronalCCSS: "CCSS_PAT",
-	}
 	contaSvc, err := contabilidad.NewService(contabilidad.NewRepositorio(sqlDB), cfgConta)
 	if err != nil {
 		return handlers.Deps{}, fmt.Errorf("contabilidad: %w", err)
 	}
-	contaDetalles, err := contabilidad.NewDetallesSQL(sqlDB, cfgConta, "CCSS_OBR")
+	contaDetalles, err := contabilidad.NewDetallesSQL(sqlDB)
 	if err != nil {
 		return handlers.Deps{}, fmt.Errorf("contabilidad: %w", err)
 	}
 
+	notificador, err := auth.NuevoNotificador(cfg, slog.Default())
+	if err != nil {
+		return handlers.Deps{}, err
+	}
+
 	return handlers.Deps{
-		// auth.Store son métodos de *dto.Queries (ver auth/service.go).
-		Auth: auth.NuevoServicio(queries, sqlDB, tokenMaker, politicaAuth(cfg.Auth)),
+		Auth: auth.NuevoServicio(queries, sqlDB, tokenMaker, politicaAuth(cfg.Auth)).ConNotificador(notificador),
 
 		Asistencia: asistenciaSvc,
 
 		Prestamos: prestamos.NewService(sqlDB, queries),
 
-		// Dashboard gerencial.
-		Dashboard: services.NewDashboardService(services.NewDashboardRepository(queries), sqlDB, 3*time.Second),
+		Dashboard: rrhh.NewDashboardService(rrhh.NewDashboardRepository(queries), sqlDB, 3*time.Second),
 
-		// Liquidaciones: *dto.Queries debe implementar services.LiquidacionRepository.
-		Liquidacion: services.NewLiquidacionService(sqlDB, queries, infra.NewMotorRepository(queries)),
+		Liquidacion: rrhh.NewLiquidacionService(sqlDB, queries, infra.NewMotorRepository(queries), generales),
 
-		PlanillaExport:   planilla.NewExportService(infra.NewExportRepository(queries), infra.NewExportUnitOfWork(sqlDB)),
-		PlanillaPeriodo:  planilla.NewPeriodoService(sqlDB, planilla.PeriodoGanchos{Calculador: orquestador, Eliminador: escritor}),
+		PlanillaExport:   planilla.NewExportService(infra.NewExportRepository(queries, llavero), infra.NewExportUnitOfWork(sqlDB, llavero)),
+		PlanillaPeriodo:  periodoSvc,
 		PlanillaDevengos: planilla.NewDevengosService(sqlDB),
 
 		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
 		HorasExtra: asistencia.NewHorasExtraService(sqlDB),
 
-		// Construido, sin rutas todavía: lo reemplaza L19.
-		Acumulados: planilla.NewAcumuladosService(infra.NewAcumuladosRepository(queries)),
+		Acumulados: planilla.NewEjecutorAcumulados(periodoSvc, queries, ventanas),
+
+		Llavero:   llavero,
+		Generales: generales,
+		Metricas:  metricas,
+
+		Catalogos:  catalogos.NewService(sqlDB, catalogos.Registro()),
+		Parametros: parametros.NewPropuestas(sqlDB, parametros.RegistroEspecs(parametros.Validadores{Renta: planilla.ValidarTramosRenta, Formula: liquidacion.ValidarExpresionFormula}), generales.Invalidar),
 
 		Contabilidad: &handlers.ContabilidadDeps{
 			Servicio: contaSvc,
@@ -153,8 +174,7 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 	}, nil
 }
 
-// politicaAuth aplica la configuración a auth.Politica. (F15: PASETO_ISSUER y
-// PASETO_AUDIENCE ahora los consume NewTokenMaker.)
+// politicaAuth aplica la configuración a auth.Politica.
 func politicaAuth(a config.AuthConfig) auth.Politica {
 	return auth.Politica{
 		MaxIntentosFallidos:  a.MaxFailedLogins,
@@ -165,18 +185,15 @@ func politicaAuth(a config.AuthConfig) auth.Politica {
 	}
 }
 
-// newRouter arma el engine de Gin con la cadena global de middleware (F16) y
+// newRouter arma el engine de Gin con la cadena global de middleware y
 // delega el montaje de las rutas de negocio en handlers.RegisterRoutes.
-func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker, sesiones middleware.SesionVerificador, deps handlers.Deps) (*gin.Engine, error) {
+func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker credenciales.TokenMaker, sesiones middleware.SesionVerificador, deps handlers.Deps) (*gin.Engine, error) {
 	if cfg.App.IsProduction() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	router := gin.New()
 
-	// S8: sin esto gin confía en TODOS los proxies y ClientIP() sale de
-	// X-Forwarded-For, que el cliente controla (evade el rate limiter y
-	// falsea los logs). Lista vacía = ninguno: se usa la IP del socket.
 	proxies := cfg.Server.TrustedProxies
 	if proxies == nil {
 		proxies = []string{}
@@ -185,17 +202,12 @@ func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 		return nil, fmt.Errorf("TRUSTED_PROXIES: %w", err)
 	}
 
-	logger := slog.Default() // main.go lo reemplaza por el logger JSON configurado
+	logger := slog.Default()
 
-	// ORDEN (importa):
-	//  1. RequestID        — primero: todo lo demás ya tiene request_id.
-	//  2. SecurityHeaders  — antes de nada que pueda responder: errores y 404 también las llevan.
-	//  3. RequestLogger    — envuelve al resto para registrar el estado final.
-	//  4. Recovery         — dentro del logger (éste ve el 500) y fuera de ErrorHandler.
-	//  5. ErrorHandler     — escribe el JSON de Fail/RespondWithError; todo lo que use
-	//                        Fail debe ir DESPUÉS de él.
-	//  6. CORS             — antes de auth/limitadores: el preflight no lleva Authorization.
-	//  7. LimitarCuerpo    — 413 antes de que un handler lea el cuerpo.
+	if deps.Metricas != nil {
+		router.Use(deps.Metricas.Middleware())
+		router.GET("/metrics", deps.Metricas.Handler(cfg.Server.MetricsToken))
+	}
 	router.Use(
 		middleware.RequestID(),
 		middleware.SecurityHeaders(cfg.App.IsProduction()),
@@ -206,19 +218,34 @@ func newRouter(cfg *config.Config, sqlDB *sql.DB, tokenMaker security.TokenMaker
 		middleware.LimitarCuerpo(cfg.Server.MaxBodyBytes),
 	)
 
-	// /healthz se mantiene tal cual (compatibilidad con probes ya configurados).
 	router.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+	router.GET("/readyz", func(c *gin.Context) {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 		defer cancel()
-
 		if err := sqlDB.PingContext(ctx); err != nil {
 			middleware.Fail(c, http.StatusServiceUnavailable, "db_unavailable", "No se pudo conectar a la base de datos", nil)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		if deps.Generales != nil {
+			faltan, err := deps.Generales.Faltantes(ctx, time.Now().UTC())
+			if err != nil {
+				middleware.Fail(c, http.StatusServiceUnavailable, "parametros_ilegibles", "No se pudieron leer los parámetros requeridos", nil)
+				return
+			}
+			if len(faltan) > 0 {
+				claves := make([]string, len(faltan))
+				for i, f := range faltan {
+					claves[i] = f.Clave
+				}
+				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "parametros_faltantes", "faltantes": claves})
+				return
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "listo"})
 	})
 
-	// /health: público, sin auth, con latencia y timestamp.
 	router.GET("/health", handlers.NewDashboardHandler(deps.Dashboard).GetHealth)
 
 	api := router.Group("/api/v1")

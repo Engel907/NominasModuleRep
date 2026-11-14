@@ -1,123 +1,5 @@
--- ============================================================================
--- schema.sql — Esquema COMPLETO y ÚNICO de planillas-ccdr
--- Generado consolidando (en orden) las migraciones:
---   000000_planillas_ccdr_v11_completo.up.sql
---   000001_seguridad_reforzada.up.sql
---   000002_seed_catalogos.up.sql
---   000003_calendario_asistencia_vacaciones.up.sql
---   000004_acumulados_liquidaciones.up.sql
---
--- Correr este único archivo contra una base de datos vacía crea el 100%
--- del esquema (tablas + triggers de auditoría + datos semilla).
--- Ya no se usa herramienta de migraciones: este es el único .sql fuente.
--- ============================================================================
-
--- ============================================================================
--- Origen: migrations/000000_planillas_ccdr_v11_completo.up.sql
--- ============================================================================
--- ============================================================================
--- 000000_planillas_ccdr_v11_completo.up.sql
---
--- FIX (auditoria de produccion, ver /mnt/user-data/outputs/AUDITORIA.md):
--- Este archivo estaba como PLACEHOLDER (un SELECT 1 de no-op). Se reemplaza
--- aqui por el contenido REAL del esquema v11 (64 tablas + 191 triggers de
--- auditoria) provisto por el usuario como `planillas_ccdr_v11_completo.sql`,
--- tal como pedia el comentario original de este archivo y ORGANIZACION.md
--- seccion 3. A partir de aca `sqlc generate` y las migraciones 000001+ ya
--- tienen contra que correr.
---
--- OJO: sigue habiendo 2 tablas que el codigo (internal/db/queries/*.sql)
--- asume que existen y que ESTE esquema NO define: `contratos` y
--- `planilla_detalle_embargo`. Ver AUDITORIA.md seccion "Bloqueantes de
--- esquema" antes de correr sqlc generate / desplegar.
--- ============================================================================
-
--- ============================================================================
--- MODELO ENTIDAD-RELACIÓN — MÓDULO DE PLANILLAS Y RECURSOS HUMANOS
--- CCDR de Liberia — VERSIÓN 11 (CONSOLIDADA, CORREGIDA Y REFORZADA)
--- ============================================================================
--- Este archivo es la fusión de:
---   1) El esquema original (55 tablas, "planillas_9.sql")
---   2) El parche de correcciones que se había entregado por partes
---      ("planillas_6.sql" / "planillaas_5.sql"), ya integrado directamente
---      en las definiciones de tabla (no como ALTER posteriores)
---   3) Los 3 vacíos que quedaron pendientes tras revisar ese parche:
---        a) el patrón "una sola fila vigente" (es_vigente + índice único)
---           SOLO se había aplicado a 9 tablas; aquí se aplica a las ~17
---           tablas versionadas por fecha_inicio_vigencia/fecha_fin_vigencia
---           del esquema completo (incluye mapeo_concepto_cuenta, que se
---           quedó fuera antes).
---        b) las columnas de transición (*_id) del parche quedaban NULLABLE
---           a propósito, conviviendo con el ENUM/VARCHAR viejo, para poder
---           migrar datos ya cargados. Como este archivo asume una base
---           NUEVA (sin datos previos), aquí van directas como definitivas
---           (NOT NULL donde corresponde) y SIN el ENUM/VARCHAR viejo.
---        c) asientos_contables_detalle no tenía el CHECK de partida doble
---           (que una línea no tenga monto_debe y monto_haber a la vez) --
---           se identificó en la revisión final y aquí se agrega.
---        d) parametros_tipos_embargo tenía `codigo` como UNIQUE simple, lo
---           cual en la práctica IMPEDÍA que existiera una segunda versión
---           vigente de prioridad_legal para el mismo tipo de embargo (el
---           UNIQUE choca con el propósito de vigencia). Se corrige aquí:
---           `codigo` pasa a índice normal (no unique) + patrón es_vigente.
---
--- IMPORTANTE — dos formas de usar este archivo:
---   - Base de datos NUEVA / staging vacío: correr este archivo completo,
---     tal cual, de un solo tiro. Ya incluye todo integrado.
---   - Base de datos que YA corrió planillas_9.sql y tiene datos cargados:
---     NO correr este archivo (recrearía las tablas vacías). En ese caso
---     usar el archivo de migración por ALTER (planillas_10.sql), que migra
---     los datos existentes antes de cerrar las columnas a NOT NULL.
---
--- Principios de diseño heredados del documento original (sección 5.1):
---   1. Ningún parámetro legal ni cuenta contable vive en código: todo está
---      en tablas versionadas por fecha de vigencia, editables desde
---      configuración. NINGÚN valor de catálogo legal vive en un ENUM.
---   2. Cualquier línea de cualquier planilla histórica debe poder
---      reproducirse exactamente: qué parámetro/fórmula se usó y cuándo se
---      aprobó.
---   3. Una corrida de planilla aprobada es inmutable: las correcciones son
---      movimientos de ajuste en el período siguiente, trazables hacia el
---      período que corrigen.
---   4. Terminología alineada conceptualmente con SAP HCM: Infotypes ->
---      tablas de expediente con vigencia; Wage Types -> conceptos
---      salariales; Payroll Schema -> orden de cálculo; Payroll Area ->
---      tipos/periodos de planilla.
---   5. (nuevo) Ninguna tabla versionada permite dos filas "vigentes" al
---      mismo tiempo para la misma clave -- se refuerza con columna generada
---      es_vigente + índice único, en TODAS las tablas versionadas.
---
---
--- CAMBIOS DE LA VERSION 11 respecto a la v10 reforzada:
---   a) auditoria_cambios ya NO depende de que el backend recuerde escribir
---      ahi: se agregaron triggers AFTER INSERT/UPDATE/DELETE automaticos en
---      las 63 tablas de datos (todas menos auditoria_cambios misma). El
---      backend solo debe fijar SET @auditoria_usuario_id = <id> al inicio
---      de cada conexion/transaccion para que quede el usuario responsable;
---      si no se fija, usuario_id queda NULL (igual que antes).
---   b) vacaciones_acumulado y prestamos ahora tienen origen_carga
---      ('operacion' | 'migracion_inicial') y registrado_por_usuario_id,
---      para dejar trazabilidad explicita de que saldo fue digitado a mano
---      el dia del arranque del sistema (sin historial verificable detras)
---      vs. generado por el sistema en marcha.
---   c) El guard de version de motor ahora exige MariaDB >= 10.3.0 (antes
---      10.2.1), porque los triggers de auditoria usan JSON_OBJECT.
---   d) Los 2 triggers de validacion de auto-ajuste ahora tienen
---      DROP TRIGGER IF EXISTS, para que la idempotencia (re-correr el
---      archivo N veces) tambien los cubra a ellos.
---
--- Motor: InnoDB (transaccional, FKs). Charset: utf8mb4.
--- Requiere MySQL 8.0.16+ (CHECK CONSTRAINT y generated columns).
--- Convención: snake_case, PK BIGINT UNSIGNED AUTO_INCREMENT salvo catálogos
--- pequeños, timestamps created_at/updated_at para bitácora básica de fila,
--- bitácora detallada de valores anterior/nuevo en `auditoria_cambios`.
--- ============================================================================
-
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
-
--- los referencian por FK desde su primera definición)
--- ============================================================================
 
 CREATE TABLE tipos_identificacion (
   id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno',
@@ -194,10 +76,6 @@ INSERT INTO tipos_hora_extra (codigo, nombre) VALUES
   ('MIXTA','Hora extra mixta'),
   ('DOBLE','Hora doble');
 
--- ============================================================================
--- 6.1 ESTRUCTURA ORGANIZATIVA
--- ============================================================================
-
 CREATE TABLE unidades_organizativas (
   id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la unidad',
   codigo              VARCHAR(20)  NOT NULL UNIQUE COMMENT 'Código corto de la unidad, único (p.ej. RRHH, PROV)',
@@ -207,24 +85,22 @@ CREATE TABLE unidades_organizativas (
   created_at          TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Fecha/hora en que se creó el registro',
   updated_at          TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Fecha/hora de la última modificación del registro',
   CONSTRAINT fk_unidad_padre FOREIGN KEY (unidad_padre_id) REFERENCES unidades_organizativas(id)
-) ENGINE=InnoDB COMMENT='Departamentos/unidades con jerarquía (sección 6.1)';
+) ENGINE=InnoDB COMMENT='Departamentos/unidades con jerarquía';
 
 CREATE TABLE programas_presupuestarios (
   id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del programa presupuestario',
   codigo      VARCHAR(20)  NOT NULL UNIQUE COMMENT 'Código corto y único del programa (p.ej. PROG1, PROG2)',
   nombre      VARCHAR(150) NOT NULL COMMENT 'Nombre del programa presupuestario (p.ej. "Administración", "Operativos")',
   activo      TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1 = programa vigente y utilizable, 0 = descontinuado',
-  notas       VARCHAR(255) NULL COMMENT 'p.ej. "pendiente de confirmar" para un eventual tercer programa'
-) ENGINE=InnoDB COMMENT='Código Municipal Ley 7794 / Ley 8131 (sección 3.8)';
+  notas       VARCHAR(255) NULL COMMENT 'Observaciones del programa'
+) ENGINE=InnoDB COMMENT='Programas presupuestarios o centros de costo a los que se imputa el gasto de planilla';
 
--- CORRECCIÓN: clasificacion pasa de VARCHAR libre a FK real al catálogo
--- clasificaciones_puesto (ver notas del archivo, punto 3 de la revisión).
 CREATE TABLE puestos (
   id                      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del puesto',
   codigo                  VARCHAR(20)  NOT NULL UNIQUE COMMENT 'Código corto y único del puesto',
   nombre                  VARCHAR(150) NOT NULL COMMENT 'Nombre/título del puesto (p.ej. "Analista de RRHH")',
   unidad_organizativa_id  BIGINT UNSIGNED NOT NULL COMMENT 'Unidad organizativa a la que pertenece el puesto',
-  clasificacion_puesto_id BIGINT UNSIGNED NULL COMMENT 'Categoría del puesto para efectos de Ley 10159 / Decreto de Salarios Mínimos (FK, antes VARCHAR libre)',
+  clasificacion_puesto_id BIGINT UNSIGNED NULL COMMENT 'Categoría del puesto para efectos de Ley 10159 / Decreto de Salarios Mínimos (FK)',
   activo                  TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1 = puesto vigente/disponible, 0 = eliminado del catálogo activo',
   CONSTRAINT fk_puesto_unidad FOREIGN KEY (unidad_organizativa_id) REFERENCES unidades_organizativas(id),
   CONSTRAINT fk_puesto_clasificacion FOREIGN KEY (clasificacion_puesto_id) REFERENCES clasificaciones_puesto(id)
@@ -252,15 +128,10 @@ CREATE TABLE bancos (
   activo                    TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1 = banco disponible para uso, 0 = dado de baja'
 ) ENGINE=InnoDB COMMENT='Catálogo de bancos, con roles de depositario de nómina y/o otorgante de préstamos';
 
--- ============================================================================
--- 6.2 EXPEDIENTE DEL EMPLEADO (equivalente a "Infotypes" de SAP, sección 5.2)
--- ============================================================================
-
--- CORRECCIÓN: tipo_identificacion pasa de ENUM a FK real (tipos_identificacion).
 CREATE TABLE empleados (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del empleado (llave de negocio real, no la cédula)',
   codigo_interno         VARCHAR(10)  NOT NULL UNIQUE COMMENT 'p.ej. E001, E002 (patrón ya usado internamente)',
-  tipo_identificacion_id BIGINT UNSIGNED NOT NULL COMMENT 'Tipo de documento de identidad del empleado (FK, antes ENUM)',
+  tipo_identificacion_id BIGINT UNSIGNED NOT NULL COMMENT 'Tipo de documento de identidad del empleado (FK)',
   numero_identificacion  VARCHAR(20) NOT NULL COMMENT 'cédula (9 díg.), DIMEX (12 díg.), pasaporte o cédula de residencia',
   nombre_completo        VARCHAR(200) NOT NULL COMMENT 'Nombre completo del empleado',
   fecha_ingreso          DATE NOT NULL COMMENT 'Fecha en que el empleado ingresó a laborar (usada, entre otros, para calcular antigüedad, vacaciones y cesantía)',
@@ -271,10 +142,6 @@ CREATE TABLE empleados (
   UNIQUE KEY uk_empleado_identificacion (tipo_identificacion_id, numero_identificacion)
 ) ENGINE=InnoDB COMMENT='Datos maestros invariantes del empleado';
 
--- CORRECCIÓN (punto 4 de la revisión): se agrega es_vigente + índice único
--- para impedir dos filas vigentes simultáneas del mismo empleado, y CHECK
--- de rango de fechas de vigencia. Mismo patrón en las demás tablas de
--- expediente versionadas de esta sección.
 CREATE TABLE empleado_datos_personales (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del registro histórico',
   empleado_id            BIGINT UNSIGNED NOT NULL COMMENT 'Empleado al que pertenecen estos datos',
@@ -289,13 +156,13 @@ CREATE TABLE empleado_datos_personales (
   CONSTRAINT chk_edp_vigencia CHECK (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= fecha_inicio_vigencia),
   UNIQUE KEY uk_edp_una_vigente (empleado_id, es_vigente),
   KEY ix_edp_vigencia (empleado_id, fecha_inicio_vigencia, fecha_fin_vigencia)
-) ENGINE=InnoDB COMMENT='Infotype: datos personales con vigencia histórica';
+) ENGINE=InnoDB COMMENT='datos personales con vigencia histórica';
 
 CREATE TABLE empleado_datos_laborales (
   id                        BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del registro histórico',
   empleado_id               BIGINT UNSIGNED NOT NULL COMMENT 'Empleado al que pertenecen estos datos laborales',
   puesto_id                 BIGINT UNSIGNED NOT NULL COMMENT 'Puesto que ocupaba el empleado durante este período de vigencia',
-  salario_base_nominal      DECIMAL(14,2) NOT NULL COMMENT 'salario mensual completo del expediente, NO el devengado del período (sección 4.1)',
+  salario_base_nominal      DECIMAL(14,2) NOT NULL COMMENT 'salario mensual completo del expediente, NO el devengado del período',
   tipo_contrato_id          BIGINT UNSIGNED NOT NULL COMMENT 'Modalidad de contratación vigente en este período',
   programa_presupuestario_id BIGINT UNSIGNED NOT NULL COMMENT 'Programa presupuestario al que se cargaba el salario del empleado en este período',
   sindicato_id              BIGINT UNSIGNED NULL COMMENT 'Sindicato al que estaba afiliado el empleado en este período, si aplica',
@@ -311,7 +178,7 @@ CREATE TABLE empleado_datos_laborales (
   CONSTRAINT chk_edl_vigencia CHECK (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= fecha_inicio_vigencia),
   UNIQUE KEY uk_edl_una_vigente (empleado_id, es_vigente),
   KEY ix_edl_vigencia (empleado_id, fecha_inicio_vigencia, fecha_fin_vigencia)
-) ENGINE=InnoDB COMMENT='Infotype: datos laborales con vigencia histórica';
+) ENGINE=InnoDB COMMENT='datos laborales con vigencia histórica';
 
 CREATE TABLE empleado_datos_bancarios (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del registro histórico',
@@ -328,13 +195,7 @@ CREATE TABLE empleado_datos_bancarios (
   CONSTRAINT chk_edb_vigencia CHECK (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= fecha_inicio_vigencia),
   UNIQUE KEY uk_edb_una_vigente (empleado_id, es_vigente),
   KEY ix_edb_vigencia (empleado_id, fecha_inicio_vigencia, fecha_fin_vigencia)
-) ENGINE=InnoDB COMMENT='Infotype: cuenta de depósito de nómina, con vigencia';
-
--- NOTA sobre tipo_cuenta: se mantiene como ENUM ('corriente','ahorros')
--- deliberadamente -- a diferencia de los ENUM de parámetros legales, esto
--- no es un parámetro que cambie por ley/reglamento (los tipos de cuenta
--- bancaria en Costa Rica no varían), así que no aplica el mismo riesgo que
--- justificó convertir los otros 5 ENUM en catálogo.
+) ENGINE=InnoDB COMMENT='cuenta de depósito de nómina, con vigencia';
 
 CREATE TABLE empleado_datos_familiares (
   id                        BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del registro histórico',
@@ -349,27 +210,8 @@ CREATE TABLE empleado_datos_familiares (
   CONSTRAINT chk_edf_vigencia CHECK (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= fecha_inicio_vigencia),
   UNIQUE KEY uk_edf_una_vigente (empleado_id, es_vigente),
   KEY ix_edf_vigencia (empleado_id, fecha_inicio_vigencia, fecha_fin_vigencia)
-) ENGINE=InnoDB COMMENT='Infotype: composición familiar declarada para créditos fiscales de renta, con vigencia histórica';
+) ENGINE=InnoDB COMMENT='composición familiar declarada para créditos fiscales de renta, con vigencia histórica';
 
--- ============================================================================
--- REGÍMENES LABORALES (Fase 1C — declarada ANTES de `contratos` porque
--- `contratos` la referencia por FK).
---
--- Por qué existe: en este ente público (CCDR municipal de Costa Rica) el
--- régimen laboral NO es fijo por empleador -- la Ley Marco de Empleo Público
--- crea regímenes transitorios, de forma que empleados del mismo empleador
--- pueden estar bajo regímenes distintos según la fecha en que fueron
--- contratados.
---
--- Por qué vive en `contratos` y no en el empleado directamente: `contratos`
--- ya es la fuente de verdad para todo lo que puede cambiar en el tiempo
--- dentro de la relación laboral (puesto, salario, jornada), siguiendo el
--- patrón de vigencia de 2 pasos (cerrar la fila vigente + insertar una
--- nueva, nunca UPDATE directo). Un cambio de régimen laboral es, en ese
--- sentido, exactamente igual a un cambio de puesto o de salario: cierra el
--- contrato vigente y abre uno nuevo. Modelarlo aparte del contrato hubiera
--- creado una segunda tabla de vigencia paralela para el mismo evento.
--- ============================================================================
 CREATE TABLE regimenes_laborales (
     id INT AUTO_INCREMENT PRIMARY KEY,
     codigo VARCHAR(40) NOT NULL UNIQUE,
@@ -378,47 +220,12 @@ CREATE TABLE regimenes_laborales (
     activo TINYINT(1) NOT NULL DEFAULT 1
 ) ENGINE=InnoDB COMMENT='Catálogo de regímenes laborales aplicables (Ley Marco de Empleo Público y regímenes transitorios previos)';
 
--- ============================================================================
--- CONTRATOS (Fase 3 — bloqueante de esquema, ver nota al inicio de este
--- archivo y db/queries/empleados_puestos.sql).
---
--- `contratos` no está en la lista de 19 tablas versionadas del ADR-000
--- (sección 2), pero internal/services/contrato_service.go y
--- db/queries/empleados_puestos.sql la usan con el MISMO patrón de vigencia
--- 2-pasos (CerrarContratoVigente + CrearVersionContrato en una transacción,
--- nunca UPDATE directo sobre la fila vigente) que el resto del expediente.
--- Se modela aquí por consistencia, tal como exige el enunciado de Fase 3.
---
--- Columnas derivadas EXACTAMENTE de lo que exige el código, sin agregar
--- columnas de más:
---   * dto.CrearVersionContratoParams (contrato_service.go) y el INSERT de
---     CrearVersionContrato en empleados_puestos.sql fijan el orden y nombre
---     de columnas: empleado_id, puesto_id, tipo_contrato, salario_pactado,
---     jornada, fecha_inicio_contrato, fecha_fin_contrato,
---     fecha_inicio_vigencia, fecha_fin_vigencia, es_vigente, creado_por,
---     created_at.
---   * dto.CerrarContratoVigenteParams fija fecha_fin_vigencia + es_vigente=0
---     como el "cierre" de la fila vigente (paso 1 del patrón 2-pasos).
---   * ListContratos/CountContratos filtran opcionalmente por es_vigente,
---     puesto_id y tipo_contrato -> se agregan índices para esos filtros.
---   * salario_pactado es DECIMAL (nunca FLOAT), igual que el resto del
---     esquema, porque decimal.Decimal (shopspring) lo exige en el lado Go.
---
--- NOTA: tipo_contrato aquí es VARCHAR libre, NO una FK a la tabla catálogo
--- `tipos_contrato` (que ya existe y sí se usa como FK en
--- empleado_datos_laborales.tipo_contrato_id). El código de Fase 3
--- (CrearContratoRequest.TipoContrato string, filtro ListContratos por
--- sqlc.narg(tipo_contrato) comparado con c.tipo_contrato) trata el campo
--- como string, no como ID numérico -- se respeta tal cual para no romper el
--- contrato de datos con el servicio. Confirmar con el equipo si esto debería
--- unificarse con `tipos_contrato` en una fase posterior.
--- ============================================================================
 CREATE TABLE contratos (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del contrato / versión de contrato',
   empleado_id            BIGINT UNSIGNED NOT NULL COMMENT 'Empleado titular de este contrato',
   puesto_id              BIGINT UNSIGNED NOT NULL COMMENT 'Puesto pactado en esta versión del contrato',
-  regimen_laboral_id     INT NOT NULL COMMENT 'Régimen laboral vigente para esta versión del contrato (Ley Marco de Empleo Público / regímenes transitorios); fuente de verdad del régimen, ver nota arriba',
-  tipo_contrato          VARCHAR(30) NOT NULL COMMENT 'Modalidad de contratación (p.ej. indefinido, plazo_fijo, interino); string libre, ver nota arriba',
+  regimen_laboral_id     INT NOT NULL COMMENT 'Régimen laboral vigente para esta versión del contrato (Ley Marco de Empleo Público / regímenes transitorios); fuente de verdad del régimen',
+  tipo_contrato          VARCHAR(30) NOT NULL COMMENT 'Modalidad de contratación (p.ej. indefinido, plazo_fijo, interino); string libre',
   salario_pactado        DECIMAL(14,2) NOT NULL COMMENT 'Salario mensual pactado/actualizado en esta versión del contrato',
   jornada                VARCHAR(30) NOT NULL COMMENT 'Jornada laboral pactada en el contrato (p.ej. completa, media_jornada)',
   fecha_inicio_contrato  DATE NOT NULL COMMENT 'Fecha de inicio de la relación contractual (puede ser anterior a fecha_inicio_vigencia en una renovación)',
@@ -440,11 +247,7 @@ CREATE TABLE contratos (
   KEY ix_contrato_puesto (puesto_id),
   KEY ix_contrato_tipo (tipo_contrato),
   KEY ix_contrato_regimen_laboral (regimen_laboral_id)
-) ENGINE=InnoDB COMMENT='Infotype: contrato laboral con vigencia histórica (patrón 2-pasos), aplicado por consistencia aunque no está en la lista de 19 tablas del ADR-000 §2';
-
--- ============================================================================
--- 6.3 CATÁLOGO DE CONCEPTOS SALARIALES (equivalente a "Wage Types" de SAP)
--- ============================================================================
+) ENGINE=InnoDB COMMENT='contrato laboral con vigencia histórica';
 
 CREATE TABLE conceptos_salariales (
   id                    BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del concepto salarial',
@@ -459,7 +262,7 @@ CREATE TABLE conceptos_salariales (
   afecta_base_vacaciones TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = el monto de este concepto forma parte de la base para calcular pago de vacaciones',
   activo                TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = concepto disponible para usarse en nuevas planillas, 0 = dado de baja',
   created_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Fecha/hora en que se creó el registro'
-) ENGINE=InnoDB COMMENT='Wage Types: catálogo editable de conceptos de ingreso/deducción (sección 6.3)';
+) ENGINE=InnoDB COMMENT='catálogo editable de conceptos de ingreso/deducción';
 
 CREATE TABLE concepto_salarial_formula (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de esta versión de fórmula/monto',
@@ -490,12 +293,8 @@ CREATE TABLE orden_calculo_concepto (
   CONSTRAINT chk_occ_vigencia CHECK (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= fecha_inicio_vigencia),
   UNIQUE KEY uk_occ_una_vigente (concepto_salarial_id, es_vigente),
   KEY ix_occ_vigencia (concepto_salarial_id, fecha_inicio_vigencia, fecha_fin_vigencia)
-) ENGINE=InnoDB COMMENT='Secuencia de cálculo: base -> horas extra -> bases especiales -> deducciones legales -> deducciones de terceros (sección 7)';
+) ENGINE=InnoDB COMMENT='Secuencia de cálculo: base -> horas extra -> bases especiales -> deducciones legales -> deducciones de terceros';
 
--- Cruce: qué conceptos salariales aplican a cada régimen laboral (no todos
--- los conceptos aplican a todos los regímenes de la Ley Marco de Empleo
--- Público). Versionado por vigencia con el mismo patrón que
--- mapeo_concepto_cuenta.
 CREATE TABLE regimen_concepto_aplicable (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la regla de aplicabilidad',
   regimen_laboral_id     INT NOT NULL COMMENT 'Régimen laboral al que aplica este concepto salarial',
@@ -511,19 +310,11 @@ CREATE TABLE regimen_concepto_aplicable (
   KEY ix_rca_vigencia (regimen_laboral_id, concepto_salarial_id, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Cruce régimen laboral <-> conceptos salariales aplicables, versionado por vigencia';
 
--- ============================================================================
--- 6.4 PARÁMETROS LEGALES VERSIONADOS (sección 3)
--- ============================================================================
-
--- CORRECCIÓN (punto 2 de la revisión): rubro se conserva como etiqueta
--- legible, pero el motor de cálculo debe resolver siempre por
--- concepto_salarial_id (FK real), nunca por comparación de texto contra
--- `rubro`.
 CREATE TABLE parametros_cargas_sociales (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del parámetro',
   rubro                  VARCHAR(60) NOT NULL COMMENT 'Etiqueta legible: SEM, IVM, Banco Popular, Asignaciones Familiares, FCL, ROP -- NO usar para lógica de cálculo',
-  concepto_salarial_id   BIGINT UNSIGNED NOT NULL COMMENT 'Concepto salarial real al que corresponde este rubro (FK, antes solo coincidencia de nombres)',
-  porcentaje_patronal    DECIMAL(6,4) NOT NULL COMMENT 'Porcentaje que aporta el patrono (CCDR) sobre la base correspondiente',
+  concepto_salarial_id   BIGINT UNSIGNED NOT NULL COMMENT 'Concepto salarial real al que corresponde este rubro (FK)',
+  porcentaje_patronal    DECIMAL(6,4) NOT NULL COMMENT 'Porcentaje que aporta el patrono sobre la base correspondiente',
   porcentaje_obrero      DECIMAL(6,4) NOT NULL COMMENT 'Porcentaje que se deduce al empleado sobre la base correspondiente',
   fecha_inicio_vigencia  DATE NOT NULL COMMENT 'Fecha desde la cual estos porcentajes son los vigentes',
   fecha_fin_vigencia     DATE NULL COMMENT 'NULL = vigente actualmente',
@@ -553,10 +344,9 @@ CREATE TABLE parametros_tramos_renta (
   KEY ix_ptr_vigencia (orden_tramo, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Escala progresiva de impuesto de renta, versionada por vigencia';
 
--- CORRECCIÓN: tipo_credito pasa de ENUM a FK real (tipos_credito_fiscal_renta).
 CREATE TABLE parametros_creditos_fiscales_renta (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del crédito fiscal',
-  tipo_credito_fiscal_id BIGINT UNSIGNED NOT NULL COMMENT 'A qué tipo de dependiente aplica el crédito (FK, antes ENUM conyuge/hijo)',
+  tipo_credito_fiscal_id BIGINT UNSIGNED NOT NULL COMMENT 'A qué tipo de dependiente aplica el crédito (FK)',
   monto_credito          DECIMAL(14,2) NOT NULL COMMENT 'Monto fijo a deducir del impuesto de renta ya calculado, por período de planilla',
   fecha_inicio_vigencia  DATE NOT NULL COMMENT 'Fecha desde la cual este monto es el vigente',
   fecha_fin_vigencia     DATE NULL COMMENT 'NULL = vigente actualmente',
@@ -569,12 +359,6 @@ CREATE TABLE parametros_creditos_fiscales_renta (
   KEY ix_pcfr_vigencia (tipo_credito_fiscal_id, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Créditos fiscales de renta por cónyuge/hijo dependiente, versionados por vigencia';
 
--- CORRECCIÓN ADICIONAL (encontrada en esta revisión final, no estaba en el
--- parche anterior): `codigo` era UNIQUE simple, lo cual en la práctica
--- impedía tener una segunda versión vigente de prioridad_legal para el
--- mismo tipo de embargo -- choca directamente con el propósito de
--- versionar por vigencia. Se corrige: codigo pasa a índice normal (ya no
--- UNIQUE por sí solo) y se agrega el patrón es_vigente.
 CREATE TABLE parametros_tipos_embargo (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del tipo de embargo',
   codigo                 VARCHAR(20) NOT NULL COMMENT 'Código corto del tipo de embargo (ya NO es UNIQUE por sí solo: ver uk_pte_una_vigente)',
@@ -589,10 +373,9 @@ CREATE TABLE parametros_tipos_embargo (
   KEY ix_pte_vigencia (codigo, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Catálogo de tipos de embargo y su prioridad legal de aplicación, versionado por vigencia';
 
--- CORRECCIÓN: tipo_hora pasa de ENUM a FK real (tipos_hora_extra).
 CREATE TABLE parametros_horas_extra (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del parámetro',
-  tipo_hora_extra_id     BIGINT UNSIGNED NOT NULL COMMENT 'Categoría de hora extra a la que aplica el factor (FK, antes ENUM diurna/nocturna/mixta/doble)',
+  tipo_hora_extra_id     BIGINT UNSIGNED NOT NULL COMMENT 'Categoría de hora extra a la que aplica el factor (FK)',
   factor_recargo         DECIMAL(5,4) NOT NULL COMMENT 'p.ej. 1.50 = 50% de recargo',
   fecha_inicio_vigencia  DATE NOT NULL COMMENT 'Fecha desde la cual este factor es el vigente',
   fecha_fin_vigencia     DATE NULL COMMENT 'NULL = vigente actualmente',
@@ -619,14 +402,9 @@ CREATE TABLE parametros_vacaciones_escala (
   KEY ix_pve_vigencia (anios_servicio_desde, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Escala de días de vacaciones según años de servicio, versionada por vigencia';
 
--- CORRECCIÓN (esta revisión): la escala de cesantía pasa de ser una sola
--- escala global a versionarse también por régimen laboral -- distintos
--- regímenes de la Ley Marco de Empleo Público pueden tener escalas de
--- cesantía distintas vigentes al mismo tiempo. Se agrega regimen_laboral_id
--- como parte de la clave lógica de vigencia (antes solo anios_servicio_desde).
 CREATE TABLE parametros_cesantia_escala (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del escalón',
-  regimen_laboral_id     INT NOT NULL COMMENT 'Régimen laboral al que aplica este escalón de cesantía (antes una sola escala global)',
+  regimen_laboral_id     INT NOT NULL COMMENT 'Régimen laboral al que aplica este escalón de cesantía',
   anios_servicio_desde   DECIMAL(5,2) NOT NULL COMMENT 'Años de servicio desde los cuales aplica este escalón',
   anios_servicio_hasta   DECIMAL(5,2) NULL COMMENT 'Años de servicio hasta los cuales aplica; NULL = sin tope superior',
   dias_por_anio          DECIMAL(6,2) NOT NULL COMMENT 'Días de cesantía que se reconocen por cada año de servicio dentro de este escalón',
@@ -642,16 +420,6 @@ CREATE TABLE parametros_cesantia_escala (
   KEY ix_pce_vigencia (regimen_laboral_id, anios_servicio_desde, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Escala de cesantía según años de servicio, por régimen laboral, versionada por vigencia';
 
--- ============================================================================
--- REGÍMENES LABORALES: PREAVISO (Art. 28 Código de Trabajo)
--- No existía como tabla -- el preaviso estaba hardcodeado en Go. Se agrega
--- ahora, siguiendo el mismo patrón de vigencia por fecha que las demás
--- tablas parametros_*, con regimen_laboral_id como parte de la clave lógica
--- de vigencia (puede haber una escala vigente por régimen a la vez, igual
--- que ahora con parametros_cesantia_escala). Columnas de auditoría
--- (creado_por, created_at) copiadas tal cual del patrón ya usado en
--- parametros_salario_escolar.
--- ============================================================================
 CREATE TABLE parametros_preaviso_escala (
   id                       INT AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del escalón',
   regimen_laboral_id       INT NOT NULL COMMENT 'Régimen laboral al que aplica este escalón de preaviso',
@@ -671,10 +439,9 @@ CREATE TABLE parametros_preaviso_escala (
   KEY ix_ppe_vigencia (regimen_laboral_id, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Escala de días de preaviso según antigüedad (Art. 28 Código de Trabajo), por régimen laboral, versionada por vigencia';
 
--- CORRECCIÓN: aplica_a pasa de ENUM a FK real (regimenes_ccss).
 CREATE TABLE parametros_base_minima_contributiva (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del parámetro',
-  regimen_ccss_id        BIGINT UNSIGNED NOT NULL COMMENT 'Régimen de la CCSS al que aplica esta base mínima (FK, antes ENUM SEM/IVM)',
+  regimen_ccss_id        BIGINT UNSIGNED NOT NULL COMMENT 'Régimen de la CCSS al que aplica esta base mínima (FK)',
   monto                  DECIMAL(14,2) NOT NULL COMMENT 'Monto mínimo contributivo vigente para el régimen indicado',
   fecha_inicio_vigencia  DATE NOT NULL COMMENT 'Fecha desde la cual este monto es el vigente',
   fecha_fin_vigencia     DATE NULL COMMENT 'NULL = vigente actualmente',
@@ -686,10 +453,9 @@ CREATE TABLE parametros_base_minima_contributiva (
   KEY ix_bmc_vigencia (regimen_ccss_id, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Base mínima contributiva SEM/IVM, versionada por vigencia';
 
--- CORRECCIÓN: entidad_emisora pasa de ENUM a FK real (entidades_emisoras_incapacidad).
 CREATE TABLE parametros_subsidios_incapacidad (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del tramo de subsidio',
-  entidad_emisora_id     BIGINT UNSIGNED NOT NULL COMMENT 'Entidad que dictamina la incapacidad (FK, antes ENUM CCSS/INS)',
+  entidad_emisora_id     BIGINT UNSIGNED NOT NULL COMMENT 'Entidad que dictamina la incapacidad (FK)',
   dia_desde              INT UNSIGNED NOT NULL COMMENT 'Día de incapacidad desde el cual aplica este porcentaje (p.ej. 1 = primer día de incapacidad)',
   dia_hasta              INT UNSIGNED NULL COMMENT 'Día de incapacidad hasta el cual aplica este porcentaje; NULL = sin tope superior',
   porcentaje_patronal    DECIMAL(5,2) NOT NULL COMMENT 'Porcentaje del salario que reconoce la institución como patrono durante este tramo',
@@ -705,9 +471,6 @@ CREATE TABLE parametros_subsidios_incapacidad (
   KEY ix_psi_vigencia (entidad_emisora_id, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Escala de subsidio patronal/CCSS/INS por día de incapacidad, versionada por vigencia';
 
--- NUEVA (punto 7 de la revisión): salario mínimo legal por clasificación de
--- puesto, versionado por vigencia. Permite validar que salario_base_nominal
--- no quede por debajo del Decreto de Salarios Mínimos vigente.
 CREATE TABLE parametros_salario_minimo (
   id                       BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del parámetro',
   clasificacion_puesto_id  BIGINT UNSIGNED NOT NULL COMMENT 'Categoría del Decreto de Salarios Mínimos (FK a clasificaciones_puesto, no texto libre)',
@@ -722,14 +485,6 @@ CREATE TABLE parametros_salario_minimo (
   UNIQUE KEY uk_psm_una_vigente (clasificacion_puesto_id, es_vigente),
   KEY ix_psm_vigencia (clasificacion_puesto_id, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Salario mínimo legal por categoría/clasificación de puesto, versionado por vigencia (Ley 10159 / Decreto de Salarios Mínimos)';
--- El motor de cálculo (o un job de validación al capturar/editar
--- empleado_datos_laborales) debe cruzar puestos.clasificacion_puesto_id
--- contra esta tabla vigente a la fecha de vigencia del registro laboral, y
--- advertir o bloquear si salario_base_nominal < monto_mensual correspondiente.
-
--- ============================================================================
--- 6.5 ASISTENCIA Y AUSENCIAS
--- ============================================================================
 
 CREATE TABLE calendario_laboral (
   id                          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del día calendario',
@@ -740,9 +495,6 @@ CREATE TABLE calendario_laboral (
   CONSTRAINT fk_cal_programa FOREIGN KEY (programa_presupuestario_id) REFERENCES programas_presupuestarios(id)
 ) ENGINE=InnoDB COMMENT='Clasificación de cada fecha como día laboral, feriado o de descanso';
 
--- NUEVA (punto 8 de la revisión): patrón de feriados recurrentes (fijos y
--- móviles por Pascua), para generar calendario_laboral automáticamente cada
--- año sin depender de que alguien lo recuerde en diciembre.
 CREATE TABLE feriados_patron (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del patrón de feriado',
   nombre                 VARCHAR(100) NOT NULL COMMENT 'p.ej. "Día de Juan Santamaría", "Semana Santa - Jueves Santo"',
@@ -762,9 +514,6 @@ CREATE TABLE feriados_patron (
   )
 ) ENGINE=InnoDB COMMENT='Patrón recurrente de feriados nacionales, para generar calendario_laboral automáticamente cada año';
 
--- Carga inicial de ejemplo (revisar contra los feriados oficiales que
--- efectivamente aplican a CCDR; al ser un comité cantonal podrían diferir
--- en algún feriado puntual).
 INSERT INTO feriados_patron (nombre, tipo_patron, mes, dia, aplica_traslado_lunes) VALUES
   ('Año Nuevo','fijo',1,1,0),
   ('Día de Juan Santamaría','fijo',4,11,1),
@@ -777,12 +526,6 @@ INSERT INTO feriados_patron (nombre, tipo_patron, mes, dia, aplica_traslado_lune
 INSERT INTO feriados_patron (nombre, tipo_patron, offset_dias_pascua) VALUES
   ('Jueves Santo','movible_pascua',-3),
   ('Viernes Santo','movible_pascua',-2);
-
--- La generación real de filas en calendario_laboral para un año dado
--- (incluyendo el cálculo de Pascua y el traslado a lunes) se implementa
--- como rutina almacenada o job de backend que corre una vez al año; el
--- patrón queda data-driven aquí para que agregar/quitar un feriado sea un
--- INSERT/UPDATE, nunca un cambio de código.
 
 CREATE TABLE turnos (
   id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del turno',
@@ -821,7 +564,7 @@ CREATE TABLE registro_asistencia (
   observaciones           VARCHAR(255) NULL COMMENT 'Notas adicionales sobre el registro de asistencia de ese día',
   UNIQUE KEY uk_asistencia (empleado_id, fecha),
   CONSTRAINT fk_ra_empleado FOREIGN KEY (empleado_id) REFERENCES empleados(id)
-) ENGINE=InnoDB COMMENT='Fuente de las horas extra diurna/nocturna/mixta y horas dobles (sección 4.1/4.2)';
+) ENGINE=InnoDB COMMENT='Fuente de las horas extra diurna/nocturna/mixta y horas dobles';
 
 CREATE TABLE tipos_ausencia (
   id                          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del tipo de ausencia',
@@ -830,13 +573,11 @@ CREATE TABLE tipos_ausencia (
   requiere_documento_soporte  TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = este tipo de ausencia exige adjuntar un documento de respaldo (p.ej. boleta de incapacidad)'
 ) ENGINE=InnoDB COMMENT='Catálogo de tipos/motivos de ausencia laboral';
 
--- CORRECCIÓN: entidad_emisora pasa de ENUM a FK real (entidades_emisoras_incapacidad).
--- CORRECCIÓN (punto 5.5 de la revisión): CHECK de rango de fechas fecha_fin >= fecha_inicio.
 CREATE TABLE ausencias (
   id                      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la ausencia',
   empleado_id             BIGINT UNSIGNED NOT NULL COMMENT 'Empleado que se ausenta',
   tipo_ausencia_id        BIGINT UNSIGNED NOT NULL COMMENT 'Motivo de la ausencia',
-  entidad_emisora_id      BIGINT UNSIGNED NULL COMMENT 'Entidad que emitió la incapacidad (FK, antes ENUM), cuando tipo_ausencia_id corresponde a una incapacidad; determina qué escala de parametros_subsidios_incapacidad usar. NULL para ausencias que no son incapacidad',
+  entidad_emisora_id      BIGINT UNSIGNED NULL COMMENT 'Entidad que emitió la incapacidad (FK), cuando tipo_ausencia_id corresponde a una incapacidad; determina qué escala de parametros_subsidios_incapacidad usar. NULL para ausencias que no son incapacidad',
   fecha_inicio            DATE NOT NULL COMMENT 'Fecha en que inicia la ausencia',
   fecha_fin               DATE NOT NULL COMMENT 'Fecha en que finaliza la ausencia',
   dias                    DECIMAL(6,2) NULL COMMENT 'Cantidad de días que abarca la ausencia, cuando se mide en días',
@@ -847,11 +588,7 @@ CREATE TABLE ausencias (
   CONSTRAINT fk_aus_tipo FOREIGN KEY (tipo_ausencia_id) REFERENCES tipos_ausencia(id),
   CONSTRAINT fk_aus_entidad FOREIGN KEY (entidad_emisora_id) REFERENCES entidades_emisoras_incapacidad(id),
   CONSTRAINT chk_aus_fechas CHECK (fecha_fin >= fecha_inicio)
-) ENGINE=InnoDB COMMENT='Base del "auxilio de incapacidad" y ausencias en días/horas (sección 4.1/4.2)';
-
--- ============================================================================
--- 6.6 PLANILLA (equivalente a "Payroll Area" de SAP)
--- ============================================================================
+) ENGINE=InnoDB COMMENT='Base del "auxilio de incapacidad" y ausencias en días/horas';
 
 CREATE TABLE tipos_planilla (
   id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del tipo de planilla',
@@ -859,23 +596,6 @@ CREATE TABLE tipos_planilla (
   nombre  VARCHAR(100) NOT NULL COMMENT 'Nombre descriptivo del tipo de planilla'
 ) ENGINE=InnoDB COMMENT='Catálogo de tipos/modalidades de planilla';
 
--- CORRECCIÓN (punto 3 de la revisión): doble firma (HECHO POR / REVISADO
--- POR / APROBADO POR), tal como aparece en los documentos reales.
--- `aprobado_por` (VARCHAR libre) se conserva solo como respaldo para casos
--- donde no se pueda identificar un usuario del sistema; toda aprobación
--- nueva debe llenar aprobado_por_usuario_id.
--- CORRECCIÓN (punto 5.4): CHECK de fechas + UNIQUE para no repetir el mismo
--- tipo de planilla en el mismo rango de fechas.
--- Nota sobre segregación de funciones (preparado <> aprobado): se decide NO
--- forzarlo con un CHECK rígido, porque un candado duro no tiene forma de
--- excepción justificada (ausencia de personal, emergencia) sin volver a
--- tocar el esquema. La regla se valida en el backend: si
--- preparado_por_usuario_id = aprobado_por_usuario_id, exigir una
--- justificación y registrarla en auditoria_cambios, en vez de bloquear la
--- operación. Si de todas formas se prefiere el candado duro:
---   ALTER TABLE periodos_planilla ADD CONSTRAINT chk_pp_segregacion CHECK (
---     preparado_por_usuario_id IS NULL OR aprobado_por_usuario_id IS NULL
---     OR preparado_por_usuario_id <> aprobado_por_usuario_id);
 CREATE TABLE periodos_planilla (
   id                        BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del período de planilla',
   tipo_planilla_id          BIGINT UNSIGNED NOT NULL COMMENT 'Modalidad de planilla que se está corriendo en este período',
@@ -897,14 +617,14 @@ CREATE TABLE periodos_planilla (
   CONSTRAINT chk_pp_fechas CHECK (fecha_fin >= fecha_inicio),
   UNIQUE KEY uk_pp_tipo_fechas (tipo_planilla_id, fecha_inicio, fecha_fin),
   KEY ix_pp_fechas (fecha_inicio, fecha_fin)
-) ENGINE=InnoDB COMMENT='Una vez aprobada/pagada/contabilizada es inmutable (sección 7)';
+) ENGINE=InnoDB COMMENT='Una vez aprobada/pagada/contabilizada es inmutable';
 
 CREATE TABLE planilla_detalle_empleado (
   id                          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la línea de planilla del empleado',
   periodo_planilla_id         BIGINT UNSIGNED NOT NULL COMMENT 'Corrida de planilla a la que pertenece esta línea',
   empleado_id                 BIGINT UNSIGNED NOT NULL COMMENT 'Empleado al que corresponde esta línea',
   programa_presupuestario_id  BIGINT UNSIGNED NOT NULL COMMENT 'copiado del expediente al momento del cálculo, para no alterar histórico si el empleado cambia luego de programa',
-  salario_base_periodo        DECIMAL(14,2) NOT NULL COMMENT 'devengado del período, proporcional a días trabajados (sección 4.1), distinto del salario nominal mensual',
+  salario_base_periodo        DECIMAL(14,2) NOT NULL COMMENT 'devengado del período, proporcional a días trabajados, distinto del salario nominal mensual',
   total_ingresos              DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Suma de todos los conceptos de ingreso del período para este empleado',
   total_deducciones           DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Suma de todos los conceptos de deducción del período para este empleado',
   neto_pagado                 DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Monto neto efectivamente pagado (total_ingresos - total_deducciones)',
@@ -913,27 +633,13 @@ CREATE TABLE planilla_detalle_empleado (
   CONSTRAINT fk_pde_periodo FOREIGN KEY (periodo_planilla_id) REFERENCES periodos_planilla(id),
   CONSTRAINT fk_pde_empleado FOREIGN KEY (empleado_id) REFERENCES empleados(id),
   CONSTRAINT fk_pde_programa FOREIGN KEY (programa_presupuestario_id) REFERENCES programas_presupuestarios(id)
-) ENGINE=InnoDB COMMENT='Permite generar tanto el formato resumido como el detallado (sección 4.2)';
+) ENGINE=InnoDB COMMENT='Permite generar tanto el formato resumido como el detallado';
 
--- CORRECCIÓN (punto 6 de la revisión): trazabilidad de ajustes/correcciones
--- entre períodos.
--- CORRECCIÓN ADICIONAL (encontrada en ESTA revisión, probando contra un
--- motor MySQL/MariaDB real -- el parche anterior nunca se había corrido de
--- verdad): MySQL/MariaDB PROHÍBEN que un CHECK constraint referencie una
--- columna AUTO_INCREMENT ("Function or expression ... cannot be used in
--- the CHECK clause of `id`"). El CHECK
--- `chk_pdc_no_autoajuste CHECK (concepto_ajuste_de_id <> id)` que traía el
--- parche anterior NUNCA hubiera podido crearse. Se reemplaza por dos
--- triggers (INSERT/UPDATE) que hacen exactamente la misma validación.
--- Limitación conocida y aceptada (igual que antes): esto solo evita la
--- autorreferencia directa. NO evita un ciclo transitivo (A ajusta a B, B
--- ajusta a A) -- esa validación de ciclo debe vivir en el backend,
--- recorriendo la cadena de concepto_ajuste_de_id hacia atrás.
 CREATE TABLE planilla_detalle_concepto (
   id                            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la línea de concepto',
   planilla_detalle_empleado_id  BIGINT UNSIGNED NOT NULL COMMENT 'Línea de resumen del empleado a la que pertenece este concepto',
   concepto_salarial_id          BIGINT UNSIGNED NOT NULL COMMENT 'Concepto salarial que se está aplicando en esta línea',
-  concepto_salarial_formula_id  BIGINT UNSIGNED NULL COMMENT 'versión exacta de la fórmula/monto usada, para trazabilidad total (sección 5.1)',
+  concepto_salarial_formula_id  BIGINT UNSIGNED NULL COMMENT 'versión exacta de la fórmula/monto usada, para trazabilidad total',
   cantidad                      DECIMAL(10,2) NULL COMMENT 'horas o días, cuando aplique',
   monto                         DECIMAL(14,2) NOT NULL COMMENT 'Monto final calculado para este concepto en esta línea',
   concepto_ajuste_de_id         BIGINT UNSIGNED NULL COMMENT 'Si esta línea es una corrección, apunta a la línea original que corrige; NULL si es una línea normal',
@@ -943,7 +649,7 @@ CREATE TABLE planilla_detalle_concepto (
   CONSTRAINT fk_pdc_formula FOREIGN KEY (concepto_salarial_formula_id) REFERENCES concepto_salarial_formula(id),
   CONSTRAINT fk_pdc_ajuste FOREIGN KEY (concepto_ajuste_de_id) REFERENCES planilla_detalle_concepto(id),
   KEY ix_pdc_concepto (concepto_salarial_id)
-) ENGINE=InnoDB COMMENT='Línea por concepto; base real para reconstruir cualquiera de los dos formatos vistos en sección 4';
+) ENGINE=InnoDB COMMENT='Línea por concepto del cálculo de cada empleado';
 
 DROP TRIGGER IF EXISTS trg_pdc_no_autoajuste_ins;
 CREATE TRIGGER trg_pdc_no_autoajuste_ins BEFORE INSERT ON planilla_detalle_concepto
@@ -962,10 +668,6 @@ BEGIN
   END IF;
 END;
 
--- ============================================================================
--- 6.7 VACACIONES, PRÉSTAMOS Y EMBARGOS
--- ============================================================================
-
 CREATE TABLE vacaciones_acumulado (
   id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del corte de vacaciones',
   empleado_id         BIGINT UNSIGNED NOT NULL COMMENT 'Empleado al que corresponde el corte',
@@ -973,8 +675,8 @@ CREATE TABLE vacaciones_acumulado (
   dias_acumulados     DECIMAL(6,2) NOT NULL DEFAULT 0 COMMENT 'Días de vacaciones acumulados por el empleado hasta la fecha de corte',
   dias_disfrutados    DECIMAL(6,2) NOT NULL DEFAULT 0 COMMENT 'Días de vacaciones ya disfrutados por el empleado hasta la fecha de corte',
   saldo               DECIMAL(6,2) NOT NULL DEFAULT 0 COMMENT 'Saldo de días de vacaciones pendientes (acumulados - disfrutados)',
-  origen_carga             ENUM('operacion','migracion_inicial') NOT NULL DEFAULT 'operacion' COMMENT 'operacion = generado por el sistema en marcha; migracion_inicial = saldo digitado a mano al arrancar el sistema, sin historial verificable detrás (agregado v11, sección "arranque a mitad de año")',
-  registrado_por_usuario_id BIGINT UNSIGNED NULL COMMENT 'Usuario que registró este corte; obligatorio en la práctica cuando origen_carga = migracion_inicial, para poder rastrear quién respondió por el saldo inicial (agregado v11)',
+  origen_carga             ENUM('operacion','migracion_inicial') NOT NULL DEFAULT 'operacion' COMMENT 'operacion = generado por el sistema en marcha; migracion_inicial = saldo digitado a mano al arrancar el sistema, sin historial verificable detrás',
+  registrado_por_usuario_id BIGINT UNSIGNED NULL COMMENT 'Usuario que registró este corte; obligatorio en la práctica cuando origen_carga = migracion_inicial, para poder rastrear quién respondió por el saldo inicial',
   CONSTRAINT fk_va_empleado FOREIGN KEY (empleado_id) REFERENCES empleados(id),
   CONSTRAINT fk_va_usuario FOREIGN KEY (registrado_por_usuario_id) REFERENCES usuarios(id),
   UNIQUE KEY uk_va (empleado_id, fecha_corte)
@@ -1006,8 +708,8 @@ CREATE TABLE prestamos (
   fecha_inicio        DATE NOT NULL COMMENT 'Fecha en que inició el préstamo/las deducciones',
   fecha_fin_estimada  DATE NULL COMMENT 'Fecha estimada en que el préstamo quedaría totalmente cancelado',
   estado              ENUM('activo','cancelado','suspendido') NOT NULL DEFAULT 'activo' COMMENT 'Estado actual del préstamo',
-  origen_carga             ENUM('operacion','migracion_inicial') NOT NULL DEFAULT 'operacion' COMMENT 'operacion = préstamo dado de alta por el sistema en marcha; migracion_inicial = saldo pendiente digitado a mano al arrancar el sistema, sin historial de cuotas anteriores (agregado v11, sección "arranque a mitad de año")',
-  registrado_por_usuario_id BIGINT UNSIGNED NULL COMMENT 'Usuario que registró este préstamo; obligatorio en la práctica cuando origen_carga = migracion_inicial (agregado v11)',
+  origen_carga             ENUM('operacion','migracion_inicial') NOT NULL DEFAULT 'operacion' COMMENT 'operacion = préstamo dado de alta por el sistema en marcha; migracion_inicial = saldo pendiente digitado a mano al arrancar el sistema, sin historial de cuotas anteriores',
+  registrado_por_usuario_id BIGINT UNSIGNED NULL COMMENT 'Usuario que registró este préstamo; obligatorio en la práctica cuando origen_carga = migracion_inicial',
   CONSTRAINT fk_pr_empleado FOREIGN KEY (empleado_id) REFERENCES empleados(id),
   CONSTRAINT fk_pr_tercero FOREIGN KEY (tercero_id) REFERENCES terceros(id),
   CONSTRAINT fk_pr_usuario FOREIGN KEY (registrado_por_usuario_id) REFERENCES usuarios(id),
@@ -1015,9 +717,6 @@ CREATE TABLE prestamos (
   CONSTRAINT chk_pr_saldo CHECK (saldo_pendiente >= 0 AND saldo_pendiente <= monto_total)
 ) ENGINE=InnoDB COMMENT='Préstamos de terceros a empleados, con saldo pendiente para deducción periódica';
 
--- CORRECCIÓN (punto 5.1 de la revisión): debe llenarse exactamente
--- porcentaje O monto_fijo, nunca ambos ni ninguno.
--- CORRECCIÓN (punto 5.6): porcentaje dentro de rango lógico (0-100].
 CREATE TABLE embargos (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del embargo',
   empleado_id            BIGINT UNSIGNED NOT NULL COMMENT 'Empleado afectado por el embargo',
@@ -1042,30 +741,6 @@ CREATE TABLE embargos (
   KEY ix_emb_empleado_prioridad (empleado_id, prioridad_aplicacion)
 ) ENGINE=InnoDB COMMENT='Embargos judiciales/de terceros por empleado, con prioridad de aplicación';
 
--- ============================================================================
--- PLANILLA_DETALLE_EMBARGO (bloqueante de esquema, ver nota al inicio de
--- este archivo).
---
--- ADVERTENCIA DE INCONSISTENCIA CON EL ENUNCIADO: se pidió inferir estas
--- columnas de db/queries/empleados_puestos.sql "línea ~436 en adelante",
--- pero ese archivo (514 líneas totales) NO contiene ninguna mención a
--- `embargo` -- la línea ~436 corresponde en realidad al bloque de queries de
--- CONTRATOS. No existe ningún .sql de queries provisto que use
--- `planilla_detalle_embargo`, así que no hay contrato de columnas real
--- contra el cual validar esta tabla. Confirmar con el equipo el archivo de
--- queries correcto antes de correr sqlc generate contra esta definición.
---
--- A falta de esa fuente, se modela por inferencia de dominio, siguiendo el
--- mismo patrón ya usado en este esquema para relacionar una línea de
--- planilla con el detalle que la compone (`planilla_detalle_concepto`,
--- arriba en la sección 6.6) y el catálogo de embargos por empleado
--- (`embargos`, esta misma sección): una fila por embargo efectivamente
--- aplicado en una corrida de planilla, para dejar trazabilidad de cuánto se
--- retuvo realmente (que puede ser menor al `porcentaje`/`monto_fijo`
--- pactado en `embargos` si el neto disponible del período no alcanza) y con
--- qué prioridad se aplicó, sin depender de recalcular `embargos` hacia
--- atrás para reconstruir un período ya pagado.
--- ============================================================================
 CREATE TABLE planilla_detalle_embargo (
   id                            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la línea de embargo aplicado',
   planilla_detalle_empleado_id  BIGINT UNSIGNED NOT NULL COMMENT 'Línea de resumen del empleado (periodo de planilla) a la que pertenece este monto de embargo',
@@ -1078,10 +753,6 @@ CREATE TABLE planilla_detalle_embargo (
   UNIQUE KEY uk_pdemb (planilla_detalle_empleado_id, embargo_id),
   KEY ix_pdemb_embargo (embargo_id)
 ) ENGINE=InnoDB COMMENT='Monto de embargo efectivamente retenido por línea de planilla, con la prioridad usada -- ver advertencia de inconsistencia arriba';
-
--- ============================================================================
--- 6.8 CONTABILIZACIÓN
--- ============================================================================
 
 CREATE TABLE cuentas_contables (
   id               BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la cuenta contable',
@@ -1110,9 +781,6 @@ CREATE TABLE plantillas_asiento_linea (
   CONSTRAINT fk_pal_tipo FOREIGN KEY (tipo_asiento_id) REFERENCES tipos_asiento(id)
 ) ENGINE=InnoDB COMMENT='Plantilla de líneas por tipo de asiento, configurable sin tocar código';
 
--- CORRECCIÓN: se agrega el mismo patrón es_vigente (esta tabla también es
--- versionada por fecha_inicio_vigencia/fecha_fin_vigencia y se había
--- quedado fuera del parche anterior).
 CREATE TABLE mapeo_concepto_cuenta (
   id                          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la regla de mapeo',
   concepto_salarial_id        BIGINT UNSIGNED NOT NULL COMMENT 'Concepto salarial que se está mapeando a una cuenta contable',
@@ -1144,12 +812,8 @@ CREATE TABLE asientos_contables (
   UNIQUE KEY uk_asiento (periodo_planilla_id, tipo_asiento_id),
   CONSTRAINT fk_ac_periodo FOREIGN KEY (periodo_planilla_id) REFERENCES periodos_planilla(id),
   CONSTRAINT fk_ac_tipo FOREIGN KEY (tipo_asiento_id) REFERENCES tipos_asiento(id)
-) ENGINE=InnoDB COMMENT='Al menos 2 asientos por corrida de planilla (sección 4.5)';
+) ENGINE=InnoDB COMMENT='Al menos 2 asientos por corrida de planilla';
 
--- CORRECCIÓN NUEVA (identificada en la revisión final, no estaba en el
--- parche anterior): CHECK de partida doble -- una línea no puede tener
--- monto_debe Y monto_haber a la vez (ni ambos en cero). Antes solo estaba
--- "validado en aplicación"; ahora la base de datos también lo garantiza.
 CREATE TABLE asientos_contables_detalle (
   id                          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la línea del asiento',
   asiento_contable_id         BIGINT UNSIGNED NOT NULL COMMENT 'Asiento contable al que pertenece esta línea',
@@ -1170,10 +834,6 @@ CREATE TABLE asientos_contables_detalle (
   )
 ) ENGINE=InnoDB COMMENT='Débitos deben cuadrar contra créditos por asiento (validado en aplicación); cada línea es débito XOR crédito (validado en base de datos)';
 
--- ============================================================================
--- 6.9 IMPORTACIÓN Y EXPORTACIÓN
--- ============================================================================
-
 CREATE TABLE sistemas_origen (
   id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del sistema origen',
   codigo  VARCHAR(20)  NOT NULL UNIQUE COMMENT 'p.ej. SAP, PAYONE, JAISSON',
@@ -1185,7 +845,7 @@ CREATE TABLE interfaces_importacion (
   sistema_origen_id   BIGINT UNSIGNED NOT NULL COMMENT 'Sistema origen al que corresponde esta interfaz',
   nombre              VARCHAR(100) NOT NULL COMMENT 'Nombre descriptivo de la interfaz de importación',
   formato_archivo     ENUM('delimitado','ancho_fijo','hoja_calculo') NOT NULL COMMENT 'Formato del archivo que procesa esta interfaz',
-  configuracion_mapeo JSON NOT NULL COMMENT 'columnas, delimitadores, posiciones -- pendiente de refinar con muestras reales (sección 8)',
+  configuracion_mapeo JSON NOT NULL COMMENT 'columnas, delimitadores, posiciones',
   activo              TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = interfaz disponible para usarse, 0 = deshabilitada',
   CONSTRAINT fk_ii_sistema FOREIGN KEY (sistema_origen_id) REFERENCES sistemas_origen(id)
 ) ENGINE=InnoDB COMMENT='Definición configurable de cada interfaz de importación de datos';
@@ -1199,7 +859,7 @@ CREATE TABLE importaciones_staging (
   contenido_raw            LONGTEXT NULL COMMENT 'Contenido crudo del archivo cargado, tal como se recibió',
   errores_validacion       JSON NULL COMMENT 'Detalle estructurado de los errores encontrados al validar la carga',
   CONSTRAINT fk_is_interfaz FOREIGN KEY (interfaz_importacion_id) REFERENCES interfaces_importacion(id)
-) ENGINE=InnoDB COMMENT='Zona de aterrizaje antes de validar y consolidar (sección 6.9)';
+) ENGINE=InnoDB COMMENT='Zona de aterrizaje antes de validar y consolidar';
 
 CREATE TABLE historico_salarios_pre_migracion (
   id                     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del registro histórico',
@@ -1238,10 +898,6 @@ CREATE TABLE exportaciones_generadas (
   CONSTRAINT fk_eg_usuario FOREIGN KEY (generado_por_usuario_id) REFERENCES usuarios(id)
 ) ENGINE=InnoDB COMMENT='Registro histórico de exportaciones, con hash para banco/autoridades/PDF firmable';
 
--- ============================================================================
--- 6.10 SEGURIDAD Y AUDITORÍA
--- ============================================================================
-
 CREATE TABLE usuarios (
   id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del usuario del sistema',
   nombre_usuario  VARCHAR(60)  NOT NULL UNIQUE COMMENT 'Nombre de usuario (login) único',
@@ -1256,7 +912,7 @@ CREATE TABLE usuarios (
 CREATE TABLE roles (
   id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno del rol',
   codigo  VARCHAR(40)  NOT NULL UNIQUE COMMENT 'Código corto y único del rol',
-  nombre  VARCHAR(100) NOT NULL COMMENT 'p.ej. Encargada RRHH/Contabilidad, Director Ejecutivo -- ver firmas sección 4.1'
+  nombre  VARCHAR(100) NOT NULL COMMENT 'p.ej. Encargada RRHH/Contabilidad, Director Ejecutivo'
 ) ENGINE=InnoDB COMMENT='Catálogo de roles funcionales del sistema';
 
 CREATE TABLE permisos (
@@ -1264,7 +920,7 @@ CREATE TABLE permisos (
   codigo  VARCHAR(60)  NOT NULL UNIQUE COMMENT 'Código corto y único del permiso',
   nombre  VARCHAR(150) NOT NULL COMMENT 'Nombre descriptivo del permiso',
   modulo  VARCHAR(60)  NOT NULL COMMENT 'empleados, asistencia, parametros, planilla, contabilizacion, integraciones, auditoria'
-) ENGINE=InnoDB COMMENT='Base para segregación de funciones exigida por Ley 8292 (sección 3.9)';
+) ENGINE=InnoDB COMMENT='Base para segregación de funciones exigida por Ley 8292';
 
 CREATE TABLE rol_permisos (
   rol_id      BIGINT UNSIGNED NOT NULL COMMENT 'Rol al que se le asigna el permiso',
@@ -1294,23 +950,7 @@ CREATE TABLE auditoria_cambios (
   CONSTRAINT fk_aud_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
   KEY ix_aud_tabla_registro (tabla_afectada, registro_id),
   KEY ix_aud_fecha (fecha_cambio)
-) ENGINE=InnoDB COMMENT='Trazabilidad completa: quién, cuándo, valor anterior/nuevo (sección 2 y 5.1)';
-
-
--- ============================================================================
--- 6.11 AUDITORIA AUTOMATICA (agregado v11)
--- Triggers AFTER INSERT/UPDATE/DELETE en cada tabla de datos, para que
--- auditoria_cambios se llene sola sin depender de que el backend se acuerde
--- de escribir ahi en cada modulo. Convencion: el backend debe fijar
--- @auditoria_usuario_id = <id del usuario autenticado> al inicio de cada
--- conexion/transaccion (SET @auditoria_usuario_id = 123;). Si no se fija,
--- queda NULL (ej. cargas por script/migracion), tal como ya preveia el diseno
--- original de auditoria_cambios.usuario_id.
--- password_hash de 'usuarios' se excluye del JSON por seguridad.
--- Requiere JSON_OBJECT (MySQL 5.7.8+ / MariaDB 10.2.3+; el guard de version
--- de este archivo ya exige MariaDB >= 10.3.0, asi que queda cubierto).
--- ============================================================================
-
+) ENGINE=InnoDB COMMENT='Trazabilidad completa: quién, cuándo, valor anterior/nuevo';
 
 DROP TRIGGER IF EXISTS trg_aud_tipos_identificacion_ins;
 CREATE TRIGGER trg_aud_tipos_identificacion_ins AFTER INSERT ON tipos_identificacion
@@ -2824,83 +2464,5 @@ BEGIN
   VALUES ('usuario_roles', 0, @auditoria_usuario_id, 'delete', JSON_OBJECT('usuario_id', OLD.usuario_id, 'rol_id', OLD.rol_id), NULL);
 END;
 
-
 SET FOREIGN_KEY_CHECKS = 1;
 
--- ============================================================================
--- NOTAS DE DISEÑO / SUPUESTOS ABIERTOS (heredados de la sección 10 del doc
--- original, más las correcciones aplicadas en esta versión 2)
--- ============================================================================
--- 1. El tercer programa presupuestario (si existe) no requiere cambio de
---    modelo: basta con insertar una fila en programas_presupuestarios.
--- 2. "Recargo por funciones" ya vive en conceptos_salariales; su regla de
---    cálculo (fijo o fórmula) se define en concepto_salarial_formula
---    cuando se confirme con Asesoría Legal / convención colectiva.
--- 3. El criterio para distinguir "Embargo" vs "Embargo 2" no condiciona el
---    modelo: ambos son filas en `embargos`, diferenciadas por
---    prioridad_aplicacion y tipo_embargo_id; el criterio real de asignación
---    se resuelve en la capa de negocio/API cuando se defina.
--- 4. El campo "proyecto" (valor 99) es VARCHAR configurable en
---    mapeo_concepto_cuenta y asientos_contables_detalle, no una constante.
--- 5. El tema presupuestario NO se automatiza en esta versión (sección 8):
---    no se modelan tablas de ejecución/control presupuestario; solo se deja
---    la dimensión programa_presupuestario / proyecto para que ese proceso
---    se siga llevando a mano o en SAP.
--- 6. Layout bancario (Banco Nacional u otros) pendiente de ficha técnica
---    real; interfaces_importacion.configuracion_mapeo y
---    formatos_exportacion están diseñados para no requerir cambio de
---    esquema cuando se obtenga esa información.
--- 7. Créditos fiscales de renta por cónyuge/hijos (Art. 33 Ley 7092): se
---    agregó parametros_creditos_fiscales_renta (monto versionado por
---    vigencia) y empleado_datos_familiares (declaración del empleado,
---    también versionada). El motor de cálculo debe restar estos créditos
---    del impuesto ya calculado con parametros_tramos_renta antes de
---    generar la línea de deducción de renta en planilla_detalle_concepto.
--- 8. Subsidios por incapacidad CCSS/INS: se agregó
---    parametros_subsidios_incapacidad (escala de % patronal por entidad
---    emisora y día de incapacidad) y la columna ausencias.entidad_emisora_id.
---    El motor de cálculo cruza estos dos datos con los días transcurridos
---    de la incapacidad para resolver el subsidio patronal a reconocer,
---    sin afectar afecta_base_ccss de los conceptos regulares.
--- 9. Migración con arranque a mitad de año (sección 8): se agregó
---    historico_salarios_pre_migracion para los meses previos a la puesta
---    en marcha (p.ej. enero-julio si el sistema arranca en agosto). Se
---    carga vía importaciones_staging y el motor de cálculo la consulta
---    junto con planilla_detalle_concepto (UNION) para completar el año
---    completo en aguinaldo, renta acumulada y promedio de cesantía, sin
---    crear periodos_planilla ficticios para meses ya pagados/contabilizados
---    en el sistema anterior. Vacaciones (vacaciones_acumulado) y saldos de
---    préstamos/embargos (saldo_pendiente) NO requieren tabla nueva: basta
---    con insertar el corte/saldo real vigente al momento de arrancar.
---
--- CAMBIOS DE ESTA VERSIÓN 2 RESPECTO AL ESQUEMA ORIGINAL (resumen ejecutivo):
--- 10. 5 ENUM de parámetros legales se convirtieron en catálogos con FK:
---     tipos_hora_extra, regimenes_ccss, tipos_credito_fiscal_renta,
---     entidades_emisoras_incapacidad, tipos_identificacion.
--- 11. parametros_cargas_sociales.rubro ahora tiene FK real
---     (concepto_salarial_id) hacia conceptos_salariales.
--- 12. puestos.clasificacion (antes VARCHAR libre) ahora es FK
---     (clasificacion_puesto_id) hacia el nuevo catálogo clasificaciones_puesto.
--- 13. periodos_planilla ahora modela la doble firma real (preparado /
---     revisado / aprobado), cada una con usuario y fecha.
--- 14. TODAS las tablas versionadas por fecha_inicio_vigencia/
---     fecha_fin_vigencia (17 en total) tienen el patrón es_vigente +
---     índice único, para impedir dos filas "vigentes" simultáneas por
---     clave. Se corrigió además parametros_tipos_embargo, cuyo `codigo`
---     UNIQUE simple impedía versionar -- ya no es UNIQUE por sí solo.
--- 15. CHECK constraints agregados: embargos (porcentaje XOR monto_fijo,
---     rango 0-100), parametros_tramos_renta (rango y porcentaje),
---     periodos_planilla y ausencias (fecha_fin >= fecha_inicio), todas las
---     tablas de vigencia (fecha_fin_vigencia >= fecha_inicio_vigencia), y
---     asientos_contables_detalle (monto_debe XOR monto_haber, partida
---     doble real a nivel de base de datos).
--- 16. planilla_detalle_concepto ahora traza ajustes/correcciones entre
---     períodos (concepto_ajuste_de_id + motivo_ajuste), con CHECK contra
---     autorreferencia directa (el ciclo transitivo A<->B se valida en
---     backend, no es posible en un CHECK de MySQL/MariaDB).
--- 17. Nueva tabla parametros_salario_minimo (versionada, FK a
---     clasificaciones_puesto) para validar salario_base_nominal contra el
---     Decreto de Salarios Mínimos.
--- 18. Nueva tabla feriados_patron (fijos + móviles por Pascua, con bandera
---     pago_obligatorio) para generar calendario_laboral automáticamente
---     cada año en vez de cargarlo a mano.

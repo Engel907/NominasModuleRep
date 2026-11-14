@@ -15,7 +15,7 @@ func TestValidarPassword(t *testing.T) {
 		pass    string
 		usuario string
 		correo  string
-		motivo  MotivoPassword // "" = debe ser válida
+		motivo  MotivoPassword
 	}{
 		{"válida: frase larga", "caballo-azul-nube-47", usuario, correo, ""},
 		{"válida: 12 caracteres justos", "Tr0ub4dor&3x", usuario, correo, ""},

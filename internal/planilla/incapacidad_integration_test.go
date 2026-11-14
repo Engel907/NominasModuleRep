@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-// L11 de punta a punta: boleta CCSS 27-feb..4-mar para emp[2] (salario 700 000).
+// de punta a punta: boleta CCSS 27-feb..4-mar para emp[2] (salario 700 000).
 // En marzo la serie va del día 3 al 6: el día 3 (1-mar) lo paga el patrono al
 // 50 %; los días 4–6 (2..4-mar) son de la CCSS (informativos).
-func TestL11IncapacidadEnElCalculo(t *testing.T) {
+func TestIncapacidadEnElCalculo(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	f.sembrarSalarioMinimoInembargable(t)
 	f.crearIncapacidad(t)
@@ -45,7 +45,6 @@ WHERE pde.periodo_planilla_id = ? ORDER BY dia_serie_desde`, p.ID)
 		}
 		got = append(got, l)
 	}
-	// 700 000/30 = 23 333.33…: patrono 1 día × 50 % = 11 666.67; CCSS 3 días × 60 % = 42 000
 	want := []linea{{3, 3, "1.00", "11666.67", "0.00"}, {4, 6, "3.00", "0.00", "42000.00"}}
 	if len(got) != len(want) {
 		t.Fatalf("líneas de incapacidad: %+v", got)

@@ -1,6 +1,3 @@
-// internal/db/dto/planilla_ciclo.go
-//
-// F19 — Consultas del ciclo de vida del período de planilla.
 package dto
 
 import (
@@ -112,8 +109,6 @@ INSERT INTO periodos_planilla (tipo_planilla_id, fecha_inicio, fecha_fin) VALUES
 	}
 	return res.LastInsertId()
 }
-
-// Las Marcar* devuelven filas afectadas: 0 = el estado ya no era el esperado.
 
 // MarcarPeriodoCalculado: borrador -> calculada. preparado_por conserva a
 // quien calculó primero (así un recálculo por otra persona no libera a la

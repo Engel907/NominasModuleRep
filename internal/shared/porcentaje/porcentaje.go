@@ -1,12 +1,5 @@
-// Package porcentaje es el ÚNICO lugar del sistema donde se convierte entre
-// las dos representaciones de un porcentaje (regla D3):
-//
-//   - "porcentaje" tal como se persiste y se muestra en BD/UI: 10.83
-//   - "fracción" tal como se multiplica en el motor de cálculo: 0.1083
-//
-// Ningún otro paquete debe dividir ni multiplicar por 100 para convertir un
-// porcentaje. Los valores se envuelven en Porcentaje y se piden con
-// Fraccion() (para calcular) o Porcentaje() (para mostrar/persistir).
+// Package porcentaje es el único lugar del sistema donde se convierte entre
+// las dos representaciones de un porcentaje:
 package porcentaje
 
 import (

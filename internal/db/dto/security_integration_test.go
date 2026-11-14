@@ -1,8 +1,5 @@
 package dto_test
 
-// Prueba de integración del contador atómico (F14 / S5) sobre una BD efímera
-// de testutil.NuevaBD (se omite sin TEST_DATABASE_URL). Crea un usuario propio.
-
 import (
 	"context"
 	"fmt"
@@ -34,7 +31,7 @@ VALUES (?, 'Prueba contador atómico', ?, 'no-es-un-hash', 1)`,
 	const (
 		goroutines  = 2
 		porGorutina = 10
-		umbral      = 15 // entre 10 y 20: solo se cruza si NO se pierde ninguna suma
+		umbral      = 15
 	)
 	hasta := time.Now().Add(15 * time.Minute)
 
@@ -68,7 +65,7 @@ VALUES (?, 'Prueba contador atómico', ?, 'no-es-un-hash', 1)`,
 	}
 }
 
-// El UPDATE fija bloqueado_hasta con el contador ANTES de incrementarse: con
+// El UPDATE fija bloqueado_hasta con el contador antes de incrementarse: con
 // umbral N, el intento N-1 no bloquea y el N sí (ver el comentario sobre el
 // orden de los SET en RegistrarIntentoFallidoAtomico).
 func TestRegistrarIntentoFallidoAtomico_BloqueaExactamenteEnElUmbral(t *testing.T) {

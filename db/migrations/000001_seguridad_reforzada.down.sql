@@ -1,4 +1,3 @@
--- down 000001_seguridad_reforzada: deja usuarios/roles/usuario_roles y sus triggers como en 000000.
 DROP TRIGGER IF EXISTS trg_aud_usuario_roles_ins;
 DROP TRIGGER IF EXISTS trg_aud_usuario_roles_upd;
 DROP TRIGGER IF EXISTS trg_aud_usuario_roles_del;
@@ -11,7 +10,6 @@ ALTER TABLE usuarios
   DROP COLUMN bloqueado_hasta, DROP COLUMN intentos_fallidos,
   DROP COLUMN updated_at, DROP COLUMN created_at;
 
--- usuario_roles como la define 000000 (PK compuesta)
 CREATE TABLE usuario_roles (
   usuario_id  BIGINT UNSIGNED NOT NULL COMMENT 'Usuario al que se le asigna el rol',
   rol_id      BIGINT UNSIGNED NOT NULL COMMENT 'Rol asignado al usuario',
@@ -20,7 +18,6 @@ CREATE TABLE usuario_roles (
   CONSTRAINT fk_ur_rol FOREIGN KEY (rol_id) REFERENCES roles(id)
 ) ENGINE=InnoDB COMMENT='Asignación de roles a cada usuario del sistema';
 
--- triggers de auditoría tal como los define 000000
 DROP TRIGGER IF EXISTS trg_aud_usuarios_ins;
 CREATE TRIGGER trg_aud_usuarios_ins AFTER INSERT ON usuarios
 FOR EACH ROW

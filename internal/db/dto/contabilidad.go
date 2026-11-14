@@ -1,15 +1,5 @@
 package dto
 
-// Fase 10 — Consultas de contabilización (sin sqlc, SQL escrito a mano con
-// placeholders `?` siempre; nunca se concatenan valores en el SQL).
-//
-// Se usa un tipo propio (ContabilidadQueries) en vez de extender Queries; se
-// obtiene con (*Queries).Contabilidad() dentro de db.WithAuditContext.
-//
-// TODA escritura de este archivo (asientos_contables, asientos_contables_detalle,
-// periodos_planilla) dispara triggers trg_aud_* que leen @auditoria_usuario_id:
-// solo debe invocarse desde una transacción abierta por db.WithAuditContext.
-
 import (
 	"context"
 	"database/sql"
@@ -32,47 +22,68 @@ func NewContabilidadQueries(db ContabilidadDB) *ContabilidadQueries {
 	return &ContabilidadQueries{db: db}
 }
 
-// Contabilidad devuelve las consultas de contabilización ligadas a la MISMA
-// conexión/transacción que q. Es la forma de usarlas dentro de
-// db.WithAuditContext (internal/db/audit.go), que entrega un *Queries ya
-// ligado a la transacción auditada:
-//
-//	db.WithAuditContext(ctx, sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
-//	    cq := q.Contabilidad()
-//	    ...
-//	})
-//
-// Este paquete ya NO abre transacciones ni fija @auditoria_usuario_id por su
-// cuenta: eso sería saltarse el wrapper obligatorio (la variable de sesión
-// sobrevive al COMMIT y quedaría pegada a una conexión del pool).
-//
-// Requiere que el campo db de Queries cumpla ContabilidadDB (sqlc.DBTX lo
-// cumple: ExecContext, QueryContext y QueryRowContext).
+// Contabilidad devuelve las consultas de contabilización ligadas a la misma
+// conexión o transacción que q.
 func (q *Queries) Contabilidad() *ContabilidadQueries { return NewContabilidadQueries(q.db) }
 
-// ---------------------------------------------------------------------------
-
 type PeriodoParaContabilizarRow struct {
-	ID       int64
-	FechaFin time.Time
-	Estado   string
+	ID                 int64
+	FechaFin           time.Time
+	Estado             string
+	PagadoPorUsuarioID *int64 // segregación (quien pagó no contabiliza)
 }
 
 // ObtenerPeriodoParaContabilizar bloquea la fila del período (FOR UPDATE) para
 // serializar corridas concurrentes de contabilización. sql.ErrNoRows si no existe.
 func (q *ContabilidadQueries) ObtenerPeriodoParaContabilizar(ctx context.Context, periodoID int64) (PeriodoParaContabilizarRow, error) {
 	var r PeriodoParaContabilizarRow
+	var pago sql.NullInt64
 	err := q.db.QueryRowContext(ctx,
-		`SELECT id, fecha_fin, estado FROM periodos_planilla WHERE id = ? FOR UPDATE`, periodoID,
-	).Scan(&r.ID, &r.FechaFin, &r.Estado)
+		`SELECT id, fecha_fin, estado, pagado_por_usuario_id FROM periodos_planilla WHERE id = ? FOR UPDATE`, periodoID,
+	).Scan(&r.ID, &r.FechaFin, &r.Estado, &pago)
+	if pago.Valid {
+		v := pago.Int64
+		r.PagadoPorUsuarioID = &v
+	}
 	return r, err
 }
 
-func (q *ContabilidadQueries) ContarAsientosDelPeriodo(ctx context.Context, periodoID int64) (int64, error) {
+// ContarAsientosDelPeriodo cuenta los asientos del período salvo los del tipo
+// excluirTipoCodigo (el asiento de pago se genera al pagar, antes de
+// contabilizar el devengo).
+func (q *ContabilidadQueries) ContarAsientosDelPeriodo(ctx context.Context, periodoID int64, excluirTipoCodigo string) (int64, error) {
 	var n int64
-	err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM asientos_contables WHERE periodo_planilla_id = ?`, periodoID).Scan(&n)
+	err := q.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM asientos_contables ac JOIN tipos_asiento ta ON ta.id = ac.tipo_asiento_id
+WHERE ac.periodo_planilla_id = ? AND ta.codigo <> ?`, periodoID, excluirTipoCodigo).Scan(&n)
 	return n, err
+}
+
+// NetoProgramaRow: Σ neto pagado del período por programa presupuestario.
+type NetoProgramaRow struct {
+	ProgramaPresupuestarioID int64
+	Neto                     decimal.Decimal
+}
+
+// SumarNetoPorPrograma (asiento de pago).
+func (q *ContabilidadQueries) SumarNetoPorPrograma(ctx context.Context, periodoID int64) ([]NetoProgramaRow, error) {
+	rows, err := q.db.QueryContext(ctx, `
+SELECT programa_presupuestario_id, SUM(neto_pagado)
+FROM planilla_detalle_empleado WHERE periodo_planilla_id = ?
+GROUP BY programa_presupuestario_id ORDER BY programa_presupuestario_id`, periodoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NetoProgramaRow
+	for rows.Next() {
+		var r NetoProgramaRow
+		if err := rows.Scan(&r.ProgramaPresupuestarioID, &r.Neto); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 type MapeoVigenteRow struct {
@@ -155,13 +166,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 }
 
 // MarcarPeriodoContabilizado pasa el período a 'contabilizada' (valor del ENUM
-// periodos_planilla.estado = planilla.EstadoContabilizada; dto no puede
-// importar planilla, ver dashboard.go). Exige que el estado siga siendo
+// periodos_planilla.estado = planilla.EstadoContabilizada). Exige que el
+// estado siga siendo
 // estadoActual (control optimista); si no se afectó exactamente 1 fila
 // retorna error.
-func (q *ContabilidadQueries) MarcarPeriodoContabilizado(ctx context.Context, periodoID int64, estadoActual string) error {
-	res, err := q.db.ExecContext(ctx,
-		`UPDATE periodos_planilla SET estado = 'contabilizada' WHERE id = ? AND estado = ?`, periodoID, estadoActual)
+func (q *ContabilidadQueries) MarcarPeriodoContabilizado(ctx context.Context, periodoID int64, estadoActual string, usuarioID int64) error {
+	res, err := q.db.ExecContext(ctx, `
+UPDATE periodos_planilla
+SET estado = 'contabilizada', contabilizado_por_usuario_id = ?, fecha_contabilizacion = NOW()
+WHERE id = ? AND estado = ?`, usuarioID, periodoID, estadoActual)
 	if err != nil {
 		return err
 	}

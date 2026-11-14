@@ -1,19 +1,5 @@
-// Comando migrate: aplica y revierte las migraciones de db/migrations con
-// golang-migrate. Es una herramienta manual (CI, despliegues, desarrollo):
-// la API NUNCA corre migraciones al iniciar.
-//
-// Uso:
-//
-//	go run ./cmd/migrate up
-//	go run ./cmd/migrate down N
-//	go run ./cmd/migrate version
-//	go run ./cmd/migrate force V
-//
-// Conexión: DATABASE_URL (p.ej. mysql://user:pass@tcp(host:3306)/db) o, si no
-// existe, las variables DB_* de internal/config (DB_HOST, DB_PORT, DB_USER,
-// DB_PASSWORD, DB_NAME, DB_PARAMS, DB_CONNECT_TIMEOUT_SECONDS). También se lee
-// un .env en el directorio actual. Carpeta de migraciones: MIGRATIONS_PATH
-// (por defecto db/migrations).
+// Command migrate aplica y revierte las migraciones de db/migrations: up,
+// down, force, goto y version.
 package main
 
 import (
@@ -41,6 +27,7 @@ const textoUso = `uso: migrate <comando>
 comandos:
   up          aplica todas las migraciones pendientes
   down N      revierte las últimas N migraciones (N obligatorio, > 0)
+  goto V      sube o baja hasta dejar la base exactamente en la versión V (> 0)
   version     muestra la versión actual y si está en estado "dirty"
   force V     fuerza la versión V sin ejecutar SQL (V = -1 borra el registro);
               úsese solo para recuperarse de un estado "dirty" ya corregido a mano`
@@ -69,14 +56,13 @@ func ejecutar(args []string) error {
 	}
 	comando := args[0]
 
-	// Se validan los argumentos antes de abrir la conexión.
 	var n int
 	switch comando {
 	case "up", "version":
 		if len(args) != 1 {
 			return errUso(textoUso)
 		}
-	case "down", "force":
+	case "down", "force", "goto":
 		if len(args) != 2 {
 			return errUso(textoUso)
 		}
@@ -84,8 +70,8 @@ func ejecutar(args []string) error {
 		if err != nil {
 			return errUso(fmt.Sprintf("migrate: %q no es un entero válido\n\n%s", args[1], textoUso))
 		}
-		if comando == "down" && v <= 0 {
-			return errUso("migrate: down requiere N > 0 (no se permite revertir todo sin indicar cuántas)")
+		if (comando == "down" || comando == "goto") && v <= 0 {
+			return errUso("migrate: " + comando + " requiere un valor > 0")
 		}
 		if comando == "force" && v < -1 {
 			return errUso("migrate: force requiere V >= -1")
@@ -120,6 +106,8 @@ func ejecutar(args []string) error {
 		err = m.Steps(-n)
 	case "force":
 		err = m.Force(n)
+	case "goto":
+		err = m.Migrate(uint(n))
 	case "version":
 		return nil
 	}
@@ -128,7 +116,6 @@ func ejecutar(args []string) error {
 		err = nil
 	}
 	if err != nil {
-		// Se intenta mostrar la versión final aunque haya fallado (puede quedar dirty).
 		_ = imprimirVersion(m, "versión tras el error")
 		return fmt.Errorf("%s falló: %w", comando, err)
 	}

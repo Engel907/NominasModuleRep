@@ -1,10 +1,3 @@
-// Fase 6c / F09 — Endpoints de exportación bancaria y boleta de pago.
-//
-// Las rutas NO se registran aquí: routes.go las monta con el middleware de
-// permisos (planilla.exportar_bancario y planilla.ver_boleta):
-//
-//	GET /planillas/:id/exportar/bancario   -> ExportarDispersionBancaria
-//	GET /planillas/:id/boleta/:empleado_id -> ObtenerBoletaPago
 package handlers
 
 import (
@@ -49,7 +42,7 @@ func nombreArchivoSeguro(nombre string) string {
 			b.WriteByte('_')
 		}
 	}
-	s := strings.TrimLeft(b.String(), ".") // sin archivos ocultos ni ".."
+	s := strings.TrimLeft(b.String(), ".")
 	if s == "" {
 		return "exportacion.txt"
 	}
@@ -62,7 +55,7 @@ func nombreArchivoSeguro(nombre string) string {
 func (h *PlanillaExportHandler) ExportarDispersionBancaria(c *gin.Context) {
 	periodoID, ok := parseIDParam(c, "id")
 	if !ok {
-		return // ParseIDParam ya respondió 400
+		return
 	}
 	usuarioID, ok := usuarioIDDesdeContexto(c)
 	if !ok {
@@ -78,7 +71,6 @@ func (h *PlanillaExportHandler) ExportarDispersionBancaria(c *gin.Context) {
 			middleware.Fail(c, http.StatusUnprocessableEntity, "no_dispersion_rows",
 				"El período no tiene filas para dispersar (debe estar aprobado o pagado y con cuenta bancaria vigente)", nil)
 		case errors.As(err, &filaErr):
-			// EmpleadoID y Motivo son valores controlados, no texto de error interno.
 			middleware.Fail(c, http.StatusUnprocessableEntity, "invalid_dispersion_row",
 				fmt.Sprintf("No se puede generar el archivo: empleado %d: %s", filaErr.EmpleadoID, filaErr.Motivo), nil)
 		default:
@@ -97,59 +89,96 @@ func (h *PlanillaExportHandler) ExportarDispersionBancaria(c *gin.Context) {
 // ObtenerBoletaPago maneja GET /planillas/:id/boleta/:empleado_id.
 // Devuelve la boleta individual como JSON (aprobada|pagada|contabilizada).
 func (h *PlanillaExportHandler) ObtenerBoletaPago(c *gin.Context) {
-	periodoID, ok := parseIDParam(c, "id")
+	sol, ok := h.solicitudBoleta(c)
 	if !ok {
 		return
 	}
-	empleadoID, ok := parseIDParam(c, "empleado_id")
+	boleta, err := h.exportSvc.ObtenerBoletaPagoAutorizada(c.Request.Context(), sol.periodoID, sol.empleadoID, sol.empleadoUsuarioID, sol.permisos)
+	if err != nil {
+		fallarBoleta(c, err)
+		return
+	}
+
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, boleta)
+}
+
+// ObtenerBoletaPagoPDF maneja GET /planillas/:id/boleta/:empleado_id/pdf:
+// misma autorización por fila que la boleta JSON.
+func (h *PlanillaExportHandler) ObtenerBoletaPagoPDF(c *gin.Context) {
+	sol, ok := h.solicitudBoleta(c)
 	if !ok {
 		return
+	}
+	pdf, err := h.exportSvc.ObtenerBoletaPagoPDFAutorizada(c.Request.Context(), sol.periodoID, sol.empleadoID, sol.empleadoUsuarioID, sol.permisos)
+	if err != nil {
+		fallarBoleta(c, err)
+		return
+	}
+	nombre := fmt.Sprintf("boleta_periodo_%d_empleado_%d.pdf", sol.periodoID, sol.empleadoID)
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": nombreArchivoSeguro(nombre)}))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "application/pdf", pdf)
+}
+
+type solicitudBoleta struct {
+	periodoID, empleadoID, empleadoUsuarioID int64
+	permisos                                 []string
+}
+
+// solicitudBoleta resuelve período, empleado, permisos y (si solo tiene
+// ver_boleta_propia) el empleado vinculado al usuario.
+func (h *PlanillaExportHandler) solicitudBoleta(c *gin.Context) (solicitudBoleta, bool) {
+	var sol solicitudBoleta
+	var ok bool
+	if sol.periodoID, ok = parseIDParam(c, "id"); !ok {
+		return sol, false
+	}
+	if sol.empleadoID, ok = parseIDParam(c, "empleado_id"); !ok {
+		return sol, false
 	}
 	if _, ok := usuarioIDDesdeContexto(c); !ok {
 		middleware.Fail(c, http.StatusUnauthorized, "unauthorized", "Token de autenticación requerido", nil)
-		return
+		return sol, false
 	}
 	payload := middleware.PayloadDesdeContexto(c)
-	var empleadoUsuarioID int64
-	var err error
 	if payload != nil && !tienePermiso(payload.Permisos, authz.PermPlanillaVerBoleta) &&
 		tienePermiso(payload.Permisos, authz.PermPlanillaVerBoletaPropia) {
-		empleadoUsuarioID, err = middleware.EmpleadoIDDelUsuario(c, h.empleados)
+		id, err := middleware.EmpleadoIDDelUsuario(c, h.empleados)
 		if err != nil {
 			if errors.Is(err, middleware.ErrEmpleadoIDNoVinculado) {
 				middleware.Fail(c, http.StatusUnprocessableEntity, "employee_not_linked", "El usuario no tiene un empleado vinculado.", nil)
 			} else {
 				middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "No se pudo resolver el empleado del usuario.", err)
 			}
-			return
+			return sol, false
 		}
+		sol.empleadoUsuarioID = id
 	}
-	permisos := []string(nil)
 	if payload != nil {
-		permisos = payload.Permisos
+		sol.permisos = payload.Permisos
 	}
-	boleta, err := h.exportSvc.ObtenerBoletaPagoAutorizada(c.Request.Context(), periodoID, empleadoID, empleadoUsuarioID, permisos)
-	if err != nil {
-		switch {
-		case errors.Is(err, planilla.ErrBoletaSinPermiso), errors.Is(err, planilla.ErrBoletaNoPropia):
-			middleware.Fail(c, http.StatusForbidden, "row_access_denied", "No tiene permiso para consultar esta boleta.", nil)
-			return
-		case errors.Is(err, planilla.ErrBoletaSinEmpleadoVinculado):
-			middleware.Fail(c, http.StatusUnprocessableEntity, "employee_not_linked", "El usuario no tiene un empleado vinculado.", nil)
-			return
-		case errors.Is(err, sql.ErrNoRows):
-			middleware.Fail(c, http.StatusNotFound, "not_found",
-				"No existe boleta para ese empleado en el período, o el período aún no está aprobado", nil)
-			return
-		default:
-			middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
-			return
-		}
-	}
+	return sol, true
+}
 
-	c.Header("X-Content-Type-Options", "nosniff")
-	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, boleta)
+func fallarBoleta(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, planilla.ErrBoletaSinPermiso), errors.Is(err, planilla.ErrBoletaNoPropia):
+		middleware.Fail(c, http.StatusForbidden, "row_access_denied", "No tiene permiso para consultar esta boleta.", nil)
+		return
+	case errors.Is(err, planilla.ErrBoletaSinEmpleadoVinculado):
+		middleware.Fail(c, http.StatusUnprocessableEntity, "employee_not_linked", "El usuario no tiene un empleado vinculado.", nil)
+		return
+	case errors.Is(err, sql.ErrNoRows):
+		middleware.Fail(c, http.StatusNotFound, "not_found",
+			"No existe boleta para ese empleado en el período, o el período aún no está aprobado", nil)
+		return
+	default:
+		middleware.FailFromError(c, http.StatusInternalServerError, "internal_error", "Error interno del servidor", err)
+		return
+	}
 }
 
 func tienePermiso(permisos []string, buscado string) bool {

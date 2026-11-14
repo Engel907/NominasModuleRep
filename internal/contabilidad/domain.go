@@ -1,24 +1,5 @@
 // Package contabilidad genera los asientos contables de una corrida de
-// planilla (Fase 10).
-//
-// Diseño: igual que el motor de cálculo, separa el ARMADO PURO de los
-// asientos (GenerarAsientos, sin I/O) de la ORQUESTACIÓN (service.go: lectura
-// de mapeos, transacción, persistencia).
-//
-// Reglas de fondo:
-//   - Ninguna cuenta contable, programa ni proyecto se hardcodea: todo sale de
-//     mapeo_concepto_cuenta (vigente a la fecha efectiva) y del programa que
-//     planilla_detalle_empleado copió del expediente al calcular.
-//   - Partida doble: si el juego de asientos no cuadra, se retorna error
-//     explícito y NO se inserta nada. Nunca se "ajusta" un descuadre.
-//   - Solo se contabiliza un período en estado `pagada` (D4); la transición a
-//     `contabilizada` ocurre en la MISMA transacción que los asientos.
-//   - Montos: todo importe se redondea a 2 decimales (decimal.Round) al armar
-//     cada partida, igual que las columnas DECIMAL(14,2); así lo que se valida
-//     es exactamente lo que se persiste.
-//   - Porcentajes (D3): el dominio trabaja con FRACCIONES (0.2683). La BD
-//     guarda puntos porcentuales (26.8300); la conversión vive en
-//     sql_adapters.go y la centralizará F18.
+// planilla.
 package contabilidad
 
 import (
@@ -42,10 +23,6 @@ const EstadoAsientoGenerado = "generado"
 
 var dosDecimales = int32(2)
 
-// ============================================================================
-// Entidades persistidas
-// ============================================================================
-
 // AsientoContable corresponde a asientos_contables (+ sus líneas).
 type AsientoContable struct {
 	ID                int64
@@ -60,7 +37,7 @@ type AsientoContable struct {
 
 // AsientoContableDetalle corresponde a asientos_contables_detalle. Cada línea
 // es débito XOR crédito con monto > 0 (CHECK chk_acd_debe_o_haber); aquí se
-// valida ANTES de llegar a la base de datos.
+// valida antes de llegar a la base de datos.
 type AsientoContableDetalle struct {
 	ID                       int64
 	AsientoContableID        int64
@@ -89,19 +66,10 @@ func (a AsientoContable) TotalHaber() decimal.Decimal {
 	return t
 }
 
-// ============================================================================
-// Entradas
-// ============================================================================
-
-// DetallePlanilla es el resultado calculado de UN empleado más el programa
+// DetallePlanilla es el resultado calculado de un empleado más el programa
 // presupuestario que planilla_detalle_empleado copió del expediente al
 // momento del cálculo. Calculo es el resultado de
 // planilla.MotorEmpleado.CalcularEmpleado.
-//
-// IMPORTANTE: la cuota patronal de CCSS (Calculo.CuotaPatronalCCSS) NO se
-// persiste en ninguna tabla ni aparece en DesglosePorConcepto, por lo que los
-// asientos deben generarse con el resultado en memoria de la corrida, no
-// reconstruyéndolo desde la base de datos.
 type DetallePlanilla struct {
 	ProgramaPresupuestarioID int64
 	Calculo                  *planilla.CalculoEmpleadoDetalle
@@ -127,17 +95,14 @@ type ConfigGeneracion struct {
 	// ConceptoAnclaNeto: concepto cuyos mapeos con tipo_movimiento='haber'
 	// representan la línea de "salarios por pagar (neto)". No existe un
 	// concepto "neto" en el catálogo, y mapeo_concepto_cuenta.concepto_salarial_id
-	// es NOT NULL; el seed usa SAL_BASE como ancla. Sus mapeos 'debe' siguen
-	// registrando el monto del propio concepto.
+	// es NOT NULL. Sus mapeos 'debe' siguen registrando el monto del propio
+	// concepto.
 	ConceptoAnclaNeto string
-	// ConceptoCuotaPatronalCCSS: código del concepto al que se le imputa
-	// Calculo.CuotaPatronalCCSS (que no viene en el desglose). Seed: CCSS_PAT.
-	ConceptoCuotaPatronalCCSS string
+	// TipoAsientoPago: código de tipos_asiento del asiento de pago que
+	// se genera al pagar (000136: PAGO_PLANILLA). Sus mapeos no participan
+	// del devengo.
+	TipoAsientoPago string
 }
-
-// ============================================================================
-// Errores
-// ============================================================================
 
 var (
 	ErrMapeoFaltante          = errors.New("contabilidad: no hay mapeo_concepto_cuenta vigente")

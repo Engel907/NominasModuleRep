@@ -1,16 +1,4 @@
-// services/rrhh_errores.go
-//
-// F03 — Errores de negocio tipados (D8) y helpers de validación compartidos
-// por empleado_service.go, contrato_service.go y organizacion_service.go.
-//
-// Regla: los servicios devuelven SOLO errores de este archivo (o de los
-// sentinelas ya existentes: ErrEmpleadoNoEncontrado, ErrContratoNoEncontrado,
-// ErrNoEncontrado, ErrSalarioInferiorAlMinimo) para condiciones de negocio, y
-// errores envueltos con contexto para fallos técnicos. Los handlers traducen
-// los de negocio a HTTP con errors.Is/errors.As (ver
-// api/handlers/rrhh_errores.go); el resto sale por middleware.FailFromError.
-// Ningún handler debe volcar err.Error() al cliente.
-package services
+package rrhh
 
 import (
 	"errors"
@@ -22,8 +10,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ----------------------------- Sentinelas ------------------------------------
-
 var (
 	ErrPuestoNoEncontrado    = errors.New("el puesto no existe")
 	ErrPuestoInactivo        = errors.New("el puesto está inactivo")
@@ -32,7 +18,7 @@ var (
 
 	// ErrSalarioMinimoNoParametrizado: no hay fila vigente en
 	// parametros_salario_minimo para la clasificación del puesto (o el puesto
-	// no tiene clasificación). NO se asume ningún valor por defecto: el alta
+	// no tiene clasificación). No se asume ningún valor por defecto: el alta
 	// o cambio de salario se rechaza hasta que se cargue el parámetro.
 	ErrSalarioMinimoNoParametrizado = errors.New("no hay salario mínimo vigente parametrizado para la clasificación del puesto")
 
@@ -43,8 +29,6 @@ var (
 	ErrReferenciaInvalida      = errors.New("una referencia (FK) apunta a un registro que no existe")
 	ErrJerarquiaCiclica        = errors.New("la unidad padre indicada generaría un ciclo en la jerarquía")
 )
-
-// ----------------------------- Tipados ---------------------------------------
 
 // ErrValidacion es un error de entrada (campo + motivo) que el handler
 // responde como 400. El mensaje lo redactamos nosotros: es seguro de exponer.
@@ -61,15 +45,19 @@ func validacion(campo, mensaje string) error {
 
 // SalarioInferiorError detalla un incumplimiento del salario mínimo.
 // errors.Is(err, ErrSalarioInferiorAlMinimo) == true.
+// Pactado va en la unidad de Modalidad; EquivalenteMensual es lo que se
+// comparó contra el mínimo (mensual).
 type SalarioInferiorError struct {
-	PuestoID int64
-	Pactado  decimal.Decimal
-	Minimo   decimal.Decimal
+	PuestoID           int64
+	Pactado            decimal.Decimal
+	Modalidad          string
+	EquivalenteMensual decimal.Decimal
+	Minimo             decimal.Decimal
 }
 
 func (e *SalarioInferiorError) Error() string {
-	return fmt.Sprintf("%s: pactado %s, mínimo vigente %s",
-		ErrSalarioInferiorAlMinimo.Error(), e.Pactado.String(), e.Minimo.String())
+	return fmt.Sprintf("%s: pactado %s (%s, equivalente mensual %s), mínimo vigente %s",
+		ErrSalarioInferiorAlMinimo.Error(), e.Pactado.String(), e.Modalidad, e.EquivalenteMensual.String(), e.Minimo.String())
 }
 func (e *SalarioInferiorError) Unwrap() error { return ErrSalarioInferiorAlMinimo }
 
@@ -100,8 +88,6 @@ func (e *VigenciaTraslapadaError) Error() string {
 		e.Campo, e.FechaEfectiva.Format(layoutFecha), e.InicioVigencia.Format(layoutFecha))
 }
 func (e *VigenciaTraslapadaError) Unwrap() error { return ErrVigenciaTraslapada }
-
-// ----------------------------- Helpers ---------------------------------------
 
 // soloFecha normaliza un time.Time a medianoche UTC conservando año/mes/día,
 // para comparar DATEs sin que influya la zona horaria con la que el driver

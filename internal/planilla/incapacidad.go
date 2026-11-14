@@ -1,16 +1,3 @@
-// L11 — Subsidio de incapacidad por tramos de parametros_subsidios_incapacidad.
-//
-// SUPUESTOS A VALIDAR (RR. HH./Legal; los porcentajes los decide la BD, no el
-// código):
-//   - La serie de días (1, 2, 3…) es por boleta y CONTINUA desde su
-//     fecha_inicio, aunque haya empezado en un período anterior. Una prórroga
-//     registrada como boleta aparte reinicia la serie.
-//   - Cada día vale sus días comerciales (D15), igual que en el salario base,
-//     para que lo que se descuenta del salario y lo que se subsidia coincida.
-//   - Salario diario = salario mensual del segmento ÷ DIVISOR_DIAS_MES.
-//   - El tramo de la CCSS/INS no se paga por planilla: queda informativo.
-//   - Si el subsidio cotiza a CCSS/renta lo deciden las banderas afecta_base_*
-//     del concepto SUB_INCAP.
 package planilla
 
 import (
@@ -52,7 +39,7 @@ func (t TramoSubsidio) cubre(dia int32) bool {
 }
 
 // CalcularSubsidioIncapacidad reparte los días de la boleta entre los tramos
-// de su entidad emisora. Un día sin tramo vigente es error (D8).
+// de su entidad emisora. Un día sin tramo vigente es error.
 func CalcularSubsidioIncapacidad(salarioDiario decimal.Decimal, inc IncapacidadInput, tramos []TramoSubsidio, divisor int) (SubsidioIncapacidad, error) {
 	if divisor <= 0 {
 		return SubsidioIncapacidad{}, errors.New("planilla: divisor de días del mes no definido para la incapacidad")

@@ -12,15 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"planillas-ccdr/internal/credenciales"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/security"
 )
 
 var (
 	ErrUsuarioAdministracionNoEncontrado = errors.New("auth: usuario no encontrado")
 	ErrRolAdministracionNoEncontrado     = errors.New("auth: rol no encontrado")
 	ErrUltimoAdministrador               = errors.New("auth: no se puede quitar el último rol de administración")
-	ErrNoEmpleadoVinculado               = errors.New("auth: el usuario autenticado no tiene un empleado vinculado")
 	ErrDatosAdministracionInvalidos      = errors.New("auth: datos de administración inválidos")
 )
 
@@ -64,7 +63,6 @@ type UsuariosAdminStore interface {
 	ListarUsuariosAdministracion(context.Context, dto.FiltroUsuarios) ([]dto.UsuarioAdministracion, int64, error)
 	ListarRolesAdministracion(context.Context) ([]dto.RolAdministracion, error)
 	ListarPermisosDeRol(context.Context, int64) ([]dto.PermisoAdministracion, error)
-	EmpleadoIDDeUsuario(context.Context, int64) (int64, error)
 }
 
 type ultimoAdminStore interface {
@@ -129,7 +127,7 @@ func (s *Servicio) CrearUsuario(ctx context.Context, req CrearUsuarioRequest, ac
 	if err != nil {
 		return CrearUsuarioResponse{}, err
 	}
-	hash, err := security.HashPassword(password)
+	hash, err := credenciales.HashPassword(password)
 	if err != nil {
 		return CrearUsuarioResponse{}, fmt.Errorf("auth: generando hash temporal: %w", err)
 	}
@@ -243,7 +241,7 @@ func (s *Servicio) RestablecerPasswordAdmin(ctx context.Context, id, actorID int
 	if err != nil {
 		return "", err
 	}
-	hash, err := security.HashPassword(password)
+	hash, err := credenciales.HashPassword(password)
 	if err != nil {
 		return "", fmt.Errorf("auth: generando hash temporal: %w", err)
 	}
@@ -298,18 +296,6 @@ func (s *Servicio) PermisosDeRol(ctx context.Context, id int64) ([]dto.PermisoAd
 		return []dto.PermisoAdministracion{}, nil
 	}
 	return permisos, nil
-}
-
-func (s *Servicio) EmpleadoIDDeUsuario(ctx context.Context, usuarioID int64) (int64, error) {
-	store, err := s.adminStore()
-	if err != nil {
-		return 0, err
-	}
-	id, err := store.EmpleadoIDDeUsuario(ctx, usuarioID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNoEmpleadoVinculado
-	}
-	return id, err
 }
 
 func (s *Servicio) RevocarRolSeguro(ctx context.Context, usuarioID int64, req RevocarRolRequest, actorID int64) error {

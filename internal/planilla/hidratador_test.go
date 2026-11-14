@@ -13,17 +13,37 @@ import (
 )
 
 type fuenteFalsa struct {
-	empleados  []int64
-	contratos  map[int64]dto.ContratoVigenteEnFechaRow
-	rangos     map[int64][]dto.ContratoEnRangoRow // si está, reemplaza a contratos
-	laborales  map[int64]dto.ContextoLaboralRow
-	horas      map[int64][]dto.HorasExtraPeriodoRow
-	incaps     map[int64][]dto.IncapacidadSolapadaRow
-	prestamos  map[int64][]dto.PrestamoActivoRow
-	embargos   map[int64][]dto.EmbargoActivoRow
-	familiares map[int64]dto.DatosFamiliaresEnFechaRow
-	creditos   []dto.CreditoFiscalVigenteRow
-	devengos   map[int64][]dto.DevengoManualEmpleadoRow
+	rentaMes     map[int64]dto.RentaMesRow
+	asignaciones map[int64][]dto.AsignacionVigenteRow
+	empleados    []int64
+	contratos    map[int64]dto.ContratoVigenteEnFechaRow
+	rangos       map[int64][]dto.ContratoEnRangoRow // si está, reemplaza a contratos
+	laborales    map[int64]dto.ContextoLaboralRow
+	horas        map[int64][]dto.HorasExtraPeriodoRow
+	feriados     map[int64][]dto.HorasFeriadoLaboradoRow
+	incaps       map[int64][]dto.IncapacidadSolapadaRow
+	prestamos    map[int64][]dto.PrestamoActivoRow
+	embargos     map[int64][]dto.EmbargoActivoRow
+	familiares   map[int64]dto.DatosFamiliaresEnFechaRow
+	creditos     []dto.CreditoFiscalVigenteRow
+	devengos     map[int64][]dto.DevengoManualEmpleadoRow
+	bases        map[string]decimal.Decimal // columna -> total
+	comps        map[int64][]dto.CompensacionVacacionesRow
+	vacs         map[int64][]dto.VacacionesAprobadasRow
+	liqs         map[int64][]dto.LiquidacionParaPeriodoRow
+	asistencia   map[int64][]dto.DiaAsistenciaRow
+	feriadosOb   []time.Time
+	embargosMes  map[int64]dto.EmbargosMesRow
+}
+
+func (f *fuenteFalsa) ListarAsistenciaPresenteEnRango(_ context.Context, id int64, _, _ time.Time) ([]dto.DiaAsistenciaRow, error) {
+	return f.asistencia[id], nil
+}
+func (f *fuenteFalsa) ListarFeriadosPagoObligatorioEnRango(context.Context, time.Time, time.Time) ([]time.Time, error) {
+	return f.feriadosOb, nil
+}
+func (f *fuenteFalsa) SumarEmbargosMesEmpleado(_ context.Context, id, _ int64, _, _ time.Time) (dto.EmbargosMesRow, error) {
+	return f.embargosMes[id], nil
 }
 
 func (f *fuenteFalsa) ListarEmpleadosActivosEnRango(context.Context, time.Time, time.Time) ([]int64, error) {
@@ -39,7 +59,7 @@ func (f *fuenteFalsa) ListarContratosEnRango(_ context.Context, id int64, _, _ t
 	if !ok {
 		return nil, nil
 	}
-	return []dto.ContratoEnRangoRow{{ContratoID: c.ContratoID, SalarioPactado: c.SalarioPactado,
+	return []dto.ContratoEnRangoRow{{ContratoID: c.ContratoID, SalarioPactado: c.SalarioPactado, ModalidadSalario: c.ModalidadSalario,
 		FechaInicioVigencia: fecha("2020-01-01"), FechaInicioContrato: fecha("2020-01-01")}}, nil
 }
 func (f *fuenteFalsa) ObtenerContextoLaboral(_ context.Context, id int64, _ time.Time) (dto.ContextoLaboralRow, error) {
@@ -51,6 +71,9 @@ func (f *fuenteFalsa) ObtenerContextoLaboral(_ context.Context, id int64, _ time
 }
 func (f *fuenteFalsa) SumarHorasExtraPeriodo(_ context.Context, id int64, _, _ time.Time) ([]dto.HorasExtraPeriodoRow, error) {
 	return f.horas[id], nil
+}
+func (f *fuenteFalsa) SumarHorasFeriadoLaboradoPeriodo(_ context.Context, id int64, _, _ time.Time) ([]dto.HorasFeriadoLaboradoRow, error) {
+	return f.feriados[id], nil
 }
 func (f *fuenteFalsa) ListarIncapacidadesSolapadas(_ context.Context, id int64, _, _ time.Time) ([]dto.IncapacidadSolapadaRow, error) {
 	return f.incaps[id], nil
@@ -75,6 +98,38 @@ func (f *fuenteFalsa) ListarDevengosManualesEmpleado(_ context.Context, _, id in
 	return f.devengos[id], nil
 }
 
+func (f *fuenteFalsa) ListarAsignacionesVigentesEnFecha(_ context.Context, id int64, _ time.Time) ([]dto.AsignacionVigenteRow, error) {
+	return f.asignaciones[id], nil
+}
+
+func (f *fuenteFalsa) SumarRentaMesEmpleado(_ context.Context, id, _ int64, _, _ time.Time) (dto.RentaMesRow, error) {
+	return f.rentaMes[id], nil
+}
+
+func (f *fuenteFalsa) SumarBaseAcumuladaEmpleado(_ context.Context, _ int64, _, _ time.Time, columna string) (decimal.Decimal, error) {
+	return f.bases[columna], nil
+}
+
+func (f *fuenteFalsa) ListarCompensacionesVacacionesPendientes(_ context.Context, id, _ int64, _ time.Time) ([]dto.CompensacionVacacionesRow, error) {
+	return f.comps[id], nil
+}
+
+func (f *fuenteFalsa) ListarVacacionesAprobadasEnRango(_ context.Context, id int64, _, _ time.Time) ([]dto.VacacionesAprobadasRow, error) {
+	return f.vacs[id], nil
+}
+
+func (f *fuenteFalsa) ListarEmpleadosConLiquidacionParaPeriodo(context.Context, int64, time.Time) ([]int64, error) {
+	var out []int64
+	for id := range f.liqs {
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func (f *fuenteFalsa) ListarLiquidacionesParaPeriodo(_ context.Context, _, id int64, _ time.Time) ([]dto.LiquidacionParaPeriodoRow, error) {
+	return f.liqs[id], nil
+}
+
 func fecha(s string) time.Time {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
@@ -95,7 +150,7 @@ func periodoPrueba() PeriodoParaCalculo {
 // 3 con horas extra e incapacidad que empezó el mes anterior.
 func fuentePrueba() *fuenteFalsa {
 	obs := "comisión marzo"
-	clasif := int64(4)
+	clasif, sem := int64(4), int64(1)
 	return &fuenteFalsa{
 		empleados: []int64{1, 2, 3},
 		contratos: map[int64]dto.ContratoVigenteEnFechaRow{
@@ -104,9 +159,9 @@ func fuentePrueba() *fuenteFalsa {
 			3: {ContratoID: 103, EmpleadoID: 3, RegimenLaboralID: 1, SalarioPactado: d("700000")},
 		},
 		laborales: map[int64]dto.ContextoLaboralRow{
-			1: {ProgramaPresupuestarioID: 11, ClasificacionPuestoID: &clasif},
-			2: {ProgramaPresupuestarioID: 12},
-			3: {ProgramaPresupuestarioID: 13},
+			1: {ProgramaPresupuestarioID: 11, ClasificacionPuestoID: &clasif, RegimenCCSSID: &sem},
+			2: {ProgramaPresupuestarioID: 12, RegimenCCSSID: &sem},
+			3: {ProgramaPresupuestarioID: 13, RegimenCCSSID: &sem},
 		},
 		horas: map[int64][]dto.HorasExtraPeriodoRow{3: {{TipoHoraExtraID: 1, Horas: d("6")}}},
 		incaps: map[int64][]dto.IncapacidadSolapadaRow{
@@ -114,7 +169,9 @@ func fuentePrueba() *fuenteFalsa {
 		},
 		prestamos: map[int64][]dto.PrestamoActivoRow{1: {{PrestamoID: 7, CuotaPeriodica: d("25000"), SaldoPendiente: d("300000")}}},
 		embargos: map[int64][]dto.EmbargoActivoRow{
-			2: {{EmbargoID: 5, TipoEmbargoID: 3, PrioridadLegal: 1, Porcentaje: decimal.NewNullDecimal(d("12.5"))}},
+			2: {{EmbargoID: 5, TipoEmbargoID: 3, PrioridadLegal: 1, PrioridadAplicacion: 2, EsPension: true,
+				TopePorcentajeLiquido: decimal.NewNullDecimal(d("50")), Porcentaje: decimal.NewNullDecimal(d("12.5")),
+				TopeMensual: decimal.NewNullDecimal(d("90000"))}},
 		},
 		familiares: map[int64]dto.DatosFamiliaresEnFechaRow{2: {AplicaCreditoConyuge: true, NumeroHijosDependientes: 2}},
 		creditos: []dto.CreditoFiscalVigenteRow{
@@ -141,11 +198,11 @@ func TestHidratadorTresEmpleados(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e1.ContratoID != 101 || e1.ProgramaPresupuestarioID != 11 || e1.Input.ClasificacionPuestoID != 4 {
+	if e1.ContratoID != 101 || e1.ProgramaPresupuestarioID != 11 || e1.Input.ClasificacionPuestoID != 4 || e1.Input.RegimenCCSSID != 1 {
 		t.Errorf("empleado 1: contrato/programa/clasificación = %d/%d/%d", e1.ContratoID, e1.ProgramaPresupuestarioID, e1.Input.ClasificacionPuestoID)
 	}
 	if len(e1.Input.Segmentos) != 1 || !e1.Input.Segmentos[0].Salario.Equal(d("800000")) || e1.Input.Segmentos[0].Dias != 30 {
-		t.Errorf("segmentos (D5: salario del contrato): %+v", e1.Input.Segmentos)
+		t.Errorf("segmentos (salario del contrato): %+v", e1.Input.Segmentos)
 	}
 	if !e1.Input.FechaEfectiva.Equal(p.Fin) || !e1.Input.DiasTrabajados.Equal(d("30")) {
 		t.Errorf("fecha efectiva/días = %s/%s", e1.Input.FechaEfectiva, e1.Input.DiasTrabajados)
@@ -165,8 +222,12 @@ func TestHidratadorTresEmpleados(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(e2.Input.Embargos) != 1 || !e2.Input.Embargos[0].Porcentaje.Equal(d("0.125")) || e2.Input.Embargos[0].Prioridad != 1 {
-		t.Errorf("embargo debe llegar en fracción (12.5 %% -> 0.125): %+v", e2.Input.Embargos)
+	if len(e2.Input.Embargos) != 1 {
+		t.Fatalf("embargos: %+v", e2.Input.Embargos)
+	}
+	if e := e2.Input.Embargos[0]; !e.Porcentaje.Equal(d("0.125")) || !e.TopePctLiquido.Equal(d("0.5")) || !e.TopeMensual.Equal(d("90000")) ||
+		e.Prioridad != 2 || e.PrioridadLegal != 1 || !e.EsPension {
+		t.Errorf("embargo: porcentajes en fracción (12.5 %% -> 0.125, 50 %% -> 0.5), tope, prioridades y pensión desde BD: %+v", e)
 	}
 	want := map[int64]int32{21: 1, 22: 2}
 	if len(e2.Input.CreditosFiscales) != 2 {
@@ -185,8 +246,6 @@ func TestHidratadorTresEmpleados(t *testing.T) {
 	if len(e3.Input.HorasExtra) != 1 || !e3.Input.HorasExtra[0].CantidadHoras.Equal(d("6")) {
 		t.Errorf("horas extra: %+v", e3.Input.HorasExtra)
 	}
-	// Boleta 27-feb a 4-mar: dentro de marzo son 4 días (1..4) y el 1-mar es
-	// el día 3 de la incapacidad (27 y 28 de febrero fueron los días 1 y 2).
 	if len(e3.Input.Incapacidades) != 1 {
 		t.Fatalf("incapacidades: %+v", e3.Input.Incapacidades)
 	}
@@ -194,7 +253,6 @@ func TestHidratadorTresEmpleados(t *testing.T) {
 	if inc.DiaSerieDesde != 3 || !inc.Desde.Equal(fecha("2026-03-01")) || !inc.Hasta.Equal(fecha("2026-03-04")) || inc.EntidadEmisoraID != 2 || inc.IncapacidadID != 9 {
 		t.Errorf("incapacidad = %+v, esperado día de serie 3, 1–4 mar, entidad 2", inc)
 	}
-	// 30 días con contrato − 4 incapacitados.
 	if !e3.Input.DiasTrabajados.Equal(d("26")) {
 		t.Errorf("DiasTrabajados = %s, esperado 26", e3.Input.DiasTrabajados)
 	}
@@ -221,7 +279,14 @@ func TestHidratadorErroresExplicitos(t *testing.T) {
 	}
 
 	f = fuentePrueba()
-	f.creditos = f.creditos[:1] // falta HIJO
+	f.laborales[3] = dto.ContextoLaboralRow{ProgramaPresupuestarioID: 13}
+	var sinReg ErrEmpleadoSinRegimenCCSS
+	if _, err := NewHidratador(f).Hidratar(ctx, periodoPrueba(), 3); !errors.As(err, &sinReg) || sinReg.EmpleadoID != 3 {
+		t.Errorf("sin régimen CCSS: se esperaba ErrEmpleadoSinRegimenCCSS{3}, se obtuvo %v", err)
+	}
+
+	f = fuentePrueba()
+	f.creditos = f.creditos[:1]
 	if _, err := NewHidratador(f).Hidratar(ctx, periodoPrueba(), 2); err == nil {
 		t.Error("crédito declarado sin parámetro vigente debe dar error")
 	}

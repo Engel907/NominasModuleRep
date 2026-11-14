@@ -13,8 +13,6 @@ import (
 	"planillas-ccdr/internal/db/dto"
 )
 
-// --- driver falso: registra lo ejecutado en cada conexión física ---------
-
 type fakeDriver struct {
 	mu        sync.Mutex
 	conns     []*fakeConn
@@ -80,7 +78,7 @@ func nuevaBD(t *testing.T) (*sql.DB, *fakeDriver) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.SetMaxOpenConns(1) // fuerza reutilización: si no se descarta, es la misma conexión
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	return db, fd
 }
@@ -159,8 +157,6 @@ func TestResetConCtxCancelado(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
 	}
-	// El pool debe seguir sano: una llamada nueva funciona y ninguna conexión
-	// viva queda con la variable sin resetear.
 	if err := WithAuditContext(context.Background(), db, 9, func(context.Context, *dto.Queries) error { return nil }); err != nil {
 		t.Fatal(err)
 	}

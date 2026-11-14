@@ -12,10 +12,6 @@ import (
 	"planillas-ccdr/internal/planilla"
 )
 
-// ============================================================================
-// Armado puro de asientos (sin I/O)
-// ============================================================================
-
 type claveLinea struct {
 	tipoAsientoID int64
 	programaID    int64
@@ -35,23 +31,9 @@ type partida struct {
 // asientos contables (uno por tipo_asiento presente en el mapeo), agrupando
 // por tipo_asiento_id y programa_presupuestario_id. Es pura: recibe los
 // mapeos ya resueltos a la fecha efectiva.
-//
-// Cómo se resuelve cada monto (siempre vía mapeo, nunca cuentas en Go):
-//   - Cada línea de DesglosePorConcepto genera una línea por cada mapeo
-//     vigente de (concepto, programa del empleado).
-//   - La cuota patronal de CCSS (fuera del desglose) se imputa al concepto
-//     cfg.ConceptoCuotaPatronalCCSS.
-//   - El neto pagado se registra con el/los mapeo 'haber' del concepto ancla
-//     cfg.ConceptoAnclaNeto (debe existir exactamente uno por programa).
-//   - Un concepto con monto > 0 sin mapeo falla con ErrMapeoFaltante: omitirlo
-//     desbalancearía el asiento.
-//
-// Antes de devolver, valida partida doble por empleado, por programa y de toda
-// la corrida (ValidarPartidaDoble). Ante cualquier descuadre retorna error y
-// no devuelve asientos.
 func GenerarAsientos(periodoID int64, detalles []DetallePlanilla, mapeos []MapeoConceptoCuenta, cfg ConfigGeneracion) ([]AsientoContable, error) {
-	if strings.TrimSpace(cfg.ConceptoAnclaNeto) == "" || strings.TrimSpace(cfg.ConceptoCuotaPatronalCCSS) == "" {
-		return nil, fmt.Errorf("%w: ConceptoAnclaNeto y ConceptoCuotaPatronalCCSS son obligatorios", ErrConfigInvalida)
+	if strings.TrimSpace(cfg.ConceptoAnclaNeto) == "" {
+		return nil, fmt.Errorf("%w: ConceptoAnclaNeto es obligatorio", ErrConfigInvalida)
 	}
 	if len(detalles) == 0 {
 		return nil, ErrSinDetalles
@@ -118,7 +100,7 @@ func GenerarAsientos(periodoID int64, detalles []DetallePlanilla, mapeos []Mapeo
 		cid := k.conceptoID
 		l := AsientoContableDetalle{
 			CuentaContableID: k.cuentaID, ProgramaPresupuestarioID: k.programaID, Proyecto: k.proyecto,
-			ConceptoSalarialID: &cid, // EmpleadoID nil: línea consolidada
+			ConceptoSalarialID: &cid,
 		}
 		if k.movimiento == MovimientoDebe {
 			l.MontoDebe = monto
@@ -137,7 +119,7 @@ func GenerarAsientos(periodoID int64, detalles []DetallePlanilla, mapeos []Mapeo
 				return x.ProgramaPresupuestarioID < y.ProgramaPresupuestarioID
 			}
 			if x.MontoDebe.IsPositive() != y.MontoDebe.IsPositive() {
-				return x.MontoDebe.IsPositive() // debe primero
+				return x.MontoDebe.IsPositive()
 			}
 			if x.CuentaContableID != y.CuentaContableID {
 				return x.CuentaContableID < y.CuentaContableID
@@ -157,6 +139,10 @@ func GenerarAsientos(periodoID int64, detalles []DetallePlanilla, mapeos []Mapeo
 func partidasEmpleado(d DetallePlanilla, porConcepto map[int64]map[int64][]MapeoConceptoCuenta, idPorCodigo map[string]int64, cfg ConfigGeneracion) ([]partida, error) {
 	emp, prog := d.Calculo.EmpleadoID, d.ProgramaPresupuestarioID
 	var out []partida
+	codigoPorID := make(map[int64]string, len(idPorCodigo))
+	for c, id := range idPorCodigo {
+		codigoPorID[id] = c
+	}
 
 	mapeosDe := func(conceptoID int64, codigo string) ([]MapeoConceptoCuenta, error) {
 		ms := porConcepto[conceptoID][prog]
@@ -170,10 +156,6 @@ func partidasEmpleado(d DetallePlanilla, porConcepto map[int64]map[int64][]Mapeo
 		if l.Monto.IsNegative() {
 			return nil, fmt.Errorf("%w: concepto %q de empleado_id=%d con monto negativo %s", ErrMontoNegativoOInvalido, l.Codigo, emp, l.Monto)
 		}
-		// Redondeo a 2 decimales ANTES de acumular: la BD es DECIMAL(14,2) y
-		// MySQL redondearía por su cuenta al insertar; si se validara con más
-		// decimales que los persistidos, un asiento "cuadrado" en memoria
-		// podría quedar descuadrado en la base.
 		monto := l.Monto.Round(dosDecimales)
 		if monto.IsZero() {
 			continue
@@ -184,25 +166,27 @@ func partidasEmpleado(d DetallePlanilla, porConcepto map[int64]map[int64][]Mapeo
 		}
 		for _, m := range ms {
 			if m.ConceptoCodigo == cfg.ConceptoAnclaNeto && m.TipoMovimiento == MovimientoHaber {
-				continue // esa línea es el neto, se agrega abajo
+				continue
 			}
 			out = append(out, partida{m, l.ConceptoSalarialID, monto})
 		}
 	}
 
-	if pat := d.Calculo.CuotaPatronalCCSS.Round(dosDecimales); d.Calculo.CuotaPatronalCCSS.IsNegative() {
-		return nil, fmt.Errorf("%w: cuota patronal negativa en empleado_id=%d", ErrMontoNegativoOInvalido, emp)
-	} else if pat.IsPositive() {
-		id, ok := idPorCodigo[cfg.ConceptoCuotaPatronalCCSS]
-		if !ok {
-			return nil, fmt.Errorf("%w: concepto %q (cuota patronal) sin ningún mapeo vigente", ErrMapeoFaltante, cfg.ConceptoCuotaPatronalCCSS)
+	// Cargas patronales: una partida por concepto (componente) con su mapeo.
+	for _, lp := range d.Calculo.Patronal {
+		if lp.Monto.IsNegative() {
+			return nil, fmt.Errorf("%w: cuota patronal negativa en empleado_id=%d (concepto_salarial_id=%d)", ErrMontoNegativoOInvalido, emp, lp.ConceptoSalarialID)
 		}
-		ms, err := mapeosDe(id, cfg.ConceptoCuotaPatronalCCSS)
+		monto := lp.Monto.Round(dosDecimales)
+		if monto.IsZero() {
+			continue
+		}
+		ms, err := mapeosDe(lp.ConceptoSalarialID, codigoPorID[lp.ConceptoSalarialID])
 		if err != nil {
 			return nil, err
 		}
 		for _, m := range ms {
-			out = append(out, partida{m, id, pat})
+			out = append(out, partida{m, lp.ConceptoSalarialID, monto})
 		}
 	}
 
@@ -236,10 +220,6 @@ func partidasEmpleado(d DetallePlanilla, porConcepto map[int64]map[int64][]Mapeo
 // CHECK de la BD, para fallar antes de insertar); (2) ningún asiento vacío;
 // (3) total debe == total haber por programa presupuestario y en toda la
 // corrida.
-//
-// Nota: con el seed actual el devengo se reparte en dos tipos de asiento
-// (gasto = solo debe, pasivo = solo haber), así que la igualdad se exige
-// sobre el JUEGO de asientos de la corrida, no sobre cada uno aislado.
 func ValidarPartidaDoble(asientos []AsientoContable) error {
 	if len(asientos) == 0 {
 		return ErrSinDetalles
@@ -284,26 +264,19 @@ func ValidarPartidaDoble(asientos []AsientoContable) error {
 	return nil
 }
 
-// ============================================================================
-// Orquestación
-// ============================================================================
-
-// estadoContabilizable es el ÚNICO estado desde el que se puede contabilizar
-// (D4): la planilla debe estar pagada. Tras contabilizar queda `contabilizada`.
+// estadoContabilizable es el único estado desde el que se puede contabilizar:
+// la planilla debe estar pagada. Tras contabilizar queda `contabilizada`.
 // Un período `aprobada` todavía no se pagó y no se contabiliza.
 const estadoContabilizable = planilla.EstadoPagada
 
 type PeriodoContable struct {
-	ID       int64
-	FechaFin time.Time
-	Estado   string
+	ID                 int64
+	FechaFin           time.Time
+	Estado             string
+	PagadoPorUsuarioID *int64
 }
 
 // Repositorio abre una transacción AUDITADA y entrega el acceso transaccional.
-//
-// La implementación real DEBE usar db.WithAuditContext (internal/db/audit.go):
-// fija @auditoria_usuario_id para los triggers y garantiza que la variable de
-// sesión se limpie antes de devolver la conexión al pool. usuarioID debe ser > 0.
 type Repositorio interface {
 	EjecutarEnTx(ctx context.Context, usuarioID int64, fn func(tx RepositorioTx) error) error
 }
@@ -312,12 +285,14 @@ type Repositorio interface {
 type RepositorioTx interface {
 	// ObtenerPeriodoParaContabilizar lee el período bloqueándolo (FOR UPDATE).
 	ObtenerPeriodoParaContabilizar(ctx context.Context, periodoID int64) (PeriodoContable, error)
-	ContarAsientosDelPeriodo(ctx context.Context, periodoID int64) (int64, error)
+	// ContarAsientosDelPeriodo: asientos del período salvo los de excluirTipoCodigo (el de pago).
+	ContarAsientosDelPeriodo(ctx context.Context, periodoID int64, excluirTipoCodigo string) (int64, error)
 	ListarMapeosVigentesEnFecha(ctx context.Context, fecha time.Time) ([]MapeoConceptoCuenta, error)
 	// GuardarAsiento inserta cabecera y líneas; devuelve el id del asiento.
 	GuardarAsiento(ctx context.Context, a AsientoContable) (int64, error)
-	// MarcarPeriodoContabilizado pasa el período de estadoActual a 'contabilizada'.
-	MarcarPeriodoContabilizado(ctx context.Context, periodoID int64, estadoActual string) error
+	// MarcarPeriodoContabilizado pasa el período de estadoActual a
+	// 'contabilizada' y registra quién y cuándo (segregación).
+	MarcarPeriodoContabilizado(ctx context.Context, periodoID int64, estadoActual string, usuarioID int64) error
 }
 
 type Service struct {
@@ -327,20 +302,17 @@ type Service struct {
 }
 
 func NewService(repo Repositorio, cfg ConfigGeneracion) (*Service, error) {
-	if strings.TrimSpace(cfg.ConceptoAnclaNeto) == "" || strings.TrimSpace(cfg.ConceptoCuotaPatronalCCSS) == "" {
-		return nil, fmt.Errorf("%w: ConceptoAnclaNeto y ConceptoCuotaPatronalCCSS son obligatorios", ErrConfigInvalida)
+	if strings.TrimSpace(cfg.ConceptoAnclaNeto) == "" || strings.TrimSpace(cfg.TipoAsientoPago) == "" {
+		return nil, fmt.Errorf("%w: ConceptoAnclaNeto y TipoAsientoPago son obligatorios", ErrConfigInvalida)
 	}
 	return &Service{repo: repo, cfg: cfg, ahora: time.Now}, nil
 }
 
-// ContabilizarPeriodo genera y persiste, en UNA transacción auditada
+// ContabilizarPeriodo genera y persiste, en una transacción auditada
 // (db.WithAuditContext), los asientos del período en estado `pagada` y lo marca
 // `contabilizada`. Si algo falla (mapeo faltante,
 // descuadre, período en mal estado, asientos ya existentes) se hace rollback
 // y no queda nada insertado.
-//
-// detalles debe ser el resultado en memoria de la corrida (ver DetallePlanilla).
-// Los mapeos se resuelven a periodos_planilla.fecha_fin.
 func (s *Service) ContabilizarPeriodo(ctx context.Context, periodoID, usuarioID int64, detalles []DetallePlanilla) ([]AsientoContable, error) {
 	var generados []AsientoContable
 
@@ -352,7 +324,11 @@ func (s *Service) ContabilizarPeriodo(ctx context.Context, periodoID, usuarioID 
 		if planilla.EstadoPeriodo(periodo.Estado) != estadoContabilizable {
 			return fmt.Errorf("%w: periodo_id=%d está %q (se requiere %q)", ErrPeriodoEstadoInvalido, periodoID, periodo.Estado, estadoContabilizable)
 		}
-		n, err := tx.ContarAsientosDelPeriodo(ctx, periodoID)
+		if err := planilla.VerificarSegregacion(planilla.EstadoContabilizada, usuarioID,
+			planilla.Participantes{Pago: periodo.PagadoPorUsuarioID}); err != nil {
+			return err
+		}
+		n, err := tx.ContarAsientosDelPeriodo(ctx, periodoID, s.cfg.TipoAsientoPago)
 		if err != nil {
 			return fmt.Errorf("contabilidad: verificando asientos existentes: %w", err)
 		}
@@ -364,7 +340,7 @@ func (s *Service) ContabilizarPeriodo(ctx context.Context, periodoID, usuarioID 
 			return fmt.Errorf("contabilidad: leyendo mapeo_concepto_cuenta vigente al %s: %w", periodo.FechaFin.Format("2006-01-02"), err)
 		}
 
-		asientos, err := GenerarAsientos(periodoID, detalles, mapeos, s.cfg)
+		asientos, err := GenerarAsientos(periodoID, detalles, sinTipo(mapeos, s.cfg.TipoAsientoPago), s.cfg)
 		if err != nil {
 			return err
 		}
@@ -383,7 +359,7 @@ func (s *Service) ContabilizarPeriodo(ctx context.Context, periodoID, usuarioID 
 				a.Lineas[j].AsientoContableID = id
 			}
 		}
-		if err := tx.MarcarPeriodoContabilizado(ctx, periodoID, periodo.Estado); err != nil {
+		if err := tx.MarcarPeriodoContabilizado(ctx, periodoID, periodo.Estado, usuarioID); err != nil {
 			return fmt.Errorf("contabilidad: marcando periodo_id=%d como contabilizada: %w", periodoID, err)
 		}
 		generados = asientos
@@ -395,9 +371,18 @@ func (s *Service) ContabilizarPeriodo(ctx context.Context, periodoID, usuarioID 
 	return generados, nil
 }
 
-// numeroAsiento: folio determinístico por (período, tipo). ASUNCIÓN: el
-// correlativo contable oficial no está definido en el esquema; ajustar aquí
-// si Contabilidad exige otro formato.
+// sinTipo descarta los mapeos de un tipo de asiento (el de pago no es devengo).
+func sinTipo(ms []MapeoConceptoCuenta, tipoCodigo string) []MapeoConceptoCuenta {
+	out := make([]MapeoConceptoCuenta, 0, len(ms))
+	for _, m := range ms {
+		if m.TipoAsientoCodigo != tipoCodigo {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// numeroAsiento: folio determinístico por (período, tipo).
 func numeroAsiento(periodoID, tipoAsientoID int64) string {
 	return fmt.Sprintf("PLA-%06d-%02d", periodoID, tipoAsientoID)
 }

@@ -12,8 +12,6 @@ import (
 	"planillas-ccdr/internal/db/dto"
 )
 
-// --- fakes -------------------------------------------------------------------
-
 type fakeVacQueries struct {
 	emp      dto.Empleado
 	escala   dto.ParametrosVacacionesEscala
@@ -107,8 +105,6 @@ func fecha(y int, m time.Month, dd int) time.Time {
 	return time.Date(y, m, dd, 0, 0, 0, 0, time.UTC)
 }
 
-// --- tests -------------------------------------------------------------------
-
 func TestAcumularVacaciones(t *testing.T) {
 	casos := []struct {
 		nombre      string
@@ -143,7 +139,6 @@ func TestAcumularVacaciones(t *testing.T) {
 }
 
 func TestSolicitarVacaciones_CalendarioIncompleto(t *testing.T) {
-	// Pide lun 5 a mié 7 oct 2026 pero el calendario solo trae lun y mié.
 	q := &fakeVacQueries{
 		emp: dto.Empleado{Activo: true},
 		cal: []dto.ListarCalendarioPorRangoRow{

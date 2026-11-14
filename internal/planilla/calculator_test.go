@@ -8,7 +8,7 @@ import (
 
 // dec es un atajo para construir decimal.Decimal desde un literal string en
 // los tests, evitando por completo decimal.NewFromFloat (que arrastra
-// imprecisión binaria) tal como exige ADR-000 §4.
+// imprecisión binaria).
 func dec(s string) decimal.Decimal {
 	return decimal.RequireFromString(s)
 }
@@ -17,7 +17,7 @@ func dec(s string) decimal.Decimal {
 // de 2026 según el Decreto Ejecutivo N° 45333-H (Gaceta N° 229 del 5 de
 // diciembre de 2025): exento hasta ¢918.000; 10% de ¢918.000 a ¢1.347.000;
 // 15% de ¢1.347.000 a ¢2.364.000; 20% de ¢2.364.000 a ¢4.727.000; 25%
-// sobre el exceso de ¢4.727.000. En producción estos tramos SIEMPRE se
+// sobre el exceso de ¢4.727.000. En producción estos tramos siempre se
 // resuelven desde parametros_tramos_renta (BD) — aquí se fijan como
 // fixture de test para reproducir la ley vigente de forma determinística.
 func tramosRenta2026() []TramoRenta {
@@ -30,8 +30,8 @@ func tramosRenta2026() []TramoRenta {
 	}
 }
 
-// cargaSocial2026 reproduce el % obrero/patronal confirmado por el equipo
-// para 2026 (10.83% obrero / 26.83% patronal).
+// cargaSocial2026 reproduce el porcentaje obrero y patronal de 2026
+// (10.83 % obrero, 26.83 % patronal).
 func cargaSocial2026() ParametroCargaSocial {
 	return ParametroCargaSocial{
 		ConceptoSalarialID: 1,
@@ -45,10 +45,6 @@ func cargaSocial2026() ParametroCargaSocial {
 // protegida del Art. 172 del Código de Trabajo.
 const salarioMinimoInembargable2026 = "268711.27"
 
-// ============================================================================
-// a. Salario en tramo exento (¢918.000,00)
-// ============================================================================
-
 func TestCalcularImpuestoRenta_TramoExento(t *testing.T) {
 	resultado, err := CalcularImpuestoRenta(dec("918000"), tramosRenta2026(), nil)
 	if err != nil {
@@ -61,10 +57,6 @@ func TestCalcularImpuestoRenta_TramoExento(t *testing.T) {
 		t.Errorf("ImpuestoNeto = %s, esperado 0", resultado.ImpuestoNeto)
 	}
 }
-
-// ============================================================================
-// b. Tramos 10%, 15%, 20% y 25% con créditos de cónyuge e hijos
-// ============================================================================
 
 func TestCalcularImpuestoRenta_Tramos(t *testing.T) {
 	casos := []struct {
@@ -96,8 +88,8 @@ func TestCalcularImpuestoRenta_Tramos(t *testing.T) {
 			nombre:    "tramo 25% con creditos de 2 hijos y conyuge",
 			baseRenta: dec("5000000"),
 			creditos: []CreditoFiscalResuelto{
-				{TipoCreditoFiscalID: 1, MontoTotal: dec("3420.00")}, // 2 hijos x 1710
-				{TipoCreditoFiscalID: 2, MontoTotal: dec("2590.00")}, // 1 conyuge
+				{TipoCreditoFiscalID: 1, MontoTotal: dec("3420.00")},
+				{TipoCreditoFiscalID: 2, MontoTotal: dec("2590.00")},
 			},
 			impuestoBrutoEsperado: dec("736300.00"),
 			impuestoNetoEsperado:  dec("730290.00"),
@@ -135,95 +127,137 @@ func TestCalcularImpuestoRenta_CeroNoImplicaTramoAbierto(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// c. Retención de embargo por pensión alimentaria respetando la
-//    inembargabilidad de ley (Art. 172 Código de Trabajo)
-// ============================================================================
+// escalaHistorica: la escala sembrada en parametros_embargo_escala (000118),
+// ya en fracción como la entrega el cargador: excedente hasta 3 mínimos al
+// 12.5 %, el resto al 25 %.
+func escalaHistorica() []TramoEscalaEmbargo {
+	return []TramoEscalaEmbargo{
+		{OrdenTramo: 1, SalarioDesde: dec("0"), SalarioHasta: decimal.NewNullDecimal(dec("3")), Porcentaje: dec("0.125")},
+		{OrdenTramo: 2, SalarioDesde: dec("3"), Porcentaje: dec("0.25")},
+	}
+}
+
+// pension / judicial: tipos como los sembrados (prioridad legal 1 y 2; la
+// pensión con tope del 50 % del líquido).
+func pension(id int64, pct string) EmbargoInput {
+	return EmbargoInput{EmbargoID: id, TipoEmbargoID: 1, Prioridad: 1, PrioridadLegal: 1, EsPension: true, TopePctLiquido: dec("0.5"), Porcentaje: dec(pct)}
+}
+
+func judicial(id int64, pct string) EmbargoInput {
+	return EmbargoInput{EmbargoID: id, TipoEmbargoID: 2, Prioridad: 2, PrioridadLegal: 2, Porcentaje: dec(pct)}
+}
+
+func calcularEmbargos(t *testing.T, emb []EmbargoInput, liquido string) map[int64]EmbargoAplicadoOutput {
+	t.Helper()
+	res, err := CalcularEmbargos(emb, dec(liquido), dec(salarioMinimoInembargable2026), escalaHistorica())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != len(emb) {
+		t.Fatalf("se esperaban %d resultados, se obtuvieron %d", len(emb), len(res))
+	}
+	out := map[int64]EmbargoAplicadoOutput{}
+	for _, r := range res {
+		if !r.SaldoPendienteInsatisfecho.Equal(r.MontoCalculado.Sub(r.MontoAplicado)) || r.MontoAplicado.IsNegative() {
+			t.Errorf("embargo %d con montos inconsistentes: %+v", r.EmbargoID, r)
+		}
+		out[r.EmbargoID] = r
+	}
+	return out
+}
 
 func TestCalcularEmbargos(t *testing.T) {
-	smi := dec(salarioMinimoInembargable2026)
-
-	t.Run("embargo general queda en cero si el salario liquido no supera el minimo inembargable", func(t *testing.T) {
-		embargos := []EmbargoInput{
-			{EmbargoID: 1, TipoEmbargoID: 2, Prioridad: 2, Porcentaje: dec("0.20")}, // judicial
-		}
-		resultado := CalcularEmbargos(embargos, dec("200000"), smi)
-		if len(resultado) != 1 {
-			t.Fatalf("se esperaba 1 resultado, se obtuvieron %d", len(resultado))
-		}
-		if !resultado[0].MontoAplicado.Equal(dec("0.00")) {
-			t.Errorf("MontoAplicado = %s, esperado 0.00 (salario por debajo del minimo inembargable)", resultado[0].MontoAplicado)
-		}
-		if resultado[0].SaldoPendienteInsatisfecho.LessThanOrEqual(decimal.Zero) {
-			t.Errorf("SaldoPendienteInsatisfecho = %s, se esperaba > 0 (embargo no satisfecho)", resultado[0].SaldoPendienteInsatisfecho)
+	t.Run("embargo general queda en cero si el liquido no supera el minimo inembargable", func(t *testing.T) {
+		r := calcularEmbargos(t, []EmbargoInput{judicial(1, "0.20")}, "200000")[1]
+		if !r.MontoAplicado.Equal(dec("0")) || !r.SaldoPendienteInsatisfecho.Equal(dec("40000")) {
+			t.Errorf("aplicado %s, insatisfecho %s; esperado 0 y 40000", r.MontoAplicado, r.SaldoPendienteInsatisfecho)
 		}
 	})
 
-	t.Run("pension alimentaria se practica siempre y respeta su propio tope del 50%", func(t *testing.T) {
-		embargos := []EmbargoInput{
-			{EmbargoID: 2, TipoEmbargoID: 1, Prioridad: PrioridadPensionAlimentaria, Porcentaje: dec("0.60")},
-		}
-		resultado := CalcularEmbargos(embargos, dec("800000"), smi)
-		if len(resultado) != 1 {
-			t.Fatalf("se esperaba 1 resultado, se obtuvieron %d", len(resultado))
-		}
-		esperado := dec("400000.00") // 50% de 800000, tope legal, aunque se solicito 60%
-		if !resultado[0].MontoAplicado.Equal(esperado) {
-			t.Errorf("MontoAplicado = %s, esperado %s (tope del 50%%)", resultado[0].MontoAplicado, esperado)
+	t.Run("una pension respeta el tope del 50% de su tipo", func(t *testing.T) {
+		r := calcularEmbargos(t, []EmbargoInput{pension(2, "0.60")}, "800000")[2]
+		if !r.MontoAplicado.Equal(dec("400000")) || !r.SaldoPendienteInsatisfecho.Equal(dec("80000")) {
+			t.Errorf("aplicado %s, insatisfecho %s; esperado 400000 (tope 50 %%) y 80000", r.MontoAplicado, r.SaldoPendienteInsatisfecho)
 		}
 	})
 
-	t.Run("pension alimentaria tiene prioridad y el embargo general solo toma el fondo Art172 del remanente", func(t *testing.T) {
-		embargos := []EmbargoInput{
-			{EmbargoID: 3, TipoEmbargoID: 2, Prioridad: 2, Porcentaje: dec("0.50")}, // judicial, pide mucho mas de lo disponible
-			{EmbargoID: 4, TipoEmbargoID: 1, Prioridad: PrioridadPensionAlimentaria, Porcentaje: dec("0.30")},
+	t.Run("pension sobre liquido bajo el minimo se practica igual", func(t *testing.T) {
+		r := calcularEmbargos(t, []EmbargoInput{pension(2, "0.30")}, "200000")[2]
+		if !r.MontoAplicado.Equal(dec("60000")) {
+			t.Errorf("aplicado %s, esperado 60000", r.MontoAplicado)
 		}
-		salarioLiquido := dec("1000000")
-		resultado := CalcularEmbargos(embargos, salarioLiquido, smi)
-		if len(resultado) != 2 {
-			t.Fatalf("se esperaban 2 resultados, se obtuvieron %d", len(resultado))
-		}
+	})
 
-		var pension, judicial EmbargoAplicadoOutput
-		for _, r := range resultado {
-			if r.Prioridad == PrioridadPensionAlimentaria {
-				pension = r
-			} else {
-				judicial = r
-			}
+	t.Run("dos pensiones que juntas pasan el tope: el tope es acumulado", func(t *testing.T) {
+		r := calcularEmbargos(t, []EmbargoInput{pension(6, "0.30"), pension(5, "0.30")}, "1000000")
+		if !r[5].MontoAplicado.Equal(dec("300000")) || !r[6].MontoAplicado.Equal(dec("200000")) || !r[6].SaldoPendienteInsatisfecho.Equal(dec("100000")) {
+			t.Errorf("pensiones: id5 %s, id6 %s (insatisfecho %s); esperado 300000 / 200000 / 100000",
+				r[5].MontoAplicado, r[6].MontoAplicado, r[6].SaldoPendienteInsatisfecho)
 		}
+	})
 
-		if !pension.MontoAplicado.Equal(dec("300000.00")) {
-			t.Errorf("pension MontoAplicado = %s, esperado 300000.00", pension.MontoAplicado)
+	t.Run("judicial y pension: la pension primero y el judicial toma el fondo de la escala", func(t *testing.T) {
+		r := calcularEmbargos(t, []EmbargoInput{judicial(3, "0.50"), pension(4, "0.30")}, "1000000")
+		if !r[4].MontoAplicado.Equal(dec("300000")) {
+			t.Errorf("pension aplicado %s, esperado 300000", r[4].MontoAplicado)
 		}
+		if !r[3].MontoAplicado.Equal(dec("53911.09")) || !r[3].SaldoPendienteInsatisfecho.Equal(dec("446088.91")) {
+			t.Errorf("judicial aplicado %s, insatisfecho %s; esperado 53911.09 / 446088.91", r[3].MontoAplicado, r[3].SaldoPendienteInsatisfecho)
+		}
+	})
 
-		// Remanente tras la pension: 1,000,000 - 300,000 = 700,000
-		// Excedente sobre el minimo inembargable: 700,000 - 268,711.27 = 431,288.73
-		// 431,288.73 < 3 x 268,711.27 (806,133.81) -> solo aplica la fraccion de 1/8
-		// Fondo = 431,288.73 * 0.125 = 53,911.09 (redondeado)
-		fondoEsperado := dec("53911.09")
-		if !judicial.MontoAplicado.Equal(fondoEsperado) {
-			t.Errorf("judicial MontoAplicado = %s, esperado %s", judicial.MontoAplicado, fondoEsperado)
+	t.Run("excedente en el segundo tramo de la escala", func(t *testing.T) {
+		r := calcularEmbargos(t, []EmbargoInput{judicial(1, "0.50")}, "1500000")[1]
+		if !r.MontoAplicado.Equal(dec("207055.46")) {
+			t.Errorf("aplicado %s, esperado 207055.46", r.MontoAplicado)
 		}
-		if judicial.SaldoPendienteInsatisfecho.IsNegative() {
-			t.Errorf("SaldoPendienteInsatisfecho no debe ser negativo, fue %s", judicial.SaldoPendienteInsatisfecho)
+	})
+
+	t.Run("orden por prioridad legal y luego prioridad del embargo; el fondo se agota", func(t *testing.T) {
+		hacienda := EmbargoInput{EmbargoID: 10, TipoEmbargoID: 3, Prioridad: 3, PrioridadLegal: 3, MontoFijo: dec("50000")}
+		r := calcularEmbargos(t, []EmbargoInput{hacienda, judicial(11, "0.03")}, "1000000")
+		if !r[11].MontoAplicado.Equal(dec("30000")) || !r[10].MontoAplicado.Equal(dec("50000")) {
+			t.Errorf("judicial %s, hacienda %s", r[11].MontoAplicado, r[10].MontoAplicado)
 		}
-		// El embargo judicial solicito 500,000 (50% de 1,000,000); el fondo
-		// disponible es muchisimo menor, por lo que debe quedar insatisfecho.
-		if !judicial.SaldoPendienteInsatisfecho.Equal(dec("446088.91")) {
-			t.Errorf("SaldoPendienteInsatisfecho = %s, esperado 446088.91", judicial.SaldoPendienteInsatisfecho)
+		hacienda.MontoFijo = dec("70000")
+		r = calcularEmbargos(t, []EmbargoInput{hacienda, judicial(11, "0.03")}, "1000000")
+		if !r[10].MontoAplicado.Equal(dec("61411.09")) {
+			t.Errorf("hacienda debería quedar en el resto del fondo (61411.09), fue %s", r[10].MontoAplicado)
+		}
+	})
+
+	t.Run("tope mensual propio del embargo", func(t *testing.T) {
+		e := judicial(1, "0.50")
+		e.TopeMensual = dec("20000")
+		r := calcularEmbargos(t, []EmbargoInput{e}, "1000000")[1]
+		if !r.MontoCalculado.Equal(dec("20000")) || !r.MontoAplicado.Equal(dec("20000")) {
+			t.Errorf("calculado %s, aplicado %s; esperado 20000", r.MontoCalculado, r.MontoAplicado)
+		}
+	})
+
+	t.Run("errores explicitos", func(t *testing.T) {
+		emb := []EmbargoInput{judicial(1, "0.10")}
+		if _, err := CalcularEmbargos(emb, dec("1000000"), decimal.Zero, escalaHistorica()); err == nil {
+			t.Error("sin SALARIO_MINIMO_INEMBARGABLE debe dar error")
+		}
+		smi := dec(salarioMinimoInembargable2026)
+		if _, err := CalcularEmbargos(emb, dec("1000000"), smi, nil); err == nil {
+			t.Error("sin escala debe dar error")
+		}
+		hueco := escalaHistorica()
+		hueco[1].SalarioDesde = dec("4")
+		if _, err := CalcularEmbargos(emb, dec("1000000"), smi, hueco); err == nil {
+			t.Error("escala con hueco debe dar error")
+		}
+		abierto := escalaHistorica()
+		abierto[0].SalarioHasta = decimal.NullDecimal{}
+		if _, err := CalcularEmbargos(emb, dec("1000000"), smi, abierto); err == nil {
+			t.Error("tramo abierto que no es el último debe dar error")
 		}
 	})
 }
 
-// ============================================================================
-// d. Verificacion de balance: Total Ingresos - Total Deducciones == Neto Pagado
-// ============================================================================
-
 func TestBalanceIngresosDeduccionesNeto(t *testing.T) {
-	// Escenario: salario bruto de 1,500,000, un credito fiscal por 1 hijo,
-	// un prestamo activo con cuota periodica y saldo suficiente. Sin
-	// embargos para aislar la identidad aritmetica del balance.
 	devengos := []ConceptoCalculadoOutput{
 		{
 			ConceptoSalarialID: 1,
@@ -239,10 +273,10 @@ func TestBalanceIngresosDeduccionesNeto(t *testing.T) {
 	baseRenta := CalcularBaseRenta(devengos)
 
 	cuotaObrero, cuotaPatronal := CalcularCCSS(baseCCSS, cargaSocial2026())
-	_ = cuotaPatronal // informativo/contable, no participa del neto del empleado
+	_ = cuotaPatronal
 
 	creditos := []CreditoFiscalResuelto{
-		{TipoCreditoFiscalID: 1, MontoTotal: dec("1710.00")}, // 1 hijo
+		{TipoCreditoFiscalID: 1, MontoTotal: dec("1710.00")},
 	}
 	resultadoRenta, err := CalcularImpuestoRenta(baseRenta, tramosRenta2026(), creditos)
 	if err != nil {
@@ -253,17 +287,10 @@ func TestBalanceIngresosDeduccionesNeto(t *testing.T) {
 		{PrestamoID: 1, CuotaPeriodica: dec("50000.00"), SaldoPendiente: dec("200000.00")},
 	})
 
-	totalIngresos := baseCCSS // unico devengo del escenario
+	totalIngresos := baseCCSS
 	totalDeducciones := cuotaObrero.Add(resultadoRenta.ImpuestoNeto).Add(prestamos)
 	netoPagado := totalIngresos.Sub(totalDeducciones)
 
-	// Valores esperados calculados a mano para el escenario:
-	//   CCSS obrero   = 1,500,000 * 0.1083           = 162,450.00
-	//   Renta bruta   = 42,900 (tramo 10%) + 22,950 (tramo 15%) = 65,850.00
-	//   Renta neta    = 65,850.00 - 1,710.00 (credito) = 64,140.00
-	//   Prestamo      = 50,000.00
-	//   Deducciones   = 162,450.00 + 64,140.00 + 50,000.00 = 276,590.00
-	//   Neto pagado   = 1,500,000.00 - 276,590.00 = 1,223,410.00
 	if !cuotaObrero.Equal(dec("162450.00")) {
 		t.Errorf("cuotaObrero = %s, esperado 162450.00", cuotaObrero)
 	}
@@ -277,7 +304,6 @@ func TestBalanceIngresosDeduccionesNeto(t *testing.T) {
 		t.Errorf("netoPagado = %s, esperado 1223410.00", netoPagado)
 	}
 
-	// La identidad que exige el entregable d: Ingresos - Deducciones == Neto.
 	if !totalIngresos.Sub(totalDeducciones).Equal(netoPagado) {
 		t.Errorf("no se cumple el balance: TotalIngresos(%s) - TotalDeducciones(%s) != NetoPagado(%s)",
 			totalIngresos, totalDeducciones, netoPagado)
@@ -290,9 +316,9 @@ func TestBalanceIngresosDeduccionesNeto(t *testing.T) {
 func TestCalcularPrestamos_NoDescuentaMasQueElSaldoPendiente(t *testing.T) {
 	total := CalcularPrestamos([]PrestamoDeduccionInput{
 		{PrestamoID: 1, CuotaPeriodica: dec("50000.00"), SaldoPendiente: dec("200000.00")},
-		{PrestamoID: 2, CuotaPeriodica: dec("30000.00"), SaldoPendiente: dec("12500.00")}, // ultima cuota, parcial
+		{PrestamoID: 2, CuotaPeriodica: dec("30000.00"), SaldoPendiente: dec("12500.00")},
 	})
-	esperado := dec("62500.00") // 50000 + 12500 (no 30000)
+	esperado := dec("62500.00")
 	if !total.Equal(esperado) {
 		t.Errorf("CalcularPrestamos = %s, esperado %s", total, esperado)
 	}

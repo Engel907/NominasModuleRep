@@ -1,4 +1,3 @@
--- Down de 000122. Orden: auditoría sin columnas nuevas -> tabla puente -> seed -> columnas.
 DROP TRIGGER IF EXISTS trg_aud_tipos_planilla_ins;
 CREATE TRIGGER trg_aud_tipos_planilla_ins AFTER INSERT ON tipos_planilla
 FOR EACH ROW
@@ -25,7 +24,6 @@ END;
 
 DROP TABLE IF EXISTS tipo_planilla_concepto;
 
--- Solo borra los tipos sembrados que ningún período usa (FK de periodos_planilla).
 DELETE FROM tipos_planilla
 WHERE codigo IN ('mensual','quincenal','aguinaldo','salario_escolar','liquidacion')
   AND NOT EXISTS (SELECT 1 FROM periodos_planilla p WHERE p.tipo_planilla_id = tipos_planilla.id);

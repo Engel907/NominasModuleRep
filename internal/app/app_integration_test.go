@@ -17,7 +17,7 @@ import (
 
 	"planillas-ccdr/internal/app"
 	"planillas-ccdr/internal/config"
-	"planillas-ccdr/internal/security"
+	"planillas-ccdr/internal/credenciales"
 	"planillas-ccdr/internal/seedadmin"
 	"planillas-ccdr/internal/testutil"
 )
@@ -45,11 +45,25 @@ func cuerpoPrograma() map[string]any {
 	return map[string]any{"codigo": "PR-HUMO", "nombre": "Programa de humo"}
 }
 
-func cuerpoEmpleado() map[string]any {
+// refsEmpleado: catálogos que exige el alta de empleado (se siembran por SQL).
+type refsEmpleado struct{ tipoIdent, puesto, tipoContrato, programa int64 }
+
+func cuerpoEmpleado(codigo, ident string, r refsEmpleado, regimenCCSS *int64) map[string]any {
+	laborales := map[string]any{
+		"puesto_id": r.puesto, "tipo_contrato_id": r.tipoContrato,
+		"programa_presupuestario_id": r.programa, "fecha_efectiva": "2026-01-01",
+	}
+	if regimenCCSS != nil {
+		laborales["regimen_ccss_id"] = *regimenCCSS
+	}
 	return map[string]any{
-		"numero_identificacion": "1-1111-1111",
-		"nombre_completo":       "Empleado de Humo",
-		"fecha_nacimiento":      "1990-01-15",
+		"codigo_interno":         codigo,
+		"tipo_identificacion_id": r.tipoIdent,
+		"numero_identificacion":  ident,
+		"nombre_completo":        "Empleado de Humo",
+		"fecha_ingreso":          "2026-01-01",
+		"datos_personales":       map[string]any{"fecha_efectiva": "2026-01-01"},
+		"datos_laborales":        laborales,
 	}
 }
 
@@ -119,9 +133,10 @@ func TestHumoAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{
-		App:       config.AppConfig{Env: "test"},
+		App:       config.AppConfig{Env: "development"},
 		Server:    config.ServerConfig{MaxBodyBytes: 1 << 20},
 		RateLimit: config.RateLimitConfig{AuthPorMin: 1000, AuthBurst: 1000, UsuarioPorMin: 1000, UsuarioBurst: 1000},
+		Datos:     config.DatosConfig{LlavesHex: "d1:" + strings.Repeat("cd", 32), HMACHex: strings.Repeat("ef", 32)},
 		Auth: config.AuthConfig{
 			PasetoLocalKeyHex:          strings.Repeat("ab", 32),
 			Issuer:                     "planillas-ccdr-test",
@@ -133,7 +148,7 @@ func TestHumoAPI(t *testing.T) {
 			LockoutDuration:            15 * time.Minute,
 		},
 	}
-	var maker security.TokenMaker
+	var maker credenciales.TokenMaker
 	maker, err := app.NewTokenMaker(cfg.Auth)
 	if err != nil {
 		t.Fatal(err)
@@ -145,13 +160,12 @@ func TestHumoAPI(t *testing.T) {
 	srv := httptest.NewServer(router)
 	defer srv.Close()
 
-	// Admin con el mismo código que cmd/seedadmin + requiere_cambio_password = 0.
 	const usuario = "humo.admin"
 	pass, err := seedadmin.GenerarPassword(seedadmin.LongitudPassword)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hash, err := security.HashPassword(pass)
+	hash, err := credenciales.HashPassword(pass)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,15 +177,12 @@ func TestHumoAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Los triggers de auditoría leen @auditoria_usuario_id en la misma sesión.
 	if _, err := tx.ExecContext(ctx, "SET @auditoria_usuario_id = NULL"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE usuarios SET requiere_cambio_password = 0 WHERE nombre_usuario = ?", usuario); err != nil {
 		t.Fatal(err)
 	}
-	// ADMINISTRADOR_SISTEMA no tiene permisos de negocio (segregación, F12/F17):
-	// la prueba de humo opera empleados y organización con el rol RRHH.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO usuario_roles (usuario_id, rol_id, fecha_inicio_vigencia)
 SELECT u.id, r.id, CURRENT_DATE FROM usuarios u JOIN roles r ON r.codigo = 'RRHH' WHERE u.nombre_usuario = ?`, usuario); err != nil {
@@ -186,6 +197,13 @@ SELECT u.id, r.id, CURRENT_DATE FROM usuarios u JOIN roles r ON r.codigo = 'RRHH
 	t.Run("health", func(t *testing.T) {
 		if st, body := c.llamar("GET", "/healthz", nil); st != http.StatusOK {
 			t.Fatalf("healthz: %d %v", st, body)
+		}
+		st, body := c.llamar("GET", "/readyz", nil)
+		if st != http.StatusServiceUnavailable || buscar(body, "status") != "parametros_faltantes" {
+			t.Fatalf("readyz: %d %v", st, body)
+		}
+		if st, _ := c.llamar("GET", "/metrics", nil); st != http.StatusNotFound {
+			t.Fatalf("metrics sin token: %d", st)
 		}
 	})
 
@@ -222,19 +240,47 @@ SELECT u.id, r.id, CURRENT_DATE FROM usuarios u JOIN roles r ON r.codigo = 'RRHH
 	})
 
 	t.Run("crear_y_listar_empleado", func(t *testing.T) {
-		if st, body := c.llamar("POST", rutaEmpleados, cuerpoEmpleado()); !esExito(st) {
+		var r refsEmpleado
+		var sem int64
+		for q, dst := range map[string]*int64{
+			`SELECT id FROM tipos_identificacion WHERE codigo = 'CEDULA_NACIONAL'`: &r.tipoIdent,
+			`SELECT id FROM programas_presupuestarios WHERE codigo = 'PR-HUMO'`:    &r.programa,
+			`SELECT id FROM regimenes_ccss WHERE codigo = 'SEM'`:                   &sem,
+		} {
+			if err := sqlDB.QueryRow(q).Scan(dst); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		res, err := sqlDB.Exec(`INSERT INTO puestos (codigo, nombre, unidad_organizativa_id) SELECT 'PU-HUMO', 'Puesto de humo', id FROM unidades_organizativas WHERE codigo = 'UO-HUMO'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.puesto, _ = res.LastInsertId()
+		if res, err = sqlDB.Exec(`INSERT INTO tipos_contrato (codigo, nombre) VALUES ('TC-HUMO', 'Tipo de humo')`); err != nil {
+			t.Fatal(err)
+		}
+		r.tipoContrato, _ = res.LastInsertId()
+
+		inexistente := int64(999999)
+		if st, body := c.llamar("POST", rutaEmpleados, cuerpoEmpleado("HUMO0", "1-1111-0000", r, &inexistente)); st != http.StatusBadRequest {
+			t.Fatalf("régimen inexistente: se esperaba 400, fue %d %v", st, body)
+		}
+		if st, body := c.llamar("POST", rutaEmpleados, cuerpoEmpleado("HUMO1", "1-1111-1111", r, &sem)); !esExito(st) {
 			t.Fatalf("crear empleado: %d %v", st, body)
+		}
+		if st, body := c.llamar("POST", rutaEmpleados, cuerpoEmpleado("HUMO2", "1-1111-2222", r, nil)); !esExito(st) {
+			t.Fatalf("crear empleado sin régimen: %d %v", st, body)
 		}
 		st, body := c.llamar("GET", rutaEmpleados, nil)
 		if st != http.StatusOK {
 			t.Fatalf("listar empleados: %d %v", st, body)
 		}
-		if b, _ := json.Marshal(body); !strings.Contains(string(b), "Empleado de Humo") {
-			t.Errorf("el empleado creado no aparece en el listado: %s", b)
+		if b, _ := json.Marshal(body); !strings.Contains(string(b), "HUMO1") || !strings.Contains(string(b), "HUMO2") {
+			t.Errorf("los empleados creados no aparecen en el listado: %s", b)
+		}
+		st, body = c.llamar("GET", rutaEmpleados+"?sin_regimen_ccss=true", nil)
+		if b, _ := json.Marshal(body); st != http.StatusOK || strings.Contains(string(b), "HUMO1") || !strings.Contains(string(b), "HUMO2") {
+			t.Errorf("sin_regimen_ccss: %d %s", st, b)
 		}
 	})
-}
-
-func TestHumoCrearPeriodoPlanilla(t *testing.T) {
-	t.Skip("F19")
 }

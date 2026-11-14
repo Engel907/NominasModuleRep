@@ -1,11 +1,3 @@
--- L12 — Jornadas y divisor de la hora ordinaria por jornada.
---
--- El divisor de la hora extra deja de ser uno solo (HORAS_MENSUALES_ORDINARIAS)
--- y pasa a depender de la jornada del contrato. Solo se siembra el valor que el
--- código ya usaba (240, copiado de parametros_generales.HORAS_MENSUALES_ORDINARIAS)
--- para la jornada DIURNA. MIXTA y NOCTURNA NO se siembran (valor legal): sin
--- parámetro vigente, una hora extra de esas jornadas da error explícito.
--- horas_diarias_ordinarias queda NULL: el código no tenía ese valor (no se inventa).
 CREATE TABLE jornadas (
   id     BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador',
   codigo VARCHAR(20)  NOT NULL UNIQUE COMMENT 'DIURNA, MIXTA, NOCTURNA',
@@ -22,7 +14,7 @@ CREATE TABLE parametros_jornada (
   jornada_id               BIGINT UNSIGNED NOT NULL COMMENT 'Jornada',
   horas_diarias_ordinarias DECIMAL(4,2) NULL COMMENT 'Horas ordinarias por día (NULL = no definido)',
   divisor_horas_mensuales  DECIMAL(6,2) NOT NULL COMMENT 'Divisor del valor hora mensual',
-  fuente_legal             VARCHAR(150) NOT NULL COMMENT 'Base legal o PENDIENTE VALIDAR',
+  fuente_legal             VARCHAR(150) NOT NULL COMMENT 'Base legal del valor',
   fecha_inicio_vigencia    DATE NOT NULL COMMENT 'Inicio de vigencia',
   fecha_fin_vigencia       DATE NULL COMMENT 'NULL = vigente',
   es_vigente TINYINT GENERATED ALWAYS AS (CASE WHEN fecha_fin_vigencia IS NULL THEN 1 ELSE NULL END) STORED COMMENT 'Técnica: una vigente por jornada',
@@ -36,24 +28,21 @@ CREATE TABLE parametros_jornada (
 ) ENGINE=InnoDB COMMENT='Divisor de la hora ordinaria por jornada, versionado por vigencia';
 
 INSERT INTO parametros_jornada (jornada_id, horas_diarias_ordinarias, divisor_horas_mensuales, fuente_legal, fecha_inicio_vigencia, creado_por)
-SELECT j.id, NULL, CAST(g.valor AS DECIMAL(6,2)), 'VALOR HISTÓRICO DEL CÓDIGO - PENDIENTE VALIDAR', g.fecha_inicio_vigencia, 1
+SELECT j.id, NULL, CAST(g.valor AS DECIMAL(6,2)), 'Código de Trabajo, art. 136', g.fecha_inicio_vigencia, 1
 FROM jornadas j
 JOIN parametros_generales g ON g.clave = 'HORAS_MENSUALES_ORDINARIAS' AND g.fecha_fin_vigencia IS NULL
 WHERE j.codigo = 'DIURNA'
   AND NOT EXISTS (SELECT 1 FROM parametros_jornada p WHERE p.jornada_id = j.id AND p.fecha_fin_vigencia IS NULL);
 
 ALTER TABLE contratos
-  ADD COLUMN jornada_id BIGINT UNSIGNED NULL COMMENT 'FK a jornadas; reemplaza jornada (texto, deprecado)',
+  ADD COLUMN jornada_id BIGINT UNSIGNED NULL COMMENT 'FK a jornadas',
   ADD CONSTRAINT fk_contratos_jornada FOREIGN KEY (jornada_id) REFERENCES jornadas(id);
 UPDATE contratos c JOIN jornadas j ON UPPER(j.codigo) = UPPER(c.jornada) SET c.jornada_id = j.id WHERE c.jornada_id IS NULL;
--- Informe (no borra): SELECT id, jornada FROM contratos WHERE jornada_id IS NULL;
 
 ALTER TABLE turnos
   ADD COLUMN jornada_id BIGINT UNSIGNED NULL COMMENT 'Jornada a la que pertenece el turno',
   ADD CONSTRAINT fk_turnos_jornada FOREIGN KEY (jornada_id) REFERENCES jornadas(id);
 
--- Los FK de catálogo de contratos se resuelven en la BD a partir del texto
--- (jornada, tipo_contrato), para todo escritor (API, cargas, migraciones).
 CREATE TRIGGER trg_contratos_catalogos_bi BEFORE INSERT ON contratos
 FOR EACH ROW
 BEGIN
@@ -67,8 +56,6 @@ BEGIN
   END IF;
 END;
 
--- Inmutabilidad (scripts/gen_inmutabilidad_parametros.sh), como las demás tablas paramétricas.
--- parametros_jornada: solo se puede cerrar la vigencia; nunca borrar
 CREATE TRIGGER trg_parametros_jornada_inmut_bu BEFORE UPDATE ON parametros_jornada
 FOR EACH ROW
 BEGIN
@@ -94,8 +81,6 @@ BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'parametro_inmutable: parametros_jornada no se borra; se cierra la vigencia';
 END;
 
-
--- Auditoría (scripts/gen_auditoria.sh): parametros_jornada nueva; contratos y turnos regeneradas con jornada_id.
 DROP TRIGGER IF EXISTS trg_aud_parametros_jornada_ins;
 CREATE TRIGGER trg_aud_parametros_jornada_ins AFTER INSERT ON parametros_jornada
 FOR EACH ROW

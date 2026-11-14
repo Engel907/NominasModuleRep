@@ -1,5 +1,5 @@
 // Package handlers contiene los handlers Gin del módulo de seguridad.
-// Deliberadamente delgados: parsean el request, llaman a internal/auth.Servicio,
+// delgados: parsean el request, llaman a internal/auth.Servicio,
 // y traducen el resultado a HTTP — sin lógica de negocio acá.
 package handlers
 
@@ -32,18 +32,9 @@ func (h *AuthHandler) RegistrarRutas(publico *gin.RouterGroup, protegido *gin.Ro
 	publico.POST("/auth/password/reset/solicitar", h.SolicitarResetPassword)
 	publico.POST("/auth/password/reset/confirmar", h.ConfirmarResetPassword)
 
-	// Autoservicio (F14): solo exigen sesión, NO un permiso — cualquier usuario
-	// autenticado puede cambiar SU contraseña y consultar quién es. Siguen
-	// siendo las únicas rutas protegidas que permite middleware.ExigirCambioPassword
-	// mientras el token lleva rcp=true. permisos_coherencia_test.go debe
-	// eximirlas explícitamente de la regla "toda ruta protegida lleva
-	// RequirePermission".
 	protegido.POST("/auth/password/cambiar", h.CambiarPassword)
 	protegido.GET("/auth/me", h.Me)
 
-	// Requiere estar autenticado; RequirePermission acota por permiso
-	// específico. Los códigos viven en internal/authz (única fuente de verdad)
-	// y los siembra la migración 000112.
 	protegido.POST("/usuarios/:id/roles",
 		middleware.RequirePermission(authz.PermUsuariosAsignarRol), h.AsignarRol)
 	protegido.DELETE("/usuarios/:id/roles",
@@ -98,8 +89,8 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// CambiarPassword (F14 / S1) cambia la contraseña del usuario autenticado.
-// Responde 200 con un par de tokens NUEVO (rcp=false): el cambio revoca todas
+// CambiarPassword cambia la contraseña del usuario autenticado.
+// Responde 200 con un par de tokens nuevo (rcp=false): el cambio revoca todas
 // las sesiones, incluida la actual, y el cliente debe reemplazar sus tokens.
 func (h *AuthHandler) CambiarPassword(c *gin.Context) {
 	actorID, ok := actorAutenticado(c)
@@ -156,8 +147,6 @@ func (h *AuthHandler) LogoutTodasLasSesiones(c *gin.Context) {
 func (h *AuthHandler) AsignarRol(c *gin.Context) {
 	usuarioID, err := middleware.ParseIDParam(c, "id")
 	if err != nil {
-		// ParseIDParam no escribe la respuesta: ErrorHandler traduce
-		// *ErrParametroInvalido a 400.
 		_ = c.Error(err)
 		return
 	}
@@ -276,7 +265,7 @@ func (h *AuthHandler) ReemplazarPermisosRol(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// SolicitarResetPassword SIEMPRE responde 202 con el mismo mensaje genérico,
+// SolicitarResetPassword siempre responde 202 con el mismo mensaje genérico,
 // exista o no el usuario — evita user enumeration por este endpoint. El
 // servicio entrega el token por el Notificador (SMTP, o el log en
 // development); acá no se ve ni se devuelve nunca. Un error interno se
@@ -310,9 +299,8 @@ func (h *AuthHandler) ConfirmarResetPassword(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// origenDe arma el origen de la solicitud desde la conexión HTTP. Para que
-// ClientIP() devuelva la IP real detrás de un proxy, main.go debe configurar
-// router.SetTrustedProxies; si no, será la IP del proxy.
+// origenDe arma el origen de la solicitud desde la conexión HTTP. Detrás de
+// un proxy, ClientIP depende de los proxies de confianza del router.
 func origenDe(c *gin.Context) auth.OrigenSolicitud {
 	return auth.OrigenSolicitud{IP: c.ClientIP(), UserAgent: c.Request.UserAgent()}
 }

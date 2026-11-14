@@ -1,27 +1,3 @@
-// internal/db/dto/vacaciones.go
-//
-// Fase 4 — Vacaciones: escala legal, saldo materializado, ledger de
-// movimientos y solicitudes. Reemplaza las queries de vacaciones de
-// db/queries/asistencia_vacaciones.sql. Helpers (rowScanner, *PtrArg) en
-// asistencia.go. Estilo de contratos.go: argumentos posicionales y sql.Null*.
-//
-// NOTA DE MIGRACIÓN (verificado contra db/schema.sql):
-//
-//   - `vacaciones_acumulado` NO es "una fila por empleado": es una tabla de
-//     cortes históricos, UNIQUE (empleado_id, fecha_corte), con fecha_corte
-//     NOT NULL sin default, `saldo`, `origen_carga` y
-//     `registrado_por_usuario_id` (FK a usuarios). La migración 000003 solo le
-//     agrega dias_disponibles. Por eso "el saldo actual" es el corte más
-//     reciente (ORDER BY fecha_corte DESC, id DESC) y UpsertSaldoVacaciones
-//     Empleado recibe fechaCorte y registradoPor, y mantiene saldo =
-//     dias_disponibles.
-//   - `parametros_vacaciones_escala.es_vigente` es columna generada (solo
-//     lectura aquí).
-//   - Corrección de FK (fase 1A): vacaciones_solicitudes y
-//     vacaciones_movimientos apuntan a empleados(id), así que el listado de
-//     solicitudes hace JOIN a `empleados` (antes `usuarios`, por la FK rota).
-//     creado_por y aprobado_por SIGUEN siendo IDs de usuarios.
-//   - MySQL no soporta RETURNING: se inserta/actualiza y se relee la fila.
 package dto
 
 import (
@@ -31,10 +7,6 @@ import (
 
 	"github.com/shopspring/decimal"
 )
-
-// ============================================================================
-// PARAMETROS_VACACIONES_ESCALA (solo lectura)
-// ============================================================================
 
 type ParametrosVacacionesEscala struct {
 	ID                  int64
@@ -59,10 +31,6 @@ LIMIT 1`, aniosServicio).Scan(&p.ID, &p.AniosServicioDesde, &p.AniosServicioHast
 		&p.FechaInicioVigencia, &p.FechaFinVigencia)
 	return p, err
 }
-
-// ============================================================================
-// VACACIONES_ACUMULADO (cortes; el saldo actual es el más reciente)
-// ============================================================================
 
 type VacacionesAcumulado struct {
 	ID                     int64
@@ -133,10 +101,6 @@ ON DUPLICATE KEY UPDATE
 		empleadoID, fechaCorte, diasAcumulados, diasDisfrutados, diasDisponibles, diasDisponibles, registradoPor)
 	return err
 }
-
-// ============================================================================
-// VACACIONES_MOVIMIENTOS (ledger append-only) — empleado_id → empleados(id)
-// ============================================================================
 
 type VacacionesMovimiento struct {
 	ID                int64
@@ -213,10 +177,6 @@ LIMIT ? OFFSET ?`, empleadoID, datePtrArg(fechaDesde), datePtrArg(fechaHasta), l
 	}
 	return out, rows.Err()
 }
-
-// ============================================================================
-// VACACIONES_SOLICITUDES — empleado_id → empleados(id)
-// ============================================================================
 
 type VacacionesSolicitud struct {
 	ID              int64

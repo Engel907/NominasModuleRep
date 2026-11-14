@@ -1,8 +1,3 @@
--- L13 — Autorización previa de horas extra.
---
--- Una hora extra solo llega a planilla si el día tiene una autorización en
--- estado 'autorizada': se paga min(horas extra registradas, horas_autorizadas).
--- Quien solicita no puede resolver (CHECK en BD + 403 en Go).
 CREATE TABLE horas_extra_autorizadas (
   id                 BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador',
   empleado_id        BIGINT UNSIGNED NOT NULL COMMENT 'Empleado',
@@ -38,13 +33,11 @@ JOIN permisos p ON p.codigo = 'horas_extra.autorizar'
 WHERE r.codigo = 'RRHH'
   AND NOT EXISTS (SELECT 1 FROM rol_permisos rp WHERE rp.rol_id = r.id AND rp.permiso_id = p.id);
 
--- Los tokens ya emitidos a usuarios RRHH no traen el permiso nuevo (F15).
 UPDATE usuarios u
 SET u.permisos_version = u.permisos_version + 1
 WHERE EXISTS (SELECT 1 FROM usuario_roles ur JOIN roles r ON r.id = ur.rol_id
               WHERE ur.usuario_id = u.id AND r.codigo = 'RRHH' AND ur.fecha_fin_vigencia IS NULL);
 
--- Auditoría (scripts/gen_auditoria.sh).
 DROP TRIGGER IF EXISTS trg_aud_horas_extra_autorizadas_ins;
 CREATE TRIGGER trg_aud_horas_extra_autorizadas_ins AFTER INSERT ON horas_extra_autorizadas
 FOR EACH ROW

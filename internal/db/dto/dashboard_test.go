@@ -14,7 +14,7 @@ import (
 
 // Driver mínimo que registra la consulta y los argumentos y devuelve una fila
 // fija. No ejecuta SQL: sirve para verificar que placeholders y argumentos
-// calzan y que el SQL ya no referencia columnas/estados inexistentes.
+// calzan y que el SQL no referencia columnas ni estados inexistentes.
 type capturaDriver struct {
 	mu    sync.Mutex
 	query string
@@ -79,8 +79,6 @@ func abrirCaptura(t *testing.T) (*Queries, *capturaDriver) {
 
 func TestObtenerMetricasDashboard_SQLYArgumentos(t *testing.T) {
 	q, cap := abrirCaptura(t)
-	// 23:30 en UTC-6 = día siguiente en UTC: la fecha enviada debe ser la del
-	// reloj local del llamador, no la convertida.
 	cr := time.FixedZone("CR", -6*3600)
 	fecha := time.Date(2026, 10, 13, 23, 30, 0, 0, cr)
 
@@ -93,7 +91,6 @@ func TestObtenerMetricasDashboard_SQLYArgumentos(t *testing.T) {
 		t.Errorf("fila mal mapeada: %+v", r)
 	}
 
-	// Un '?' por argumento: 2 usos × 2 estados + 2 fechas = 6.
 	if n := strings.Count(cap.query, "?"); n != len(cap.args) || n != 6 {
 		t.Fatalf("placeholders=%d args=%d (esperaba 6 y 6)", n, len(cap.args))
 	}

@@ -1,16 +1,11 @@
 package prestamos
 
-// Estados de las tablas prestamos y embargos. Los valores deben coincidir con
-// el ENUM de la columna estado en la BD: lo verifica
-// internal/planilla/estados_enum_test.go (integración).
-
 const (
 	EstadoPrestamoActivo     = "activo"
 	EstadoPrestamoSuspendido = "suspendido"
 	EstadoPrestamoCancelado  = "cancelado"
-	// ⚠️ Confirmar contra el ENUM real de prestamos.estado: es el estado al que
-	// CerrarPrestamoSiSaldoEnCero deja el préstamo. Si el test de ENUM reporta
-	// diferencias, ajusta o elimina esta constante.
+	// EstadoPrestamoPagado: saldo llevado a 0 (planilla o abono). Lo fija
+	// trg_prestamos_saldado_bu (000131); el test de ENUM lo confirma.
 	EstadoPrestamoPagado = "pagado"
 )
 

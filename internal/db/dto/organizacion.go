@@ -1,26 +1,3 @@
-// internal/db/dto/organizacion.go
-//
-// Fase 3B — RRHH: catálogos organizacionales (clasificaciones de puesto,
-// programas presupuestarios, unidades organizativas, puestos).
-//
-// NOTA DE MIGRACIÓN (mismo criterio que security.go de la Fase 5A): las
-// columnas de abajo se verificaron contra db/schema.sql, NO contra
-// db/queries/empleados_puestos.sql — ese archivo de queries fue escrito
-// contra un esquema supuesto que en varios puntos no coincide con las
-// tablas reales. Diferencias puntuales para estos 4 catálogos:
-//
-//   - clasificaciones_puesto y programas_presupuestarios NO tienen columnas
-//     created_at/updated_at en el schema real (sí tienen `activo`). Los
-//     Create/Update de abajo no las escriben porque no existen.
-//   - puestos NO tiene columna `descripcion` en el schema real. Se quitó el
-//     campo Descripcion de PuestoInput/PuestoUpdateInput en
-//     internal/services/organizacion_service.go — no hay dónde persistirlo.
-//   - unidades_organizativas NO tiene columna programa_presupuestario_id en
-//     el schema real (ese campo vive en empleado_datos_laborales, no en la
-//     unidad). Se quitó ProgramaPresupuestarioID de UnidadOrganizativaInput/
-//     UpdateInput/ListRequest en internal/services/organizacion_service.go.
-//   - unidades_organizativas SÍ tiene created_at/updated_at, a diferencia de
-//     los otros 3 catálogos de este archivo.
 package dto
 
 import (
@@ -28,10 +5,6 @@ import (
 	"database/sql"
 	"time"
 )
-
-// ============================================================================
-// CLASIFICACIONES_PUESTO
-// ============================================================================
 
 type ClasificacionesPuesto struct {
 	ID     int64
@@ -122,10 +95,6 @@ WHERE (? IS NULL OR activo = ?)
 	return total, err
 }
 
-// ============================================================================
-// PROGRAMAS_PRESUPUESTARIOS
-// ============================================================================
-
 type ProgramasPresupuestario struct {
 	ID     int64
 	Codigo string
@@ -215,10 +184,6 @@ WHERE (? IS NULL OR activo = ?)
 	err := row.Scan(&total)
 	return total, err
 }
-
-// ============================================================================
-// UNIDADES_ORGANIZATIVAS
-// ============================================================================
 
 type UnidadesOrganizativa struct {
 	ID            int64
@@ -326,10 +291,6 @@ WHERE (? IS NULL OR activo = ?)
 	err := row.Scan(&total)
 	return total, err
 }
-
-// ============================================================================
-// PUESTOS
-// ============================================================================
 
 type Puesto struct {
 	ID                    int64

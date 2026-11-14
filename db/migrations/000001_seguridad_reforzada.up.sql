@@ -1,64 +1,15 @@
--- ============================================================================
-
--- ============================================================================
--- Origen: migrations/000001_seguridad_reforzada.up.sql
--- ============================================================================
--- ============================================================================
--- 000001_seguridad_reforzada.up.sql
--- CCDR de Liberia — Módulo Seguridad/Auth
--- Refuerza el bloque "6.10 SEGURIDAD Y AUDITORÍA" de planillas_ccdr_v11_completo.sql
--- Se aplica DESPUÉS de correr el archivo v11 completo. No modifica el archivo
--- v11 directamente (mandato del proyecto): todo va como ALTER/CREATE aquí.
---
--- Resuelve los puntos a-i del diagnóstico de seguridad:
---   a) usuarios: created_at / updated_at
---   b) refresh_tokens: sesiones persistidas y revocables
---   c) usuarios: intentos_fallidos / bloqueado_hasta (fuerza bruta)
---   d) tokens_reset_password + requiere_cambio_password
---   e) roles: descripcion / activo
---   f) usuario_roles: versionado por vigencia (patrón ya usado en 17 tablas
---      del esquema base), permite N roles simultáneos vigentes por usuario
---   g) (sin cambio de esquema: password_hash ya existía en v11; el hash con
---      bcrypt/argon2id se aplica en la capa Go de seguridad — Fase 2)
---   h) (sin cambio de esquema: rol_permisos ya modela permiso->rol N:M;
---      la decisión de autorizar por permiso y no por rol se aplica en el
---      middleware Go — Fase 2)
---   i) usuario_roles.creado_por / fecha_asignacion (cubierto en f)
---
--- Motor: InnoDB. Requiere las mismas versiones mínimas que el esquema base
--- (MySQL 8.0.16+ / MariaDB 10.3+), por CHECK constraints, columnas
--- generadas STORED y JSON_OBJECT en los triggers de auditoría.
--- Idempotente: cada DDL usa IF NOT EXISTS / DROP ... IF EXISTS donde MySQL
--- lo permite, para poder re-aplicar sin error en un ambiente ya migrado.
--- ============================================================================
-
-
--- ----------------------------------------------------------------------------
--- a) usuarios.created_at / updated_at
--- Rompía la convención que el propio v11 declara para el resto de tablas.
--- ----------------------------------------------------------------------------
 ALTER TABLE usuarios
   ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     COMMENT 'Fecha/hora en que se creó el registro' AFTER activo,
   ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     COMMENT 'Fecha/hora de la última modificación del registro' AFTER created_at;
 
--- ----------------------------------------------------------------------------
--- c) Control de intentos fallidos de login / bloqueo temporal
--- El backend debe: incrementar intentos_fallidos en cada credencial inválida,
--- fijar bloqueado_hasta tras N intentos (política en capa de servicio, no
--- hardcodeada aquí porque no es un parámetro legal sino de seguridad
--- operativa), y resetear ambos campos en un login exitoso.
--- ----------------------------------------------------------------------------
 ALTER TABLE usuarios
   ADD COLUMN intentos_fallidos SMALLINT UNSIGNED NOT NULL DEFAULT 0
     COMMENT 'Contador de intentos de login fallidos consecutivos; se resetea a 0 en login exitoso',
   ADD COLUMN bloqueado_hasta DATETIME NULL
     COMMENT 'Si no es NULL y es futuro, la cuenta está temporalmente bloqueada para login; se limpia al expirar o en cambio de contraseña';
 
--- ----------------------------------------------------------------------------
--- d) Forzar cambio de contraseña / "olvidé mi contraseña"
--- ----------------------------------------------------------------------------
 ALTER TABLE usuarios
   ADD COLUMN requiere_cambio_password TINYINT(1) NOT NULL DEFAULT 0
     COMMENT '1 = el usuario debe cambiar su contraseña en el próximo login antes de poder usar el sistema (p.ej. tras un reset administrativo)',
@@ -79,13 +30,6 @@ CREATE TABLE IF NOT EXISTS tokens_reset_password (
   KEY ix_trp_usuario_vigentes (usuario_id, usado, fecha_expiracion)
 ) ENGINE=InnoDB COMMENT='Tokens de un solo uso, expirables, para el flujo de "olvidé mi contraseña"';
 
--- ----------------------------------------------------------------------------
--- b) Refresh tokens / sesiones activas, revocables
--- El access token PASETO sigue viviendo 15-30 min (capa Go, Fase 2); esta
--- tabla sostiene el refresh token de vida larga y el logout real / "cerrar
--- sesión en todos los dispositivos" (UPDATE masivo de revocado=1 por
--- usuario_id).
--- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS refresh_tokens (
   id                BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador interno de la sesión/refresh token',
   usuario_id        BIGINT UNSIGNED NOT NULL COMMENT 'Usuario dueño de esta sesión',
@@ -101,31 +45,12 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
   KEY ix_rt_usuario_vigentes (usuario_id, revocado, fecha_expiracion)
 ) ENGINE=InnoDB COMMENT='Refresh tokens persistidos y revocables; base de logout real y "cerrar sesión en todos los dispositivos"';
 
--- ----------------------------------------------------------------------------
--- e) roles.descripcion / roles.activo
--- ----------------------------------------------------------------------------
 ALTER TABLE roles
   ADD COLUMN descripcion VARCHAR(255) NULL
     COMMENT 'Descripción funcional del rol, para administración' AFTER nombre,
   ADD COLUMN activo TINYINT(1) NOT NULL DEFAULT 1
     COMMENT '1 = rol asignable a nuevos usuarios, 0 = descontinuado (no se borra para no perder histórico en usuario_roles)' AFTER descripcion;
 
--- ----------------------------------------------------------------------------
--- f) + i) usuario_roles: versionado por vigencia + trazabilidad de otorgamiento
---
--- El diseño original tenía PK compuesta (usuario_id, rol_id) sin histórico:
--- una revocación era un DELETE que borraba para siempre quién lo asignó y
--- cuándo. Se rediseña con el mismo patrón fecha_inicio_vigencia /
--- fecha_fin_vigencia / es_vigente que ya usan ~17 tablas del esquema base,
--- adaptado para permitir MÚLTIPLES roles simultáneos vigentes por usuario
--- (a diferencia del patrón 1-fila-vigente de otras tablas, aquí la unicidad
--- es por el PAR usuario+rol, no solo por usuario): un usuario puede tener
--- "Encargada RRHH" y "Contabilidad" vigentes al mismo tiempo, pero no puede
--- tener el MISMO rol vigente dos veces.
---
--- No hay ninguna FK externa hacia usuario_roles en el esquema v11 (se
--- verificó contra el archivo completo), así que es seguro recrearla.
--- ----------------------------------------------------------------------------
 DROP TRIGGER IF EXISTS trg_aud_usuario_roles_ins;
 DROP TRIGGER IF EXISTS trg_aud_usuario_roles_upd;
 DROP TRIGGER IF EXISTS trg_aud_usuario_roles_del;
@@ -148,15 +73,6 @@ CREATE TABLE usuario_roles (
   UNIQUE KEY uk_ur_una_vigente (usuario_id, rol_id, es_vigente),
   KEY ix_ur_usuario_vigencia (usuario_id, fecha_inicio_vigencia, fecha_fin_vigencia)
 ) ENGINE=InnoDB COMMENT='Asignación de roles a usuarios, versionada; permite varios roles simultáneos por usuario y conserva histórico completo de otorgamiento/revocación (Ley 8292)';
-
--- ============================================================================
--- Extensión de los triggers de auditoría automática (sección 6.11 del v11)
--- para que capturen las columnas nuevas de usuarios, roles y usuario_roles.
--- Sin esto, la auditoría automática del propio v11 quedaría ciega a los
--- cambios de seguridad que introduce esta migración (contradice el punto 1
--- de los principios de diseño del esquema: trazabilidad completa).
--- password_hash se mantiene redactado, igual que en el v11 original.
--- ============================================================================
 
 DROP TRIGGER IF EXISTS trg_aud_usuarios_ins;
 CREATE TRIGGER trg_aud_usuarios_ins AFTER INSERT ON usuarios
@@ -232,8 +148,6 @@ BEGIN
     NULL);
 END;
 
--- usuario_roles ahora tiene id propio: se corrige además el defecto heredado
--- del v11 que logueaba registro_id = 0 (hardcodeado) para esta tabla.
 DROP TRIGGER IF EXISTS trg_aud_usuario_roles_ins;
 CREATE TRIGGER trg_aud_usuario_roles_ins AFTER INSERT ON usuario_roles
 FOR EACH ROW
@@ -271,9 +185,6 @@ BEGIN
     NULL);
 END;
 
--- Trigger de auditoría para tokens_reset_password (tabla nueva); se excluye
--- token_hash del JSON por el mismo criterio que password_hash: aunque es un
--- hash y no el token en claro, no debe circular ni siquiera en la bitácora.
 DROP TRIGGER IF EXISTS trg_aud_tokens_reset_password_ins;
 CREATE TRIGGER trg_aud_tokens_reset_password_ins AFTER INSERT ON tokens_reset_password
 FOR EACH ROW
@@ -299,8 +210,6 @@ BEGIN
       'fecha_uso', NEW.fecha_uso, 'ip_origen', NEW.ip_origen));
 END;
 
--- Trigger de auditoría para refresh_tokens (tabla nueva); mismo criterio de
--- redacción para token_hash.
 DROP TRIGGER IF EXISTS trg_aud_refresh_tokens_ins;
 CREATE TRIGGER trg_aud_refresh_tokens_ins AFTER INSERT ON refresh_tokens
 FOR EACH ROW
@@ -325,5 +234,4 @@ BEGIN
       'fecha_emision', NEW.fecha_emision, 'fecha_expiracion', NEW.fecha_expiracion, 'revocado', NEW.revocado,
       'fecha_revocacion', NEW.fecha_revocacion, 'ip_origen', NEW.ip_origen, 'user_agent', NEW.user_agent));
 END;
-
 

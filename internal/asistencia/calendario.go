@@ -2,44 +2,39 @@ package asistencia
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
+	"planillas-ccdr/internal/parametros"
 )
 
-// FeriadoBase describe un feriado antes de resolverse a una fecha concreta del año.
-type FeriadoBase struct {
-	Nombre          string
-	PagoObligatorio bool
-	// Fija: mes/día constantes cada año. Móvil (Semana Santa): se calcula desde Pascua.
-	Fija         bool
-	Mes, Dia     int // usado cuando Fija = true
-	OffsetPascua int // usado cuando Fija = false (días respecto al Domingo de Pascua)
-}
+// ClaveDiasLaboralesSemana: días ISO hábiles de la semana separados por coma
+// (1 = lunes … 7 = domingo), p. ej. "1,2,3,4,5" o "1,2,3,4,5,6".
+const ClaveDiasLaboralesSemana = "DIAS_LABORALES_SEMANA"
 
-// feriadosCostaRica está tomado del Código de Trabajo Art. 148 (obligatorios,
-// doble pago si se labora) y de las leyes de feriados facultativos (pago no
-// obligatorio). Confirmar con Recursos Humanos antes de usarse como fuente
-// legal definitiva — aquí se documenta como catálogo de referencia, no como
-// texto legal citado.
-var feriadosCostaRica = []FeriadoBase{
-	{Nombre: "Año Nuevo", PagoObligatorio: true, Fija: true, Mes: 1, Dia: 1},
-	{Nombre: "Jueves Santo", PagoObligatorio: true, Fija: false, OffsetPascua: -3},
-	{Nombre: "Viernes Santo", PagoObligatorio: true, Fija: false, OffsetPascua: -2},
-	{Nombre: "Día de Juan Santamaría", PagoObligatorio: true, Fija: true, Mes: 4, Dia: 11},
-	{Nombre: "Día Internacional del Trabajador", PagoObligatorio: true, Fija: true, Mes: 5, Dia: 1},
-	{Nombre: "Anexión del Partido de Nicoya", PagoObligatorio: true, Fija: true, Mes: 7, Dia: 25},
-	{Nombre: "Virgen de los Ángeles", PagoObligatorio: false, Fija: true, Mes: 8, Dia: 2},
-	{Nombre: "Día de la Madre", PagoObligatorio: true, Fija: true, Mes: 8, Dia: 15},
-	{Nombre: "Independencia de Costa Rica", PagoObligatorio: true, Fija: true, Mes: 9, Dia: 15},
-	{Nombre: "Día de las Culturas", PagoObligatorio: false, Fija: true, Mes: 10, Dia: 12},
-	{Nombre: "Navidad", PagoObligatorio: true, Fija: true, Mes: 12, Dia: 25},
-}
+const (
+	feriadoFijo  = "fijo"
+	feriadoMovil = "movil"
 
-// pascuaOccidental calcula la fecha del Domingo de Pascua para un año dado
-// usando el algoritmo de Meeus/Jones/Butcher (calendario gregoriano).
+	largoMaximoNombreFeriado = 100
+)
+
+var (
+	ErrDiasLaboralesNoConfigurados = fmt.Errorf("falta el parámetro %s: defina los días hábiles de la semana antes de generar el calendario", ClaveDiasLaboralesSemana)
+	ErrDiasLaboralesInvalidos      = fmt.Errorf("%s debe listar días del 1 (lunes) al 7 (domingo) separados por coma, sin repetir", ClaveDiasLaboralesSemana)
+	ErrCatalogoFeriadosVacio       = errors.New("el catálogo de feriados no tiene feriados activos para el año solicitado")
+	ErrFeriadoCatalogoInvalido     = errors.New("feriado de catálogo inválido")
+	ErrFeriadoCatalogoNoEncontrado = errors.New("feriado de catálogo no encontrado")
+)
+
 func pascuaOccidental(anio int) time.Time {
 	a := anio % 19
 	b := anio / 100
@@ -58,80 +53,236 @@ func pascuaOccidental(anio int) time.Time {
 	return time.Date(anio, time.Month(mes), dia, 0, 0, 0, 0, time.UTC)
 }
 
-// ResolverFeriadosAnio calcula las fechas concretas de los feriados de CR para un
-// año dado, a partir del catálogo fijo + móvil.
-func ResolverFeriadosAnio(anio int) []dto.CrearFeriadoParams {
-	pascua := pascuaOccidental(anio)
-	feriados := make([]dto.CrearFeriadoParams, 0, len(feriadosCostaRica))
-
-	for _, f := range feriadosCostaRica {
-		var fecha time.Time
-		tipo := "fijo"
-		if f.Fija {
-			fecha = time.Date(anio, time.Month(f.Mes), f.Dia, 0, 0, 0, 0, time.UTC)
-		} else {
-			fecha = pascua.AddDate(0, 0, f.OffsetPascua)
-			tipo = "movil"
+// ParsearDiasLaborales convierte el valor de DIAS_LABORALES_SEMANA en el
+// conjunto de días ISO hábiles.
+func ParsearDiasLaborales(valor string) (map[int]bool, error) {
+	dias := map[int]bool{}
+	for _, parte := range strings.Split(valor, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(parte))
+		if err != nil || n < 1 || n > 7 || dias[n] {
+			return nil, ErrDiasLaboralesInvalidos
 		}
-		feriados = append(feriados, dto.CrearFeriadoParams{
-			Fecha:           fecha,
-			Nombre:          f.Nombre,
-			Tipo:            tipo,
-			PagoObligatorio: f.PagoObligatorio,
-			Anio:            int32(anio),
-		})
+		dias[n] = true
 	}
-	return feriados
+	return dias, nil
 }
 
-// GenerarCalendarioAnual siembra `feriados` y `calendario_laboral_dia` para un
-// año completo, todo en UNA transacción auditada (WithAuditContext): o queda el
-// año completo o no queda nada. Idempotente: usa ON DUPLICATE KEY UPDATE en las
-// queries, así que se puede volver a correr para re-sincronizar sin duplicar
-// filas. usuarioID es quien dispara la generación (queda en auditoría).
+// ValidarFeriadoCatalogo exige la forma propia de cada tipo: un feriado fijo
+// tiene mes y día válidos; uno móvil, solo el desplazamiento desde Pascua.
+func ValidarFeriadoCatalogo(f dto.FeriadoCatalogo) error {
+	invalido := func(motivo string) error { return fmt.Errorf("%w: %s", ErrFeriadoCatalogoInvalido, motivo) }
+	nombre := strings.TrimSpace(f.Nombre)
+	if nombre == "" || utf8.RuneCountInString(nombre) > largoMaximoNombreFeriado {
+		return invalido("nombre requerido, máximo 100 caracteres")
+	}
+	if strings.TrimSpace(f.FuenteLegal) == "" {
+		return invalido("fuente_legal es requerida")
+	}
+	if f.AnioDesde < 1900 || (f.AnioHasta != nil && *f.AnioHasta < f.AnioDesde) {
+		return invalido("rango de años inválido")
+	}
+	switch f.Tipo {
+	case feriadoFijo:
+		if f.Mes == nil || f.Dia == nil || f.DesplazamientoPascua != nil {
+			return invalido("un feriado fijo requiere mes y día, sin desplazamiento_pascua")
+		}
+		fecha := time.Date(2024, time.Month(*f.Mes), *f.Dia, 0, 0, 0, 0, time.UTC)
+		if *f.Mes < 1 || *f.Mes > 12 || fecha.Day() != *f.Dia {
+			return invalido("mes y día no forman una fecha válida")
+		}
+	case feriadoMovil:
+		if f.DesplazamientoPascua == nil || f.Mes != nil || f.Dia != nil {
+			return invalido("un feriado móvil requiere desplazamiento_pascua, sin mes ni día")
+		}
+		if *f.DesplazamientoPascua < -70 || *f.DesplazamientoPascua > 70 {
+			return invalido("desplazamiento_pascua fuera de rango (-70 a 70)")
+		}
+	default:
+		return invalido("tipo debe ser fijo o movil")
+	}
+	return nil
+}
+
+// ResolverFeriadosAnio fija la fecha de cada feriado del catálogo en el año.
+// Dos feriados que caen el mismo día se fusionan: nombres unidos y pago
+// obligatorio si lo es cualquiera de ellos.
+func ResolverFeriadosAnio(anio int, catalogo []dto.FeriadoCatalogo) ([]dto.CrearFeriadoParams, error) {
+	pascua := pascuaOccidental(anio)
+	porFecha := map[time.Time]*dto.CrearFeriadoParams{}
+	for _, f := range catalogo {
+		if err := ValidarFeriadoCatalogo(f); err != nil {
+			return nil, fmt.Errorf("feriado %q del catálogo: %w", f.Nombre, err)
+		}
+		fecha := pascua.AddDate(0, 0, intOCero(f.DesplazamientoPascua))
+		if f.Tipo == feriadoFijo {
+			if *f.Mes == 2 && *f.Dia == 29 && !esBisiesto(anio) {
+				continue
+			}
+			fecha = time.Date(anio, time.Month(*f.Mes), *f.Dia, 0, 0, 0, 0, time.UTC)
+		}
+		if previo, ok := porFecha[fecha]; ok {
+			previo.Nombre = recortar(previo.Nombre+" / "+f.Nombre, largoMaximoNombreFeriado)
+			previo.PagoObligatorio = previo.PagoObligatorio || f.PagoObligatorio
+			if f.Tipo == feriadoFijo {
+				previo.Tipo = feriadoFijo
+			}
+			continue
+		}
+		porFecha[fecha] = &dto.CrearFeriadoParams{
+			Fecha:           fecha,
+			Nombre:          strings.TrimSpace(f.Nombre),
+			Tipo:            f.Tipo,
+			PagoObligatorio: f.PagoObligatorio,
+			Anio:            int32(anio),
+		}
+	}
+	out := make([]dto.CrearFeriadoParams, 0, len(porFecha))
+	for _, p := range porFecha {
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Fecha.Before(out[j].Fecha) })
+	return out, nil
+}
+
+func intOCero(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func esBisiesto(anio int) bool {
+	return anio%4 == 0 && (anio%100 != 0 || anio%400 == 0)
+}
+
+func recortar(s string, maximo int) string {
+	if utf8.RuneCountInString(s) <= maximo {
+		return s
+	}
+	return string([]rune(s)[:maximo])
+}
+
+func (s *Service) diasLaborales(ctx context.Context, fecha time.Time) (map[int]bool, error) {
+	valor, err := s.parametros.Texto(ctx, ClaveDiasLaboralesSemana, fecha)
+	var noConfigurado parametros.ErrParametroNoConfigurado
+	if errors.As(err, &noConfigurado) {
+		return nil, ErrDiasLaboralesNoConfigurados
+	}
+	if err != nil {
+		return nil, fmt.Errorf("leyendo %s: %w", ClaveDiasLaboralesSemana, err)
+	}
+	return ParsearDiasLaborales(valor)
+}
+
+// GenerarCalendarioAnual siembra `feriados` y `calendario_laboral_dia` del año
+// a partir del catálogo de feriados y de DIAS_LABORALES_SEMANA vigentes al 1
+// de enero, en una sola transacción auditada. Regenerar un año lo sincroniza:
+// los feriados que ya no están en el catálogo se eliminan.
 func (s *Service) GenerarCalendarioAnual(ctx context.Context, anio int, usuarioID int64) error {
 	if anio < 2000 || anio > 2100 {
 		return fmt.Errorf("%w: %d (permitido 2000–2100)", ErrAnioFueraDeRango, anio)
 	}
+	inicio := time.Date(anio, time.January, 1, 0, 0, 0, 0, time.UTC)
+	fin := time.Date(anio, time.December, 31, 0, 0, 0, 0, time.UTC)
+	habiles, err := s.diasLaborales(ctx, inicio)
+	if err != nil {
+		return err
+	}
 
 	return db.WithAuditContext(ctx, s.sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
+		catalogo, err := q.ListarFeriadosCatalogoAnio(ctx, anio)
+		if err != nil {
+			return fmt.Errorf("leyendo catálogo de feriados: %w", err)
+		}
+		if len(catalogo) == 0 {
+			return ErrCatalogoFeriadosVacio
+		}
+		resueltos, err := ResolverFeriadosAnio(anio, catalogo)
+		if err != nil {
+			return err
+		}
+
 		feriadosPorFecha := map[string]int64{}
-		for _, params := range ResolverFeriadosAnio(anio) {
+		vigentes := make([]int64, 0, len(resueltos))
+		for _, params := range resueltos {
 			feriado, err := q.CrearFeriado(ctx, params)
 			if err != nil {
 				return fmt.Errorf("insertando feriado %s: %w", params.Nombre, err)
 			}
-			feriadosPorFecha[feriado.Fecha.Format("2006-01-02")] = feriado.ID
+			feriadosPorFecha[feriado.Fecha.Format(time.DateOnly)] = feriado.ID
+			vigentes = append(vigentes, feriado.ID)
 		}
-
-		inicio := time.Date(anio, time.January, 1, 0, 0, 0, 0, time.UTC)
-		fin := time.Date(anio, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 		for d := inicio; !d.After(fin); d = d.AddDate(0, 0, 1) {
 			diaSemana := int(d.Weekday())
 			if diaSemana == 0 {
-				diaSemana = 7 // domingo = 7, para que 1=lunes...7=domingo
+				diaSemana = 7
 			}
-
-			feriadoID, esFeriado := feriadosPorFecha[d.Format("2006-01-02")]
-			esHabil := diaSemana <= 5 && !esFeriado // regla base: lunes-viernes, sin feriado
-
+			feriadoID, esFeriado := feriadosPorFecha[d.Format(time.DateOnly)]
 			var feriadoIDParam *int64
 			if esFeriado {
 				feriadoIDParam = &feriadoID
 			}
-
 			if err := q.InsertarDiaCalendario(ctx, dto.InsertarDiaCalendarioParams{
 				Fecha:     d,
 				Anio:      int32(anio),
-				EsHabil:   esHabil,
+				EsHabil:   habiles[diaSemana] && !esFeriado,
 				EsFeriado: esFeriado,
 				FeriadoID: feriadoIDParam,
 				DiaSemana: int16(diaSemana),
 			}); err != nil {
-				return fmt.Errorf("insertando día de calendario %s: %w", d.Format("2006-01-02"), err)
+				return fmt.Errorf("insertando día de calendario %s: %w", d.Format(time.DateOnly), err)
 			}
+		}
+		if err := q.EliminarFeriadosAnioExcepto(ctx, int32(anio), vigentes); err != nil {
+			return fmt.Errorf("eliminando feriados que ya no están en el catálogo: %w", err)
 		}
 		return nil
 	})
+}
+
+func (s *Service) ListarFeriadosCatalogo(ctx context.Context) ([]dto.FeriadoCatalogo, error) {
+	return s.queries.ListarFeriadosCatalogo(ctx)
+}
+
+func (s *Service) CrearFeriadoCatalogo(ctx context.Context, f dto.FeriadoCatalogo, usuarioID int64) (dto.FeriadoCatalogo, error) {
+	f.Nombre, f.FuenteLegal = strings.TrimSpace(f.Nombre), strings.TrimSpace(f.FuenteLegal)
+	if err := ValidarFeriadoCatalogo(f); err != nil {
+		return dto.FeriadoCatalogo{}, err
+	}
+	var creado dto.FeriadoCatalogo
+	err := db.WithAuditContext(ctx, s.sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
+		id, err := q.CrearFeriadoCatalogo(ctx, f, usuarioID)
+		if err != nil {
+			return err
+		}
+		creado, err = q.ObtenerFeriadoCatalogo(ctx, id)
+		return err
+	})
+	return creado, err
+}
+
+func (s *Service) ActualizarFeriadoCatalogo(ctx context.Context, f dto.FeriadoCatalogo, usuarioID int64) (dto.FeriadoCatalogo, error) {
+	f.Nombre, f.FuenteLegal = strings.TrimSpace(f.Nombre), strings.TrimSpace(f.FuenteLegal)
+	if err := ValidarFeriadoCatalogo(f); err != nil {
+		return dto.FeriadoCatalogo{}, err
+	}
+	var actualizado dto.FeriadoCatalogo
+	err := db.WithAuditContext(ctx, s.sqlDB, usuarioID, func(ctx context.Context, q *dto.Queries) error {
+		if existe, err := q.ExisteFeriadoCatalogo(ctx, f.ID); err != nil {
+			return err
+		} else if !existe {
+			return ErrFeriadoCatalogoNoEncontrado
+		}
+		if _, err := q.ActualizarFeriadoCatalogo(ctx, f); err != nil {
+			return err
+		}
+		var err error
+		actualizado, err = q.ObtenerFeriadoCatalogo(ctx, f.ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrFeriadoCatalogoNoEncontrado
+		}
+		return err
+	})
+	return actualizado, err
 }

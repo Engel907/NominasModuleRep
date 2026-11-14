@@ -1,8 +1,6 @@
-// Package middleware contiene middleware transversal de Gin: manejo de
-// errores, autenticación (auth.go), autorización por permiso
-// (require_permission.go) y endurecimiento HTTP (F16): request_id y logging
-// (logging.go), cabeceras (headers.go), CORS (cors.go), límite de cuerpo
-// (bodylimit.go) y rate limiting (ratelimit.go).
+// Package middleware contiene el middleware transversal de Gin: manejo de
+// errores, autenticación, autorización por permiso, request_id, logging,
+// cabeceras de seguridad, CORS, límite de cuerpo y rate limiting.
 package middleware
 
 import (
@@ -32,7 +30,7 @@ type ErrorBody struct {
 	// Details es opcional: contexto adicional estructurado (p.ej. la lista
 	// "campos" de un datos_invalidos). nil si no aplica.
 	Details interface{} `json:"details,omitempty"`
-	// RequestID (F16/S15) correlaciona la respuesta con la línea de log del
+	// RequestID correlaciona la respuesta con la línea de log del
 	// servidor (el mismo valor va en la cabecera X-Request-ID).
 	RequestID string `json:"request_id,omitempty"`
 }
@@ -63,13 +61,6 @@ func (e *apiError) Unwrap() error {
 // middleware/handlers (equivalente a c.AbortWithStatusJSON, pero pasando
 // por el contrato único vía ErrorHandler). Es la forma esperada de
 // reportar errores desde cualquier handler o middleware de este proyecto.
-//
-// IMPORTANTE: solo registra el error; la respuesta la escribe ErrorHandler,
-// por lo que todo middleware que use Fail debe montarse DESPUÉS de
-// ErrorHandler en la cadena global.
-//
-//	middleware.Fail(c, http.StatusForbidden, "permission_denied",
-//	    "No tenés permiso para esta acción", gin.H{"permiso_requerido": "planilla.aprobar"})
 func Fail(c *gin.Context, status int, code, message string, details interface{}) {
 	_ = c.Error(&apiError{status: status, code: code, message: message, details: details})
 	c.Abort()
@@ -86,16 +77,8 @@ func FailFromError(c *gin.Context, status int, code, message string, cause error
 // ErrorHandler es middleware global (montado una sola vez en app.newRouter)
 // que centraliza la traducción de cualquier error acumulado en el contexto
 // de Gin al contrato único ErrorResponse. Debe montarse después de
-// RequestID/RequestLogger/Recovery y ANTES de CORS, límites y rutas (esos
+// RequestID/RequestLogger/Recovery y antes de CORS, límites y rutas (esos
 // usan Fail).
-//
-// Acepta tanto *apiError (Fail/FailFromError/RespondWithError) como errores
-// crudos registrados con c.Error(err): estos pasan por traducirError, así
-// que *ErrParametroInvalido -> 400, errores de dominio -> su código, y lo
-// desconocido -> 500 genérico.
-//
-// Si el handler ya escribió el cuerpo (doble respuesta), NO escribe otra:
-// lo deja en el log como advertencia.
 func ErrorHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
@@ -104,15 +87,11 @@ func ErrorHandler() gin.HandlerFunc {
 			return
 		}
 
-		// Se usa el último error reportado: en la práctica un handler
-		// aborta en el primer Fail/FailFromError, así que suele haber uno
-		// solo, pero por robustez tomamos el más reciente.
 		last := c.Errors.Last()
 		apiErr := traducirError(last.Err)
 
 		ctx := c.Request.Context()
 		if apiErr.cause != nil {
-			// El detalle interno SOLO va al log, nunca al cliente.
 			attrs := []any{
 				slog.String("code", apiErr.code),
 				slog.Int("status", apiErr.status),

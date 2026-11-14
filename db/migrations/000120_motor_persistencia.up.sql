@@ -1,5 +1,3 @@
--- 000120: DDL de persistencia del cálculo de planilla (L1)
-
 ALTER TABLE periodos_planilla
   ADD COLUMN parametros_snapshot JSON NULL COMMENT 'Parámetros resueltos (en fracción) usados en el último cálculo',
   ADD COLUMN version_motor VARCHAR(40) NULL COMMENT 'Versión del motor que calculó el período';
@@ -12,7 +10,7 @@ ALTER TABLE planilla_detalle_empleado
   ADD COLUMN base_cesantia DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Acumula para cesantía',
   ADD COLUMN base_vacaciones DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Acumula para vacaciones',
   ADD COLUMN cuota_obrera_ccss DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Cuota obrera CCSS retenida',
-  ADD COLUMN cuota_patronal_ccss DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Cuota patronal total (persistida, D20)',
+  ADD COLUMN cuota_patronal_ccss DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Cuota patronal total (persistida)',
   ADD COLUMN renta_bruta DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Impuesto de renta antes de créditos',
   ADD COLUMN creditos_fiscales_aplicados DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Créditos fiscales efectivamente aplicados',
   ADD COLUMN renta_neta DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Renta retenida',
@@ -23,7 +21,7 @@ ALTER TABLE planilla_detalle_empleado
 CREATE TABLE planilla_detalle_patronal (
   id                           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador',
   planilla_detalle_empleado_id BIGINT UNSIGNED NOT NULL COMMENT 'Línea del empleado',
-  concepto_salarial_id         BIGINT UNSIGNED NOT NULL COMMENT 'Concepto patronal (CCSS_PAT en modelo agregado, D6)',
+  concepto_salarial_id         BIGINT UNSIGNED NOT NULL COMMENT 'Concepto patronal (CCSS_PAT en modelo agregado)',
   base                         DECIMAL(14,2) NOT NULL COMMENT 'Base sobre la que se calculó',
   porcentaje                   DECIMAL(9,6)  NOT NULL COMMENT 'FRACCIÓN (0.2683), nunca porcentaje',
   monto                        DECIMAL(14,2) NOT NULL COMMENT 'Cuota patronal',
@@ -35,7 +33,7 @@ CREATE TABLE planilla_detalle_patronal (
 
 ALTER TABLE planilla_detalle_embargo
   ADD COLUMN monto_calculado   DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'Lo que correspondía según % o monto fijo, antes de topes',
-  ADD COLUMN monto_insatisfecho DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'monto_calculado - monto (D19: se persiste, no se arrastra)';
+  ADD COLUMN monto_insatisfecho DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT 'monto_calculado - monto (se persiste, no se arrastra)';
 UPDATE planilla_detalle_embargo SET monto_calculado = monto WHERE monto_calculado = 0;
 ALTER TABLE planilla_detalle_embargo
   ADD CONSTRAINT chk_pdemb_calc CHECK (monto_calculado >= monto AND monto_insatisfecho = monto_calculado - monto);
@@ -85,7 +83,6 @@ CREATE TABLE planilla_devengos_manuales (
   KEY ix_pdm_periodo_emp (periodo_planilla_id, empleado_id)
 ) ENGINE=InnoDB COMMENT='Devengos capturados a mano (comisiones, bonos, viáticos) consumidos por el cálculo';
 
--- Auditoría de planilla_devengos_manuales (salida de scripts/gen_auditoria.sh)
 DROP TRIGGER IF EXISTS trg_aud_planilla_devengos_manuales_ins;
 CREATE TRIGGER trg_aud_planilla_devengos_manuales_ins AFTER INSERT ON planilla_devengos_manuales
 FOR EACH ROW
@@ -110,9 +107,6 @@ BEGIN
   VALUES ('planilla_devengos_manuales', OLD.id, @auditoria_usuario_id, 'delete', JSON_OBJECT('id', OLD.id, 'periodo_planilla_id', OLD.periodo_planilla_id, 'empleado_id', OLD.empleado_id, 'concepto_salarial_id', OLD.concepto_salarial_id, 'monto', OLD.monto, 'observacion', OLD.observacion, 'creado_por', OLD.creado_por), NULL);
 END;
 
--- Regenera los triggers existentes para incluir las columnas incorporadas en
--- 000119 y 000120. planilla_detalle_embargo no tenía triggers de auditoría;
--- su protección por inmutabilidad se agrega en 000121.
 DROP TRIGGER IF EXISTS trg_aud_periodos_planilla_ins;
 CREATE TRIGGER trg_aud_periodos_planilla_ins AFTER INSERT ON periodos_planilla
 FOR EACH ROW

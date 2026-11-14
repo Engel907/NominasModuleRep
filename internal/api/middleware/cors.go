@@ -8,23 +8,6 @@ import (
 
 // CORS implementa CORS con LISTA BLANCA exacta de orígenes
 // (CORS_ALLOWED_ORIGINS). Decisiones:
-//
-//   - Nunca se emite "Access-Control-Allow-Origin: *" (config.validate además
-//     rechaza "*" en la lista) y nunca "Access-Control-Allow-Credentials":
-//     la API autentica con Authorization: Bearer, no con cookies, así que no
-//     hace falta, y así "* + credenciales" es imposible por construcción.
-//   - Lista vacía = ningún origen cross-origin permitido (solo same-origin y
-//     clientes no-navegador, que no mandan Origin).
-//   - Preflight (OPTIONS + Access-Control-Request-Method) de un origen NO
-//     permitido -> 403 sin cabeceras CORS. Una petición normal de un origen
-//     no permitido sigue su curso SIN cabeceras CORS (el navegador bloquea la
-//     lectura de la respuesta; CORS no es un control de acceso del servidor:
-//     eso lo hacen AuthPASETO y RequirePermission).
-//   - Se responde el preflight acá (204) porque las rutas no registran OPTIONS.
-//
-// Debe montarse DESPUÉS de ErrorHandler (usa Fail) y antes de AuthPASETO y los
-// limitadores, para que un preflight —que no lleva Authorization— no sea
-// rechazado por autenticación.
 func CORS(origenesPermitidos []string) gin.HandlerFunc {
 	permitidos := make(map[string]struct{}, len(origenesPermitidos))
 	for _, o := range origenesPermitidos {

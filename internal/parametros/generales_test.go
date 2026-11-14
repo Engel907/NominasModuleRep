@@ -80,7 +80,6 @@ func TestNoConfigurado(t *testing.T) {
 	if nc.Clave != "NO_EXISTE" || !nc.Fecha.Equal(time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("campos del error: %+v", nc)
 	}
-	// Todos los accesores respetan D8.
 	if _, err := g.Decimal(ctx, "X", fecha); !errors.As(err, &nc) {
 		t.Errorf("Decimal: %v", err)
 	}
@@ -131,17 +130,17 @@ func TestCacheTTLEInvalidar(t *testing.T) {
 	ctx := context.Background()
 
 	g.Entero(ctx, "E", fecha)
-	g.Entero(ctx, "E", fecha.Add(3*time.Hour)) // misma fecha calendario -> misma llave
+	g.Entero(ctx, "E", fecha.Add(3*time.Hour))
 	if r.llamadas != 1 {
 		t.Fatalf("dentro del TTL debe leerse 1 vez, fueron %d", r.llamadas)
 	}
 
-	g.Entero(ctx, "E", fecha.AddDate(0, 0, 1)) // otra fecha -> otra llave
+	g.Entero(ctx, "E", fecha.AddDate(0, 0, 1))
 	if r.llamadas != 2 {
 		t.Fatalf("otra fecha debe consultar, llamadas=%d", r.llamadas)
 	}
 
-	reloj = reloj.Add(2 * time.Minute) // expira
+	reloj = reloj.Add(2 * time.Minute)
 	g.Entero(ctx, "E", fecha)
 	if r.llamadas != 3 {
 		t.Fatalf("tras el TTL debe consultar, llamadas=%d", r.llamadas)

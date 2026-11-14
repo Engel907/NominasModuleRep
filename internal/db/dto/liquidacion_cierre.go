@@ -1,21 +1,3 @@
-// internal/db/dto/liquidacion_cierre.go
-//
-// F08 — Lecturas de las escalas de cesantía y preaviso que necesita el motor
-// de liquidaciones (internal/services/liquidacion_service.go).
-//
-// CerrarContratoVigente (contratos.go), CerrarDatosLaboralesVigente y
-// SetEmpleadoActivo (empleados.go) YA existen con firma posicional (≤ 3
-// argumentos) y no se duplican aquí: declararlas de nuevo sería un error de
-// compilación (método redeclarado). El servicio las llama tal cual están.
-//
-// Los tipos de retorno son de dto (no de services) porque services importa dto
-// y no al revés; el servicio convierte estas filas a EscalonCesantia /
-// EscalonPreaviso.
-//
-// Ambas escalas se resuelven por regimen_laboral_id y por fecha de vigencia
-// (fecha_inicio_vigencia <= fecha AND (fecha_fin_vigencia IS NULL OR
-// fecha_fin_vigencia >= fecha)), no por es_vigente: una liquidación con fecha
-// de salida pasada debe usar la escala que regía en esa fecha.
 package dto
 
 import (

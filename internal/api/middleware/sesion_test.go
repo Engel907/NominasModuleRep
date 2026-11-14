@@ -27,14 +27,12 @@ func TestSesionCacheTTL(t *testing.T) {
 	require.True(t, a)
 	require.EqualValues(t, 1, v)
 
-	// Cambio en BD (rol revocado / desactivado) no se ve dentro del TTL...
 	activo, pv = false, 2
 	a, v, _ = c.EstadoSesion(context.Background(), 1)
 	require.True(t, a)
 	require.EqualValues(t, 1, v)
 	require.EqualValues(t, 1, llamadas.Load())
 
-	// ...y sí al vencer: la revocación cuesta como máximo AUTH_CACHE_TTL.
 	ahora = ahora.Add(5*time.Second + time.Millisecond)
 	a, v, _ = c.EstadoSesion(context.Background(), 1)
 	require.False(t, a)
@@ -71,7 +69,7 @@ func TestSesionCacheSingleflight(t *testing.T) {
 		llamadas.Add(1)
 		<-liberar
 		return true, 1, nil
-	}, 0) // sin caché: solo singleflight deduplica
+	}, 0)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {

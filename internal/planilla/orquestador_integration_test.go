@@ -13,16 +13,15 @@ import (
 )
 
 // Adaptadores de planilla/infra re-declarados aquí: infra importa planilla, así
-// que este test interno no puede importarlo. Deben reflejar infra tal cual
-// (motor_repository.go y parametros_repository.go).
+// que este test interno no puede importarlo. Deben reflejar infra tal cual.
 type motorRepoSQL struct{ q *dto.Queries }
 
 func (r motorRepoSQL) ObtenerContratoVigenteEnFecha(ctx context.Context, emp int64, f time.Time) (ContratoVigente, error) {
 	x, err := r.q.ObtenerContratoVigenteEnFecha(ctx, emp, f)
 	return ContratoVigente(x), err
 }
-func (r motorRepoSQL) ListarConceptosAplicablesEnFecha(ctx context.Context, reg, tipo int64, f time.Time) ([]ConceptoAplicableFila, error) {
-	rows, err := r.q.ListarConceptosAplicablesEnFecha(ctx, reg, tipo, f)
+func (r motorRepoSQL) ListarConceptosAplicablesEnFecha(ctx context.Context, emp, reg, tipo int64, f time.Time) ([]ConceptoAplicableFila, error) {
+	rows, err := r.q.ListarConceptosAplicablesEnFecha(ctx, emp, reg, tipo, f)
 	if err != nil {
 		return nil, err
 	}
@@ -31,8 +30,10 @@ func (r motorRepoSQL) ListarConceptosAplicablesEnFecha(ctx context.Context, reg,
 		c := ConceptoAplicableFila{
 			ConceptoOrdenCalculo: ConceptoOrdenCalculo{ConceptoSalarialID: x.ConceptoSalarialID, Codigo: x.Codigo, OrdenCalculo: x.OrdenCalculo,
 				AfectaBaseCCSS: x.AfectaBaseCCSS, AfectaBaseRenta: x.AfectaBaseRenta, AfectaBaseAguinaldo: x.AfectaBaseAguinaldo,
-				AfectaBaseCesantia: x.AfectaBaseCesantia, AfectaBaseVacaciones: x.AfectaBaseVacaciones},
+				AfectaBaseCesantia: x.AfectaBaseCesantia, AfectaBaseVacaciones: x.AfectaBaseVacaciones, AfectaBaseEmbargo: x.AfectaBaseEmbargo,
+				EsDeduccionObligatoria: x.EsDeduccionObligatoria},
 			Naturaleza: x.Naturaleza, TipoCalculo: x.TipoCalculo, FormulaID: x.FormulaID, ExpresionFormula: x.ExpresionFormula,
+			FormulaEmpleadoID: x.FormulaEmpleadoID,
 		}
 		if x.MontoFijo.Valid {
 			m := x.MontoFijo.Decimal
@@ -61,9 +62,13 @@ VALUES (?, '300000', 'decimal', 'fixture de prueba', 'FIXTURE DE PRUEBA', '2026-
 func (f *fixtureCalculo) servicio() *PeriodoService {
 	q := dto.New(f.db)
 	w := &EscritorDetalle{}
+	repo := parametros.NewRepositorioSQL(f.db)
+	gen := parametros.NewGenerales(repo, 0).ConValoresPorEmpleado(repo)
 	orq := NewOrquestador(NewHidratador(q), NewMotorEmpleado(motorRepoSQL{q}),
-		NewCargadorParametros(fuenteCargadorSQL{q}, parametros.NewGenerales(parametros.NewRepositorioSQL(f.db), 0)), w, q)
-	return NewPeriodoService(f.db, PeriodoGanchos{Calculador: orq, Eliminador: w})
+		NewCargadorParametros(fuenteCargadorSQL{q}, gen).
+			ConAjustesPorEmpleado(q, func(id int64) GeneralesLector { return gen.ParaEmpleado(id) }), w, q, NewVentanas(gen))
+	return NewPeriodoService(f.db, PeriodoGanchos{Calculador: orq, Eliminador: w,
+		AlAprobar: GanchosAlAprobar{NewAplicadorPrestamos(), NewAplicadorAcumulados(), NewAplicadorVacaciones()}})
 }
 
 type fuenteCargadorSQL struct{ *dto.Queries }
@@ -80,7 +85,7 @@ func (s fuenteCargadorSQL) ListarBaseMinimaContributivaEnFecha(ctx context.Conte
 func (s fuenteCargadorSQL) ListarEscalaEmbargoEnFecha(ctx context.Context, fecha time.Time) ([]TramoEscalaEmbargo, error) {
 	rows, err := s.Queries.ListarEscalaEmbargoEnFecha(ctx, fecha)
 	out := make([]TramoEscalaEmbargo, 0, len(rows))
-	for i, r := range rows { // igual que infra.fuenteParametros
+	for i, r := range rows {
 		out = append(out, TramoEscalaEmbargo{OrdenTramo: int32(i + 1), SalarioDesde: r.DesdeMultiplo, SalarioHasta: r.HastaMultiplo, Porcentaje: r.PorcentajeMaximo})
 	}
 	return out, err
@@ -96,7 +101,7 @@ func marzo(t *testing.T, svc *PeriodoService, f *fixtureCalculo) dto.PeriodoCicl
 	return p
 }
 
-func TestL8CicloCompletoTresEmpleados(t *testing.T) {
+func TestCicloCompletoTresEmpleados(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	f.sembrarSalarioMinimoInembargable(t)
 	svc := f.servicio()
@@ -125,7 +130,8 @@ func TestL8CicloCompletoTresEmpleados(t *testing.T) {
 		t.Fatalf("cuadra=%d version=%q snapshot_valido=%d", cuadra, version, snapshotValido)
 	}
 	var pctObrero string
-	if err := f.db.QueryRow(`SELECT JSON_UNQUOTE(JSON_EXTRACT(parametros_snapshot, '$.parametros.CargaSocial.PorcentajeObrero')) FROM periodos_planilla WHERE id = ?`, p.ID).
+	if err := f.db.QueryRow(`SELECT JSON_UNQUOTE(JSON_EXTRACT(pp.parametros_snapshot, CONCAT('$.parametros.CargasSociales."', cs.id, '"."0".PorcentajeObrero')))
+		FROM periodos_planilla pp JOIN conceptos_salariales cs ON cs.codigo = 'CCSS_OBR' WHERE pp.id = ?`, p.ID).
 		Scan(&pctObrero); err != nil || pctObrero != "0.1083" {
 		t.Errorf("snapshot debe guardar el %% obrero en fracción: %q, %v", pctObrero, err)
 	}
@@ -146,7 +152,6 @@ WHERE pde.periodo_planilla_id = ? AND pde.empleado_id = ? AND cs.codigo = ?`, p.
 		}
 		return m
 	}
-	// 700 000 / 240 h × 6 h × 1.5 = 26 250
 	casos := []struct {
 		emp           int64
 		codigo, monto string
@@ -165,7 +170,6 @@ WHERE pde.periodo_planilla_id = ? AND pde.empleado_id = ? AND cs.codigo = ?`, p.
 		t.Errorf("cuota patronal persistida = %s, %v (900 000 × 26.83 %%)", patronal, err)
 	}
 
-	// Recalcular no duplica.
 	if p, err = svc.Recalcular(ctx, f.preparador, p.ID); err != nil {
 		t.Fatalf("recalcular: %v", err)
 	}
@@ -173,7 +177,6 @@ WHERE pde.periodo_planilla_id = ? AND pde.empleado_id = ? AND cs.codigo = ?`, p.
 		t.Fatalf("tras recalcular: %v, versión %d", n, p.VersionCalculo)
 	}
 
-	// Aprobar y pagar con usuarios distintos (segregación).
 	if _, err := svc.Aprobar(ctx, f.preparador, p.ID); !errors.Is(err, ErrSegregacionFunciones) {
 		t.Fatalf("quien calculó no puede aprobar: %v", err)
 	}
@@ -185,12 +188,10 @@ WHERE pde.periodo_planilla_id = ? AND pde.empleado_id = ? AND cs.codigo = ?`, p.
 	}
 }
 
-func TestL8EmpleadoConErrorNoPersisteNada(t *testing.T) {
+func TestEmpleadoConErrorNoPersisteNada(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	f.sembrarSalarioMinimoInembargable(t)
-	// El empleado 1 pierde sus datos laborales: el resto está bien.
 	mustExec(t, f.db, `DELETE FROM empleado_datos_laborales WHERE empleado_id = ?`, f.emp[1])
-	// El empleado 2 tiene dos boletas que se solapan (descontaría el salario dos veces).
 	f.crearIncapacidad(t)
 	mustExec(t, f.db, `
 INSERT INTO incapacidades (empleado_id, entidad_emisora, numero_boleta, fecha_inicio, fecha_fin, dias, creado_por)
@@ -225,7 +226,7 @@ VALUES (?, 'CCSS', 'B-CALC-2', '2026-03-03', '2026-03-05', 3, ?)`, f.emp[2], f.p
 	}
 }
 
-func TestL8SinSalarioMinimoInembargableEsErrorDeParametros(t *testing.T) {
+func TestSinSalarioMinimoInembargableEsErrorDeParametros(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	svc := f.servicio()
 	p := marzo(t, svc, f)

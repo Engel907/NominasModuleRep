@@ -1,8 +1,5 @@
 // Package parametros expone los parámetros legales/operativos versionados por
 // vigencia. Generales lee parametros_generales (clave-valor tipado).
-//
-// Regla D8: si una clave no está vigente a la fecha pedida, se retorna
-// ErrParametroNoConfigurado. Este paquete nunca devuelve un valor por defecto.
 package parametros
 
 import (
@@ -41,7 +38,7 @@ var ErrTipoIncorrecto = errors.New("parametros: tipo de parámetro incorrecto")
 var ErrValorInvalido = errors.New("parametros: valor almacenado inválido")
 
 // ErrParametroNoConfigurado indica que la clave no existe o no está vigente a
-// la fecha consultada (D8: nunca un valor por defecto).
+// la fecha consultada (nunca un valor por defecto).
 type ErrParametroNoConfigurado struct {
 	Clave string
 	Fecha time.Time
@@ -64,6 +61,13 @@ type Repositorio interface {
 	BuscarVigente(ctx context.Context, clave string, fecha time.Time) (Registro, error)
 }
 
+// RepositorioEmpleado resuelve el valor propio de un empleado
+// (empleado_parametros_generales). ErrNoEncontrado si el empleado usa el
+// valor general.
+type RepositorioEmpleado interface {
+	BuscarVigenteEmpleado(ctx context.Context, empleadoID int64, clave string, fecha time.Time) (Registro, error)
+}
+
 type claveCache struct {
 	clave string
 	fecha string // YYYY-MM-DD
@@ -77,9 +81,10 @@ type entradaCache struct {
 // Generales es el servicio de lectura de parametros_generales, con caché en
 // memoria de TTL corto. Es seguro para uso concurrente.
 type Generales struct {
-	repo  Repositorio
-	ttl   time.Duration
-	ahora func() time.Time
+	repo    Repositorio
+	repoEmp RepositorioEmpleado // nil = sin valores por empleado
+	ttl     time.Duration
+	ahora   func() time.Time
 
 	mu    sync.Mutex
 	cache map[claveCache]entradaCache
@@ -88,12 +93,63 @@ type Generales struct {
 const maxEntradasCache = 4096
 
 // NewGenerales crea el servicio. ttl <= 0 desactiva la caché. El TTL
-// proviene de PARAMETROS_CACHE_TTL (ver config).
+// proviene de PARAMETROS_CACHE_TTL.
 func NewGenerales(repo Repositorio, ttl time.Duration) *Generales {
 	return &Generales{repo: repo, ttl: ttl, ahora: time.Now, cache: make(map[claveCache]entradaCache)}
 }
 
-// Invalidar vacía la caché (lo usará F27 al modificar parámetros).
+// ConValoresPorEmpleado habilita ParaEmpleado.
+func (g *Generales) ConValoresPorEmpleado(r RepositorioEmpleado) *Generales {
+	g.repoEmp = r
+	return g
+}
+
+// GeneralesEmpleado lee los parámetros generales como rigen para un empleado:
+// su valor propio vigente si lo tiene, si no el general. Mismos accesores que
+// Generales.
+type GeneralesEmpleado struct {
+	g          *Generales
+	empleadoID int64
+}
+
+// ParaEmpleado: lector de parámetros generales de un empleado.
+func (g *Generales) ParaEmpleado(empleadoID int64) *GeneralesEmpleado {
+	return &GeneralesEmpleado{g: g, empleadoID: empleadoID}
+}
+
+func (e *GeneralesEmpleado) registro(ctx context.Context, clave string, fecha time.Time) (Registro, error) {
+	if e.g.repoEmp != nil {
+		reg, err := e.g.repoEmp.BuscarVigenteEmpleado(ctx, e.empleadoID, clave, soloFecha(fecha))
+		if err == nil {
+			return reg, nil
+		}
+		if !errors.Is(err, ErrNoEncontrado) {
+			return Registro{}, fmt.Errorf("parametros: leyendo %q del empleado %d: %w", clave, e.empleadoID, err)
+		}
+	}
+	return e.g.registro(ctx, clave, fecha)
+}
+
+func (e *GeneralesEmpleado) Entero(ctx context.Context, clave string, fecha time.Time) (int64, error) {
+	return enteroDe(e.registro(ctx, clave, fecha))
+}
+func (e *GeneralesEmpleado) Decimal(ctx context.Context, clave string, fecha time.Time) (decimal.Decimal, error) {
+	return decimalDeRegistro(e.registro(ctx, clave, fecha))
+}
+func (e *GeneralesEmpleado) Porcentaje(ctx context.Context, clave string, fecha time.Time) (porcentaje.Porcentaje, error) {
+	return porcentajeDe(e.registro(ctx, clave, fecha))
+}
+func (e *GeneralesEmpleado) Texto(ctx context.Context, clave string, fecha time.Time) (string, error) {
+	return textoDe(e.registro(ctx, clave, fecha))
+}
+func (e *GeneralesEmpleado) Fecha(ctx context.Context, clave string, fecha time.Time) (time.Time, error) {
+	return fechaDe(e.registro(ctx, clave, fecha))
+}
+func (e *GeneralesEmpleado) Booleano(ctx context.Context, clave string, fecha time.Time) (bool, error) {
+	return booleanoDe(e.registro(ctx, clave, fecha))
+}
+
+// Invalidar vacía la caché (lo usará al modificar parámetros).
 func (g *Generales) Invalidar() {
 	g.mu.Lock()
 	g.cache = make(map[claveCache]entradaCache)
@@ -122,7 +178,6 @@ func (g *Generales) registro(ctx context.Context, clave string, fecha time.Time)
 		return Registro{}, fmt.Errorf("parametros: leyendo %q: %w", clave, err)
 	}
 
-	// Solo se cachean aciertos: un parámetro recién configurado debe verse de inmediato.
 	if g.ttl > 0 {
 		g.mu.Lock()
 		if len(g.cache) >= maxEntradasCache {
@@ -156,7 +211,36 @@ func valorInvalido(reg Registro, err error) error {
 
 // Entero devuelve el parámetro de tipo entero.
 func (g *Generales) Entero(ctx context.Context, clave string, fecha time.Time) (int64, error) {
-	reg, err := g.registro(ctx, clave, fecha)
+	return enteroDe(g.registro(ctx, clave, fecha))
+}
+
+// Decimal devuelve el parámetro de tipo decimal (acepta también entero).
+func (g *Generales) Decimal(ctx context.Context, clave string, fecha time.Time) (decimal.Decimal, error) {
+	return decimalDeRegistro(g.registro(ctx, clave, fecha))
+}
+
+// Porcentaje devuelve el parámetro de tipo porcentaje. El valor se almacena
+// como porcentaje (10.83); la conversión la hace internal/shared/porcentaje.
+func (g *Generales) Porcentaje(ctx context.Context, clave string, fecha time.Time) (porcentaje.Porcentaje, error) {
+	return porcentajeDe(g.registro(ctx, clave, fecha))
+}
+
+// Texto devuelve el parámetro de tipo texto.
+func (g *Generales) Texto(ctx context.Context, clave string, fecha time.Time) (string, error) {
+	return textoDe(g.registro(ctx, clave, fecha))
+}
+
+// Fecha devuelve el parámetro de tipo fecha (formato YYYY-MM-DD, en UTC).
+func (g *Generales) Fecha(ctx context.Context, clave string, fecha time.Time) (time.Time, error) {
+	return fechaDe(g.registro(ctx, clave, fecha))
+}
+
+// Booleano devuelve el parámetro de tipo booleano ("true"/"false"/"1"/"0").
+func (g *Generales) Booleano(ctx context.Context, clave string, fecha time.Time) (bool, error) {
+	return booleanoDe(g.registro(ctx, clave, fecha))
+}
+
+func enteroDe(reg Registro, err error) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
@@ -170,9 +254,7 @@ func (g *Generales) Entero(ctx context.Context, clave string, fecha time.Time) (
 	return n, nil
 }
 
-// Decimal devuelve el parámetro de tipo decimal (acepta también entero).
-func (g *Generales) Decimal(ctx context.Context, clave string, fecha time.Time) (decimal.Decimal, error) {
-	reg, err := g.registro(ctx, clave, fecha)
+func decimalDeRegistro(reg Registro, err error) (decimal.Decimal, error) {
 	if err != nil {
 		return decimal.Zero, err
 	}
@@ -186,10 +268,7 @@ func (g *Generales) Decimal(ctx context.Context, clave string, fecha time.Time) 
 	return d, nil
 }
 
-// Porcentaje devuelve el parámetro de tipo porcentaje. El valor se almacena
-// como porcentaje (10.83); la conversión la hace internal/shared/porcentaje.
-func (g *Generales) Porcentaje(ctx context.Context, clave string, fecha time.Time) (porcentaje.Porcentaje, error) {
-	reg, err := g.registro(ctx, clave, fecha)
+func porcentajeDe(reg Registro, err error) (porcentaje.Porcentaje, error) {
 	if err != nil {
 		return porcentaje.Porcentaje{}, err
 	}
@@ -207,9 +286,7 @@ func (g *Generales) Porcentaje(ctx context.Context, clave string, fecha time.Tim
 	return p, nil
 }
 
-// Texto devuelve el parámetro de tipo texto.
-func (g *Generales) Texto(ctx context.Context, clave string, fecha time.Time) (string, error) {
-	reg, err := g.registro(ctx, clave, fecha)
+func textoDe(reg Registro, err error) (string, error) {
 	if err != nil {
 		return "", err
 	}
@@ -219,9 +296,7 @@ func (g *Generales) Texto(ctx context.Context, clave string, fecha time.Time) (s
 	return reg.Valor, nil
 }
 
-// Fecha devuelve el parámetro de tipo fecha (formato YYYY-MM-DD, en UTC).
-func (g *Generales) Fecha(ctx context.Context, clave string, fecha time.Time) (time.Time, error) {
-	reg, err := g.registro(ctx, clave, fecha)
+func fechaDe(reg Registro, err error) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -235,9 +310,7 @@ func (g *Generales) Fecha(ctx context.Context, clave string, fecha time.Time) (t
 	return t, nil
 }
 
-// Booleano devuelve el parámetro de tipo booleano ("true"/"false"/"1"/"0").
-func (g *Generales) Booleano(ctx context.Context, clave string, fecha time.Time) (bool, error) {
-	reg, err := g.registro(ctx, clave, fecha)
+func booleanoDe(reg Registro, err error) (bool, error) {
 	if err != nil {
 		return false, err
 	}

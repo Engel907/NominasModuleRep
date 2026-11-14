@@ -1,8 +1,3 @@
-// internal/db/dto/horas_extra_tipificadas.go
-//
-// L14 — Horas extra tipificadas por día (asistencia_hora_extra_tipificada) y
-// los insumos de la tipificación: franja nocturna vigente y jornada del
-// contrato.
 package dto
 
 import (
@@ -31,15 +26,15 @@ ORDER BY fecha_inicio_vigencia DESC LIMIT 1`, fecha, fecha).Scan(&ini, &fin)
 	return FranjaNocturnaRow{HoraInicio: timeOrZero(ini.V), HoraFin: timeOrZero(fin.V)}, nil
 }
 
-// ObtenerJornadaContratoEnFecha: código de la jornada (catálogo) del contrato
+// ObtenerClaseJornadaContratoEnFecha: clase legal de la jornada del contrato
 // vigente a `fecha`. sql.ErrNoRows si no hay contrato o su jornada no calzó.
-func (q *Queries) ObtenerJornadaContratoEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (string, error) {
-	var codigo string
+func (q *Queries) ObtenerClaseJornadaContratoEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (string, error) {
+	var clase string
 	err := q.db.QueryRowContext(ctx, `
-SELECT j.codigo FROM contratos c JOIN jornadas j ON j.id = c.jornada_id
+SELECT j.clase FROM contratos c JOIN jornadas j ON j.id = c.jornada_id
 WHERE c.empleado_id = ? AND c.fecha_inicio_vigencia <= ? AND (c.fecha_fin_vigencia IS NULL OR c.fecha_fin_vigencia >= ?)
-ORDER BY c.fecha_inicio_vigencia DESC LIMIT 1`, empleadoID, fecha, fecha).Scan(&codigo)
-	return codigo, err
+ORDER BY c.fecha_inicio_vigencia DESC LIMIT 1`, empleadoID, fecha, fecha).Scan(&clase)
+	return clase, err
 }
 
 type HoraExtraTipificadaInsert struct {

@@ -15,23 +15,6 @@ import (
 // Limite es lo que necesitan los middlewares de rate limiting. La
 // implementación de este archivo (*Limitador) es EN MEMORIA: cada proceso
 // lleva sus propios contadores.
-//
-// LIMITACIÓN (S8): con UNA réplica es exacto. Con N réplicas detrás de un
-// balanceador el límite efectivo es N veces mayor (cada réplica cuenta
-// aparte). Para varias réplicas hay dos caminos, sin tocar los handlers:
-//
-//  1. Limitar en el borde (nginx limit_req / API gateway / WAF) para
-//     /auth/login, /auth/refresh y reset, y dejar este middleware como
-//     segunda línea; o
-//  2. Implementar Limite sobre un almacén compartido (Redis con
-//     INCR+EXPIRE o github.com/go-redis/redis_rate) y pasarlo a
-//     LimitarPorIP / LimitarPorUsuario en lugar de *Limitador. El contrato es
-//     solo Permitir(clave) (permitido, esperaDeReintento).
-//
-// Nota de seguridad: la clave por IP depende de que gin conozca la IP REAL del
-// cliente. Eso exige router.SetTrustedProxies con SOLO los proxies propios
-// (TRUSTED_PROXIES); si se confía en todo, un atacante rota X-Forwarded-For y
-// evade el límite.
 type Limite interface {
 	Permitir(clave string) (permitido bool, reintentarEn time.Duration)
 }
@@ -66,9 +49,6 @@ func NuevoLimitadorConReloj(porMinuto, burst int, ahora func() time.Time) (*Limi
 		return nil, fmt.Errorf("middleware: el limitador requiere porMinuto > 0 y burst > 0 (recibió %d y %d)", porMinuto, burst)
 	}
 	lim := rate.Limit(float64(porMinuto) / 60.0)
-	// Una clave inactiva más que el tiempo de rellenar el cubo completo (+1
-	// min de margen) vuelve a tener el cubo lleno: se puede olvidar sin
-	// cambiar el comportamiento observable.
 	rellenado := time.Duration(float64(burst) / float64(lim) * float64(time.Second))
 	return &Limitador{
 		limite:      lim,
@@ -102,7 +82,7 @@ func (l *Limitador) Permitir(clave string) (bool, time.Duration) {
 		return false, time.Minute
 	}
 	if espera := r.DelayFrom(ahora); espera > 0 {
-		r.CancelAt(ahora) // no gastar la ficha de una petición rechazada
+		r.CancelAt(ahora)
 		return false, espera
 	}
 	return true, 0
@@ -147,11 +127,11 @@ func aplicarLimite(c *gin.Context, l Limite, clave string) bool {
 	return false
 }
 
-// LimitarPorIP aplica el límite por IP de cliente Y por ruta (c.FullPath()):
+// LimitarPorIP aplica el límite por IP de cliente Y por ruta (c.FullPath):
 // así los intentos de /auth/login no consumen el cupo de /auth/refresh.
 // Se monta en el grupo `publico` (login, refresh, logout y reset de
 // contraseña). Detrás de NAT corporativo varias personas comparten IP: dimensionar
-// RATE_LIMIT_AUTH_* con eso en mente (el bloqueo por cuenta de F14 es el
+// RATE_LIMIT_AUTH_* con eso en mente (el bloqueo por cuenta es el
 // freno específico contra adivinar contraseñas de un usuario).
 func LimitarPorIP(l Limite) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -163,7 +143,7 @@ func LimitarPorIP(l Limite) gin.HandlerFunc {
 }
 
 // LimitarPorUsuario aplica un límite general, más laxo, por usuario
-// autenticado. Debe montarse DESPUÉS de AuthPASETO (necesita el payload). Si
+// autenticado. Debe montarse después de AuthPASETO (necesita el payload). Si
 // por error no hay payload, cae a limitar por IP en vez de dejar pasar.
 func LimitarPorUsuario(l Limite) gin.HandlerFunc {
 	return func(c *gin.Context) {

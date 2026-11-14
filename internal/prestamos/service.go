@@ -47,7 +47,7 @@ var (
 
 // toleranciaCuotas es la diferencia máxima (en cuotas) aceptada entre el
 // número de cuotas declarado y ceil(monto_total / cuota_periodica). Es una
-// holgura OPERATIVA para absorber una última cuota parcial o redondeos; NO
+// holgura OPERATIVA para absorber una última cuota parcial o redondeos; no
 // es un valor legal ni proviene de normativa. Ajustar según la práctica de
 // Recursos Humanos.
 const toleranciaCuotas int64 = 1
@@ -56,7 +56,7 @@ const toleranciaCuotas int64 = 1
 var limiteMonto = decimal.New(1, 12)
 
 // Service agrupa la lógica de negocio de Préstamos, Embargos y Terceros.
-// Toda escritura pasa por db.WithAuditContext (ADR-000), y TODA lectura que
+// Toda escritura pasa por db.WithAuditContext y toda lectura que
 // precede a una escritura se hace dentro de esa misma transacción con
 // SELECT ... FOR UPDATE, para que dos operaciones concurrentes sobre la
 // misma fila se serialicen en lugar de pisarse.
@@ -80,13 +80,9 @@ func validarMonto(d decimal.Decimal) error {
 	return nil
 }
 
-// =====================================================================
-// TERCEROS
-// =====================================================================
-
 type CrearTerceroInput struct {
 	Nombre string
-	Tipo   string // 'juzgado' | 'entidad_financiera' | 'otro'
+	Tipo   string // juzgado | entidad_financiera | asociacion_solidarista | sindicato | aseguradora | cooperativa | otro
 }
 
 func (s *Service) CrearTercero(ctx context.Context, userID int64, in CrearTerceroInput) (int64, error) {
@@ -110,10 +106,6 @@ func (s *Service) ListarTerceros(ctx context.Context, tipo, busqueda string, lim
 	}
 	return items, total, nil
 }
-
-// =====================================================================
-// PRESTAMOS
-// =====================================================================
 
 type CrearPrestamoInput struct {
 	EmpleadoID       int64
@@ -154,14 +146,11 @@ func (s *Service) CrearPrestamo(ctx context.Context, userID int64, in CrearPrest
 		}
 	}
 	if in.FechaFinEstimada != nil && in.FechaFinEstimada.Before(in.FechaInicio) {
-		return 0, ErrFechasInvalidas // espejo de chk_pr_fechas
+		return 0, ErrFechasInvalidas
 	}
 
 	var id int64
 	err := db.WithAuditContext(ctx, s.dbConn, userID, func(ctx context.Context, qtx *dto.Queries) error {
-		// El lock del empleado va primero: serializa altas concurrentes del
-		// mismo empleado, de modo que las lecturas siguientes ven el estado
-		// ya confirmado por la alta anterior.
 		emp, err := qtx.GetEmpleadoParaActualizar(ctx, in.EmpleadoID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrEmpleadoNoEncontrado
@@ -206,7 +195,7 @@ func (s *Service) CrearPrestamo(ctx context.Context, userID int64, in CrearPrest
 			TerceroID:              in.TerceroID,
 			MontoTotal:             in.MontoTotal,
 			CuotaPeriodica:         in.CuotaPeriodica,
-			SaldoPendiente:         in.MontoTotal, // saldo inicial = monto total
+			SaldoPendiente:         in.MontoTotal,
 			FechaInicio:            in.FechaInicio,
 			FechaFinEstimada:       toNullTime(in.FechaFinEstimada),
 			RegistradoPorUsuarioID: sql.NullInt64{Int64: userID, Valid: true},
@@ -234,7 +223,7 @@ func (s *Service) ListarPrestamosPorEmpleado(ctx context.Context, empleadoID int
 // saldo llega a cero, lo cierra. Lee el préstamo con FOR UPDATE dentro de la
 // transacción: dos abonos simultáneos se serializan y el segundo ve el saldo
 // ya descontado por el primero. Rechaza (no recorta) un abono mayor al saldo;
-// quien calcula la cuota (motor de planilla, F23) debe enviar min(cuota, saldo).
+// quien calcula la cuota (motor de planilla) debe enviar min(cuota, saldo).
 func (s *Service) AplicarAbono(ctx context.Context, userID, prestamoID int64, montoAbono decimal.Decimal) error {
 	if err := validarMonto(montoAbono); err != nil {
 		return err
@@ -251,7 +240,7 @@ func (s *Service) AplicarAbono(ctx context.Context, userID, prestamoID int64, mo
 			return ErrPrestamoNoActivo
 		}
 		if montoAbono.GreaterThan(p.SaldoPendiente) {
-			return ErrAbonoExcedeSaldo // evita violar chk_pr_saldo (saldo >= 0)
+			return ErrAbonoExcedeSaldo
 		}
 		if err := qtx.AplicarAbonoPrestamo(ctx, dto.AplicarAbonoPrestamoParams{
 			SaldoPendiente: montoAbono,
@@ -259,7 +248,6 @@ func (s *Service) AplicarAbono(ctx context.Context, userID, prestamoID int64, mo
 		}); err != nil {
 			return err
 		}
-		// Idempotente: solo cierra si el saldo efectivamente llegó a 0.
 		return qtx.CerrarPrestamoSiSaldoEnCero(ctx, prestamoID)
 	})
 }
@@ -282,18 +270,13 @@ func (s *Service) CancelarPrestamo(ctx context.Context, userID, prestamoID int64
 	})
 }
 
-// =====================================================================
-// EMBARGOS
-// =====================================================================
-
 // Transiciones de estado permitidas para `embargos` (ENUM del esquema:
-// activo | suspendido | finalizado). Recordatorio ADR-000: esta tabla NO usa
-// el patrón de vigencia de 2 pasos; el ciclo de vida es puramente por
-// `estado`.
+// activo | suspendido | finalizado). La tabla no usa vigencias; el ciclo de
+// vida es por `estado`.
 var transicionesEmbargoPermitidas = map[string]map[string]bool{
 	EstadoEmbargoActivo:     {EstadoEmbargoSuspendido: true, EstadoEmbargoFinalizado: true},
 	EstadoEmbargoSuspendido: {EstadoEmbargoActivo: true, EstadoEmbargoFinalizado: true},
-	EstadoEmbargoFinalizado: {}, // estado terminal
+	EstadoEmbargoFinalizado: {},
 }
 
 type CrearEmbargoInput struct {
@@ -303,6 +286,7 @@ type CrearEmbargoInput struct {
 	NumeroExpediente *string
 	Porcentaje       *decimal.Decimal
 	MontoFijo        *decimal.Decimal
+	TopeMensual      *decimal.Decimal // opcional, tope propio del embargo
 	FechaInicio      time.Time
 	FechaFinVigencia *time.Time
 }
@@ -324,13 +308,18 @@ func (s *Service) CrearEmbargo(ctx context.Context, userID int64, in CrearEmbarg
 		}
 	}
 	if in.Porcentaje != nil {
-		p := *in.Porcentaje // espejo de chk_emb_porcentaje_rango y DECIMAL(5,2)
+		p := *in.Porcentaje
 		if !p.IsPositive() || p.GreaterThan(decimal.NewFromInt(100)) || !p.Equal(p.Round(2)) {
 			return 0, ErrPorcentajeInvalido
 		}
 	}
+	if in.TopeMensual != nil {
+		if err := validarMonto(*in.TopeMensual); err != nil {
+			return 0, err
+		}
+	}
 	if in.FechaFinVigencia != nil && in.FechaFinVigencia.Before(in.FechaInicio) {
-		return 0, ErrFechasInvalidas // espejo de chk_emb_vigencia
+		return 0, ErrFechasInvalidas
 	}
 
 	var id int64
@@ -363,6 +352,7 @@ func (s *Service) CrearEmbargo(ctx context.Context, userID int64, in CrearEmbarg
 			NumeroExpediente:    toNullString(in.NumeroExpediente),
 			Porcentaje:          toNullDecimal(in.Porcentaje),
 			MontoFijo:           toNullDecimal(in.MontoFijo),
+			TopeMensual:         toNullDecimal(in.TopeMensual),
 			PrioridadAplicacion: tipo.PrioridadLegal,
 			FechaInicioVigencia: in.FechaInicio,
 			FechaFinVigencia:    toNullTime(in.FechaFinVigencia),
@@ -388,7 +378,7 @@ func (s *Service) ListarEmbargosPorEmpleado(ctx context.Context, empleadoID int6
 
 // EmbargosActivosOrdenados es la consulta que usará el motor de planilla:
 // embargos activos y vigentes en fechaCorte, en orden de prioridad ascendente
-// (1 = pensión alimentaria primero, según el seed de parametros_tipos_embargo).
+// (1 = pensión alimentaria primero).
 func (s *Service) EmbargosActivosOrdenados(ctx context.Context, empleadoID int64, fechaCorte time.Time) ([]dto.ListEmbargosActivosPorEmpleadoOrdenadosPorPrioridadRow, error) {
 	return s.q.ListEmbargosActivosPorEmpleadoOrdenadosPorPrioridad(ctx, dto.ListEmbargosActivosPorEmpleadoOrdenadosPorPrioridadParams{
 		EmpleadoID: empleadoID,
@@ -420,7 +410,7 @@ func (s *Service) CambiarEstadoEmbargo(ctx context.Context, userID, embargoID in
 				return ErrFechaFinRequerida
 			}
 			if fechaFin.Before(actual.FechaInicioVigencia) {
-				return ErrFechasInvalidas // espejo de chk_emb_vigencia
+				return ErrFechasInvalidas
 			}
 		} else {
 			fechaFin = nil
@@ -433,10 +423,6 @@ func (s *Service) CambiarEstadoEmbargo(ctx context.Context, userID, embargoID in
 		})
 	})
 }
-
-// =====================================================================
-// Helpers de conversión a tipos nullable de database/sql y shopspring/decimal
-// =====================================================================
 
 func toNullString(s *string) sql.NullString {
 	if s == nil {

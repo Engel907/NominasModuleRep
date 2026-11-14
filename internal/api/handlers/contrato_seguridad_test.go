@@ -11,16 +11,16 @@ import (
 
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
-	"planillas-ccdr/internal/security"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/credenciales"
+	"planillas-ccdr/internal/rrhh"
 )
 
 func TestContratoSeguro_EnmascaraSalarioSinPermisoSensible(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Set(middleware.CtxKeyPayload, &security.Payload{Permisos: []string{"contratos.leer"}})
+	c.Set(middleware.CtxKeyPayload, &credenciales.Payload{Permisos: []string{"contratos.leer"}})
 
-	body, err := json.Marshal(contratoSeguro(c, services.ContratoResponse{
+	body, err := json.Marshal(contratoSeguro(c, rrhh.ContratoResponse{
 		SalarioPactado: decimal.RequireFromString("123456.78"),
 	}))
 	if err != nil {
@@ -30,8 +30,8 @@ func TestContratoSeguro_EnmascaraSalarioSinPermisoSensible(t *testing.T) {
 		t.Fatalf("salario no enmascarado: %s", body)
 	}
 
-	c.Set(middleware.CtxKeyPayload, &security.Payload{Permisos: []string{authz.PermDatosPersonalesVerSensible}})
-	body, err = json.Marshal(contratoSeguro(c, services.ContratoResponse{
+	c.Set(middleware.CtxKeyPayload, &credenciales.Payload{Permisos: []string{authz.PermDatosPersonalesVerSensible}})
+	body, err = json.Marshal(contratoSeguro(c, rrhh.ContratoResponse{
 		SalarioPactado: decimal.RequireFromString("123456.78"),
 	}))
 	if err != nil {

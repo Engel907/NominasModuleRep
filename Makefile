@@ -26,7 +26,7 @@ db-reset:
 	docker compose up -d --wait mysql
 	$(MIGRATE) up
 
-# Pruebas de integración (F13): levanta mysql_test (puerto 3307, tmpfs) y corre
+# Pruebas de integración: levanta mysql_test (puerto 3307, tmpfs) y corre
 # go test -tags=integration. Ver docs/pruebas.md.
 test-integration:
-	RUN_INTEGRATION=1 ./run_full_test_suite.sh
+	RUN_INTEGRATION=1 ./scripts/pruebas_completas.sh

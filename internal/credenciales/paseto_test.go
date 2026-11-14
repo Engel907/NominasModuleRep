@@ -1,4 +1,4 @@
-package security
+package credenciales
 
 import (
 	"bytes"
@@ -58,7 +58,7 @@ func TestNbfFuturo(t *testing.T) {
 	m.ahora = func() time.Time { return time.Now().Add(time.Hour) }
 	tok, _, err := m.CrearAccessToken(1, "x", nil, false, 1, 2*time.Hour)
 	require.NoError(t, err)
-	m.ahora = time.Now // el verificador "vive" una hora antes del nbf
+	m.ahora = time.Now
 	_, err = m.VerificarToken(tok, TipoTokenAcceso)
 	require.ErrorIs(t, err, ErrTokenInvalido)
 }
@@ -74,7 +74,7 @@ func TestIssuerYAudienceDistintos(t *testing.T) {
 	require.ErrorIs(t, err, ErrTokenInvalido)
 }
 
-// Token bien cifrado y con kid válido pero SIN aud (ni iss): ya no se acepta.
+// Token bien cifrado y con kid válido pero sin aud ni iss: se rechaza.
 func TestTokenSinAudNiIss(t *testing.T) {
 	m := base(t)
 	tk := paseto.NewToken()
@@ -110,14 +110,12 @@ func TestRotacionDeClaves(t *testing.T) {
 	viejo := nuevoMaker(t, map[string][]byte{"k1": clave(1)}, "k1", "iss", "aud")
 	tokViejo, _, _ := viejo.CrearAccessToken(1, "x", nil, false, 1, time.Minute)
 
-	// Despliegue con ambas claves, activa k2.
 	rot := nuevoMaker(t, map[string][]byte{"k1": clave(1), "k2": clave(2)}, "k2", "iss", "aud")
 	_, err := rot.VerificarToken(tokViejo, TipoTokenAcceso)
 	require.NoError(t, err, "el token firmado con el kid viejo sigue válido")
 	tokNuevo, p, _ := rot.CrearAccessToken(1, "x", nil, false, 1, time.Minute)
 	require.Equal(t, "k2", p.KID)
 
-	// Se retira k1: el viejo deja de valer, el nuevo sigue.
 	soloK2 := nuevoMaker(t, map[string][]byte{"k2": clave(2)}, "k2", "iss", "aud")
 	_, err = soloK2.VerificarToken(tokViejo, TipoTokenAcceso)
 	require.ErrorIs(t, err, ErrTokenInvalido)

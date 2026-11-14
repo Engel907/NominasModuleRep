@@ -1,11 +1,7 @@
-// Package pagination centraliza el parseo de query params de paginación
+// Package paginacion centraliza el parseo de query params de paginación
 // (?pagina=&tamano=) y el bloque de metadatos de las respuestas de listado.
 // Criterio único del proyecto: tamaño por defecto 20, máximo 100.
-//
-// F03: los servicios de empleados/contratos/organización ya no tienen su
-// propio PaginacionRequest; reciben un pagination.Parametros que el handler
-// obtiene con pagination.Desde(c).
-package pagination
+package paginacion
 
 import (
 	"strconv"
@@ -56,7 +52,7 @@ func Desde(c *gin.Context) Parametros {
 }
 
 // Normalizado devuelve p con defaults aplicados si algún campo viene en
-// cero (p. ej. un Parametros{} construido a mano en un test o job). Evita
+// cero (p. ej. Un Parametros{} construido a mano en un test o job). Evita
 // LIMIT 0 y la división por cero en NuevaMeta.
 func (p Parametros) Normalizado() Parametros {
 	if p.Pagina < 1 {

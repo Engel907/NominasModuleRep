@@ -7,41 +7,9 @@ import (
 	"time"
 )
 
-// ============================================================================
-// NOTA DE MIGRACIÓN (Fase 5B, ver internal/db/queries/security.sql)
-//
-// Las queries anotadas de security.sql se escribieron antes de que
-// db/schema.sql tuviera su forma final (varias columnas se agregaron o
-// renombraron en 000001_seguridad_reforzada.up.sql). Este archivo implementa
-// la INTENCIÓN de cada query (mismo nombre, mismo :one/:many/:exec), pero
-// contra las columnas REALES de db/schema.sql, confirmadas ahí antes de
-// escribir cada Scan(). Diferencias puntuales:
-//
-//   - refresh_tokens: la tabla real usa `fecha_emision` / `fecha_expiracion`,
-//     no `creado_en` / `expira_en` como decía la query original.
-//   - tokens_reset_password: igual, la tabla real usa `fecha_creacion` /
-//     `fecha_expiracion`, no `creado_en` / `expira_en`.
-//   - usuario_roles.es_vigente es una COLUMNA GENERADA (STORED, calculada a
-//     partir de fecha_fin_vigencia) — MySQL rechaza cualquier INSERT/UPDATE
-//     que le pase un valor explícito. CerrarUsuarioRolVigente e
-//     InsertarUsuarioRolVigente de abajo NUNCA escriben es_vigente: solo
-//     escriben fecha_fin_vigencia (NULL = vigente) y dejan que el motor
-//     recalcule es_vigente solo. Sí se puede filtrar por es_vigente en el
-//     WHERE (es una columna normal para lectura), y así se hace.
-//
-// Todos los IDs de tablas con PK BIGINT UNSIGNED se manejan acá como int64
-// (decisión D1, igual en todo internal/db/dto): simplifica las firmas y el
-// Scan(), y ningún ID de este sistema se acerca remotamente a superar el
-// rango de int64.
-// ============================================================================
-
-// ============================================================================
-// USUARIOS / LOGIN / FUERZA BRUTA
-// ============================================================================
-
 // Usuario refleja las columnas de `usuarios` que security.sql necesita para
 // login y control de fuerza bruta (no todas las columnas de la tabla, p.ej.
-// no incluye nombre_completo/empleado_id). F14 agrega `correo`: lo necesitan
+// No incluye nombre_completo/empleado_id). agrega `correo`: lo necesitan
 // el envío del reset y la política de contraseñas (no contener el correo).
 type Usuario struct {
 	ID                        int64
@@ -53,7 +21,7 @@ type Usuario struct {
 	BloqueadoHasta            sql.NullTime
 	RequiereCambioPassword    bool
 	FechaUltimoCambioPassword sql.NullTime
-	PermisosVersion           uint32 // F15: sube con cada cambio que invalide tokens emitidos
+	PermisosVersion           uint32 // sube con cada cambio que invalide tokens emitidos
 	CreatedAt                 time.Time
 	UpdatedAt                 time.Time
 }
@@ -103,21 +71,9 @@ type EstadoIntentos struct {
 	BloqueadoHasta   sql.NullTime
 }
 
-// RegistrarIntentoFallidoAtomico (F14 / S5) suma 1 al contador y, si el nuevo
-// valor alcanza maxIntentos, fija bloqueado_hasta — todo en UN solo UPDATE, de
+// RegistrarIntentoFallidoAtomico suma 1 al contador y, si el nuevo
+// valor alcanza maxIntentos, fija bloqueado_hasta — todo en un solo UPDATE, de
 // modo que dos intentos concurrentes nunca se pisan ni se saltan el umbral.
-//
-// IMPORTANTE (orden de los SET): MySQL evalúa las asignaciones de un UPDATE de
-// una tabla de izquierda a derecha, así que `bloqueado_hasta` debe ir ANTES de
-// `intentos_fallidos`: si fuera después vería el contador ya incrementado y
-// bloquearía un intento antes de tiempo.
-//
-// bloqueadoHasta lo calcula Go (UTC) en vez de NOW() + INTERVAL: el resto del
-// servicio compara bloqueado_hasta con time.Now() usando loc=UTC, y NOW() usa
-// la zona horaria de la sesión de MySQL, que puede no ser UTC.
-// LEAST(.., 65535) evita el error de rango de la columna SMALLINT UNSIGNED.
-//
-// Tras el UPDATE lee el estado resultante (solo informativo: logs/métricas).
 func (q *Queries) RegistrarIntentoFallidoAtomico(ctx context.Context, id int64, maxIntentos int, bloqueadoHasta time.Time) (EstadoIntentos, error) {
 	if _, err := q.db.ExecContext(ctx, `
 UPDATE usuarios
@@ -136,7 +92,7 @@ WHERE id = ?`, id).Scan(&e.IntentosFallidos, &e.BloqueadoHasta)
 }
 
 // RehashPasswordHash es el re-hash perezoso bcrypt→argon2id tras un login
-// exitoso. A diferencia de ActualizarPasswordHash NO toca
+// exitoso. A diferencia de ActualizarPasswordHash no toca
 // requiere_cambio_password ni fecha_ultimo_cambio_password (un re-hash
 // transparente no es un cambio de contraseña del usuario), y solo escribe si
 // el hash en BD sigue siendo el que se verificó: si la contraseña cambió entre
@@ -151,11 +107,6 @@ WHERE id = ?
 }
 
 // IncrementarIntentosFallidos suma 1 al contador tras un password incorrecto.
-//
-// Deprecated (F14): lee-calcula-escribe desde Go no es atómico. Usar
-// RegistrarIntentoFallidoAtomico.
-// El umbral (N) y los minutos de bloqueo son política de internal/auth
-// (ADR-000 punto c), no viven acá.
 func (q *Queries) IncrementarIntentosFallidos(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE usuarios
@@ -166,8 +117,6 @@ WHERE id = ?`, id)
 
 // BloquearUsuarioTemporalmente se invoca desde el servicio cuando
 // intentos_fallidos alcanza el umbral N.
-//
-// Deprecated (F14): lo reemplaza RegistrarIntentoFallidoAtomico.
 func (q *Queries) BloquearUsuarioTemporalmente(ctx context.Context, id int64, bloqueadoHasta time.Time) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE usuarios
@@ -189,7 +138,7 @@ WHERE id = ?`, id)
 // ActualizarPasswordHash fija una contraseña NUEVA elegida por el usuario
 // (cambio autenticado o confirmación de reset). requiere_cambio_password se
 // limpia porque un cambio de password siempre lo satisface.
-// NO usar para el re-hash perezoso post-login: ver RehashPasswordHash.
+// No usar para el re-hash perezoso post-login: ver RehashPasswordHash.
 func (q *Queries) ActualizarPasswordHash(ctx context.Context, id int64, passwordHash string) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE usuarios
@@ -201,7 +150,7 @@ WHERE id = ?`, passwordHash, id)
 }
 
 // MarcarRequiereCambioPassword implementa el flujo administrativo de
-// "forzar cambio de password" (ADR-000 punto d).
+// "forzar cambio de password".
 func (q *Queries) MarcarRequiereCambioPassword(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE usuarios
@@ -209,10 +158,6 @@ SET requiere_cambio_password = 1
 WHERE id = ?`, id)
 	return err
 }
-
-// ============================================================================
-// REFRESH TOKENS (sesiones persistidas/revocables — ADR-000 punto b)
-// ============================================================================
 
 // RefreshToken refleja `refresh_tokens`. ip_origen/user_agent existen en la
 // tabla real pero ninguna query de security.sql los lee, así que no se
@@ -229,8 +174,8 @@ type RefreshToken struct {
 }
 
 // CrearRefreshToken inserta una nueva sesión. token_hash es SHA-256 del
-// refresh token PASETO en claro — nunca se persiste el token en claro
-// (ADR-000 punto b). Devuelve el ID autogenerado.
+// refresh token; nunca se persiste el token en claro. Devuelve el ID
+// autogenerado.
 func (q *Queries) CrearRefreshToken(ctx context.Context, usuarioID int64, tokenHash string, fechaExpiracion time.Time) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
 INSERT INTO refresh_tokens (usuario_id, token_hash, fecha_expiracion, fecha_emision)
@@ -241,7 +186,7 @@ VALUES (?, ?, ?, NOW())`, usuarioID, tokenHash, fechaExpiracion)
 	return res.LastInsertId()
 }
 
-// CrearRefreshTokenConFamilia (F14 / S6) inserta una sesión dentro de una
+// CrearRefreshTokenConFamilia inserta una sesión dentro de una
 // familia de rotación (UUID) y registra desde dónde se emitió. Un login abre
 // una familia nueva; cada rotación hereda la de la fila que reemplaza.
 // ip y userAgent vacíos se guardan como NULL; se truncan al tamaño de la columna.
@@ -345,10 +290,6 @@ WHERE usuario_id = ?
 	return err
 }
 
-// ============================================================================
-// RESET DE CONTRASEÑA (ADR-000 punto d)
-// ============================================================================
-
 // TokenResetPassword refleja `tokens_reset_password`. ip_origen existe en la
 // tabla real pero ninguna query de security.sql lo lee.
 type TokenResetPassword struct {
@@ -387,10 +328,10 @@ LIMIT 1`, tokenHash)
 	return t, err
 }
 
-// ConsumirTokenResetPassword (F14) marca el token como usado SOLO si todavía
+// ConsumirTokenResetPassword marca el token como usado solo si todavía
 // está sin usar y sin expirar, y devuelve true únicamente al llamador que lo
-// consumió. Reemplaza el patrón leer→validar→marcar, que dejaba pasar a dos
-// confirmaciones concurrentes con el mismo token. `ahora` lo pone Go (UTC).
+// consumió, de modo que dos confirmaciones concurrentes con el mismo token no
+// pasan ambas. `ahora` va en UTC.
 func (q *Queries) ConsumirTokenResetPassword(ctx context.Context, id int64, ahora time.Time) (bool, error) {
 	res, err := q.db.ExecContext(ctx, `
 UPDATE tokens_reset_password
@@ -408,8 +349,6 @@ WHERE id = ?
 
 // MarcarTokenResetPasswordUsado marca el token como consumido; un token
 // usado nunca vuelve a aceptarse.
-//
-// Deprecated (F14): no es condicional. Usar ConsumirTokenResetPassword.
 func (q *Queries) MarcarTokenResetPasswordUsado(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, `
 UPDATE tokens_reset_password
@@ -430,21 +369,8 @@ WHERE usuario_id = ?
 	return err
 }
 
-// ============================================================================
-// usuario_roles — tabla versionada (ADR-000 puntos f, i; §2)
-//
-// Regla de escritura de 2 pasos, SIEMPRE dentro de la misma Tx (nunca una
-// sin la otra fuera de internal/shared/vigencia):
-//   1) CerrarUsuarioRolVigente
-//   2) InsertarUsuarioRolVigente
-//
-// La unicidad real es por (usuario_id, rol_id, es_vigente) — permite N roles
-// vigentes simultáneos por usuario, a diferencia de las otras tablas con
-// patrón de vigencia que son únicas por su entidad principal.
-// ============================================================================
-
 // CerrarUsuarioRolVigente cierra la asignación vigente de `rolID` para
-// `usuarioID`, si existe, fijando su fecha_fin_vigencia. NO toca es_vigente:
+// `usuarioID`, si existe, fijando su fecha_fin_vigencia. No toca es_vigente:
 // es una columna generada (STORED) que MySQL recalcula solo a partir de
 // fecha_fin_vigencia, y rechaza cualquier escritura explícita sobre ella.
 func (q *Queries) CerrarUsuarioRolVigente(ctx context.Context, usuarioID, rolID int64, fechaFinVigencia time.Time) error {
@@ -612,14 +538,6 @@ VALUES (?, ?)`, rolID, permisoID); err != nil {
 	return nil
 }
 
-// ============================================================================
-// RESOLUCIÓN DE PERMISOS (ADR-000 §3 — autorización por permiso, no por rol)
-//
-// Esta es LA query que arma el payload del access token, y la que usaría el
-// middleware/servicio si se decide resolver contra BD en cada request en vez
-// de confiar en el payload del token.
-// ============================================================================
-
 // GetPermisosVigentesDeUsuario devuelve los códigos de permiso (sin
 // duplicados) que el usuario tiene por sus roles vigentes y activos,
 // solo si la cuenta misma está activa.
@@ -648,10 +566,6 @@ WHERE u.id = ?
 	}
 	return codigos, rows.Err()
 }
-
-// ============================================================================
-// F15 — REVOCACIÓN EFECTIVA DE ACCESS TOKENS (permisos_version)
-// ============================================================================
 
 // IncrementarPermisosVersion sube permisos_version del usuario y devuelve el
 // valor nuevo. Debe llamarse DENTRO de la misma Tx que el cambio que invalida

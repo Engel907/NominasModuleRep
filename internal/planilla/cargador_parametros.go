@@ -1,20 +1,8 @@
-// Fase 18B — Cargador único de parámetros de cálculo.
-//
-// Resuelve en UN solo lugar todo parámetro "vigente a la fecha X" y convierte
-// los porcentajes de la BD (10.83) a fracción (0.1083) con porcentaje.Porcentaje
-// (regla D3). El dominio solo recibe fracciones; nadie más divide/multiplica
-// por 100.
-//
-// Convención de fecha: todo se resuelve a la fecha FIN del período
-// (FechaEfectiva normal del motor; mismo supuesto que contabilidad/sql_adapters).
-// fechaInicio solo se valida (inicio <= fin).
-//
-// Regla del motor (sin defaults implícitos): si falta un parámetro obligatorio
-// o los tramos de renta son incoherentes, se retorna error explícito.
 package planilla
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -25,17 +13,6 @@ import (
 	"planillas-ccdr/internal/db/dto"
 	"planillas-ccdr/internal/parametros"
 	"planillas-ccdr/internal/shared/porcentaje"
-)
-
-// Códigos de concepto sembrados (000002) de los que salen los % de CCSS.
-const (
-	codigoCCSSObrero   = "CCSS_OBR"
-	codigoCCSSPatronal = "CCSS_PAT"
-)
-
-// Claves de parametros_generales usadas por el cargador.
-const (
-// Deprecada: se retira en L12 (jornada y divisor de hora extra).
 )
 
 // ErrParametroFaltante envuelve cualquier parámetro obligatorio no vigente.
@@ -71,16 +48,22 @@ type FuenteParametros interface {
 	ListarEscalaEmbargoEnFecha(ctx context.Context, fecha time.Time) ([]TramoEscalaEmbargo, error)
 	ListarBaseMinimaContributivaEnFecha(ctx context.Context, fecha time.Time) ([]BaseMinimaContributivaFila, error)
 	ListarParametrosJornadaEnFecha(ctx context.Context, fecha time.Time) ([]dto.ParametroJornadaRow, error)
+	// Fracción (0.0833); sql.ErrNoRows si no hay vigente.
+	ObtenerPorcentajeSalarioEscolarEnFecha(ctx context.Context, fecha time.Time) (decimal.Decimal, error)
 }
 
 // GeneralesLector: subconjunto de parametros.Generales usado aquí.
 type GeneralesLector interface {
 	Decimal(ctx context.Context, clave string, fecha time.Time) (decimal.Decimal, error)
+	Texto(ctx context.Context, clave string, fecha time.Time) (string, error)
 }
 
 type CargadorParametros struct {
 	fuente    FuenteParametros
 	generales GeneralesLector
+
+	ajustes      AjustesEmpleadoLector
+	paraEmpleado func(empleadoID int64) GeneralesLector
 }
 
 func NewCargadorParametros(f FuenteParametros, g GeneralesLector) *CargadorParametros {
@@ -100,16 +83,6 @@ func frac(d decimal.Decimal, ctxMsg string) (decimal.Decimal, error) {
 }
 
 // Cargar resuelve todos los parámetros a la fecha fin del período.
-//
-// DivisorDiasMes y SalarioMinimoInembargable salen de parametros_generales
-// (D13 del ADR-001: el salario mínimo inembargable es un monto global, no se
-// resuelve por empleado). Si faltan, Cargar falla con ErrParametroFaltante y
-// la clave en el mensaje.
-//
-// Quedan SIN cargar aquí (dependen de datos que este método no recibe):
-//   - FraccionMensualPeriodo / DiasPeriodoCompleto: dependen del tipo de
-//     planilla (quincena 0.5/15, mes 1/30); los fija el orquestador. El motor
-//     ya falla si faltan cuando prorratea SAL_BASE.
 func (c *CargadorParametros) Cargar(ctx context.Context, fechaInicio, fechaFin time.Time) (*ParametrosCalculo, error) {
 	if fechaFin.Before(fechaInicio) {
 		return nil, fmt.Errorf("planilla: fechaFin %s anterior a fechaInicio %s",
@@ -181,36 +154,98 @@ func (c *CargadorParametros) cargarGenerales(ctx context.Context, f time.Time, o
 		return fmt.Errorf("planilla: %s debe ser > 0, es %s", parametros.ClaveSalarioMinimoInembargable, smi)
 	}
 	out.SalarioMinimoInembargable = smi
-	return nil
+
+	modo, err := c.generales.Texto(ctx, ClaveVacacionesModoPago, f)
+	var nc parametros.ErrParametroNoConfigurado
+	switch {
+	case errors.As(err, &nc):
+		modo = ""
+	case err != nil:
+		return err
+	case !ModoPagoVacacionesValido(modo):
+		return fmt.Errorf("planilla: %s = %q inválido (compensacion | disfrute | ambos)", ClaveVacacionesModoPago, modo)
+	}
+	out.VacacionesModoPago = modo
+
+	if out.SalarioDiarioBase, err = c.textoOpcional(ctx, ClaveSalarioDiarioBase, f, BaseSalarioDiarioValida, "comerciales | asistencia"); err != nil {
+		return err
+	}
+
+	if out.FactorFeriadoObligatorio, err = c.factorOpcional(ctx, ClaveFeriadoFactorObligatorio, f); err != nil {
+		return err
+	}
+	out.FactorFeriadoNoObligatorio, err = c.factorOpcional(ctx, ClaveFeriadoFactorNoObligatorio, f)
+	return err
 }
 
+// textoOpcional: "" si la clave no está configurada; si lo está, debe ser
+// uno de los valores admitidos.
+func (c *CargadorParametros) textoOpcional(ctx context.Context, clave string, f time.Time, valido func(string) bool, admitidos string) (string, error) {
+	v, err := c.generales.Texto(ctx, clave, f)
+	var nc parametros.ErrParametroNoConfigurado
+	switch {
+	case errors.As(err, &nc):
+		return "", nil
+	case err != nil:
+		return "", err
+	case !valido(v):
+		return "", fmt.Errorf("planilla: %s = %q inválido (%s)", clave, v, admitidos)
+	}
+	return v, nil
+}
+
+// factorOpcional: nil si la clave no está configurada; si lo está, debe ser
+// >= 0.
+func (c *CargadorParametros) factorOpcional(ctx context.Context, clave string, f time.Time) (*decimal.Decimal, error) {
+	d, err := c.generales.Decimal(ctx, clave, f)
+	var nc parametros.ErrParametroNoConfigurado
+	switch {
+	case errors.As(err, &nc):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	case d.IsNegative():
+		return nil, fmt.Errorf("planilla: %s debe ser >= 0, es %s", clave, d)
+	}
+	return &d, nil
+}
+
+// cargarCCSS: tasas de todos los conceptos de carga social vigentes. Qué
+// concepto es obrero o patronal lo dice su fórmula ('lado'); aquí solo se
+// exige una fila por concepto y régimen.
 func (c *CargadorParametros) cargarCCSS(ctx context.Context, f time.Time, out *ParametrosCalculo) error {
 	rows, err := c.fuente.ListarCargasSocialesEnFecha(ctx, f)
 	if err != nil {
 		return fmt.Errorf("planilla: leyendo cargas sociales: %w", err)
 	}
-	var nObr, nPat int
-	for _, r := range rows {
-		switch r.ConceptoCodigo {
-		case codigoCCSSObrero:
-			nObr++
-			v, err := frac(r.PorcentajeObrero, "CCSS obrero")
-			if err != nil {
-				return err
-			}
-			out.CargaSocial.PorcentajeObrero = v
-		case codigoCCSSPatronal:
-			nPat++
-			v, err := frac(r.PorcentajePatronal, "CCSS patronal")
-			if err != nil {
-				return err
-			}
-			out.CargaSocial.PorcentajePatronal = v
-		}
+	if len(rows) == 0 {
+		return faltante("no hay parametros_cargas_sociales vigentes al %s", f.Format("2006-01-02"))
 	}
-	if nObr != 1 || nPat != 1 {
-		return faltante("se esperaba 1 fila vigente de %s y 1 de %s al %s (hay %d y %d)",
-			codigoCCSSObrero, codigoCCSSPatronal, f.Format("2006-01-02"), nObr, nPat)
+	out.CargasSociales = make(map[int64]map[int64]ParametroCargaSocial, len(rows))
+	for _, r := range rows {
+		regimen := int64(0)
+		if r.RegimenCCSSID.Valid {
+			regimen = r.RegimenCCSSID.Int64
+		}
+		etiqueta := fmt.Sprintf("carga social %s (regimen_ccss_id=%d)", r.ConceptoCodigo, regimen)
+		obr, err := frac(r.PorcentajeObrero, etiqueta+" obrero")
+		if err != nil {
+			return err
+		}
+		pat, err := frac(r.PorcentajePatronal, etiqueta+" patronal")
+		if err != nil {
+			return err
+		}
+		porRegimen := out.CargasSociales[r.ConceptoSalarialID]
+		if porRegimen == nil {
+			porRegimen = map[int64]ParametroCargaSocial{}
+			out.CargasSociales[r.ConceptoSalarialID] = porRegimen
+		}
+		if _, dup := porRegimen[regimen]; dup {
+			return fmt.Errorf("planilla: %s tiene más de una fila vigente al %s", etiqueta, f.Format("2006-01-02"))
+		}
+		porRegimen[regimen] = ParametroCargaSocial{ConceptoSalarialID: r.ConceptoSalarialID, RegimenCCSSID: regimen,
+			PorcentajePatronal: pat, PorcentajeObrero: obr}
 	}
 	return nil
 }
@@ -309,7 +344,6 @@ func (c *CargadorParametros) cargarHorasExtra(ctx context.Context, f time.Time, 
 	if len(rows) == 0 {
 		return faltante("no hay parametros_horas_extra vigentes al %s", f.Format("2006-01-02"))
 	}
-	// factor_recargo es multiplicador (1.5), NO porcentaje: no se convierte.
 	out.FactoresHoraExtra = make(map[int64]ParametroHoraExtra, len(rows))
 	for _, r := range rows {
 		out.FactoresHoraExtra[r.TipoHoraExtraID] = ParametroHoraExtra{
@@ -380,7 +414,7 @@ func (c *CargadorParametros) cargarEscalaEmbargo(ctx context.Context, f time.Tim
 	return nil
 }
 
-// cargarJornadas: divisor de la hora ordinaria por jornada (L12). Una jornada
+// cargarJornadas: divisor de la hora ordinaria por jornada. Una jornada
 // sin fila vigente no falla aquí: falla, con error explícito, el empleado de
 // esa jornada que tenga horas extra (MIXTA y NOCTURNA no se siembran).
 func (c *CargadorParametros) cargarJornadas(ctx context.Context, f time.Time, out *ParametrosCalculo) error {
@@ -389,11 +423,150 @@ func (c *CargadorParametros) cargarJornadas(ctx context.Context, f time.Time, ou
 		return fmt.Errorf("planilla: leyendo parametros_jornada: %w", err)
 	}
 	out.DivisorPorJornada = make(map[int64]decimal.Decimal, len(rows))
+	out.HorasDiariasPorJornada = make(map[int64]decimal.Decimal, len(rows))
 	for _, r := range rows {
 		if !r.DivisorHorasMensuales.IsPositive() {
 			return fmt.Errorf("planilla: divisor de horas de la jornada %s debe ser > 0, es %s", r.JornadaCodigo, r.DivisorHorasMensuales)
 		}
 		out.DivisorPorJornada[r.JornadaID] = r.DivisorHorasMensuales
+		if r.HorasDiariasOrdinarias.Valid {
+			if !r.HorasDiariasOrdinarias.Decimal.IsPositive() {
+				return fmt.Errorf("planilla: horas diarias de la jornada %s deben ser > 0, son %s", r.JornadaCodigo, r.HorasDiariasOrdinarias.Decimal)
+			}
+			out.HorasDiariasPorJornada[r.JornadaID] = r.HorasDiariasOrdinarias.Decimal
+		}
 	}
 	return nil
+}
+
+// ClaveAguinaldoMeses: divisor del aguinaldo (parametros_generales, 000118).
+const ClaveAguinaldoMeses = "AGUINALDO_MESES"
+
+// CargarAcumulado completa los parámetros de un período de clase aguinaldo o
+// salario_escolar. Faltante → ErrParametroFaltante.
+// CargarLiquidacion: parámetros propios de la planilla de liquidación.
+// Cotiza sin base mínima CCSS; LIQ_PRESTAMOS_MODO y LIQ_EMBARGO_MONTO_FIJO no
+// se exigen aquí (solo los necesita quien tiene préstamos o embargos de monto
+// fijo), pero si existen deben ser válidos.
+func (c *CargadorParametros) CargarLiquidacion(ctx context.Context, fecha time.Time, out *ParametrosCalculo) error {
+	out.SinBaseMinimaCCSS = true
+	modo, err := c.textoOpcional(ctx, ClaveLiqPrestamosModo, fecha, ModoPrestamosLiquidacionValido, "cuota | saldo | ninguno")
+	if err != nil {
+		return err
+	}
+	out.LiqPrestamosModo = modo
+	out.LiqEmbargoMontoFijo, err = c.textoOpcional(ctx, ClaveLiqEmbargoMontoFijo, fecha, ModoEmbargoMontoFijoValido, "mensual | por_periodo")
+	return err
+}
+
+func (c *CargadorParametros) CargarAcumulado(ctx context.Context, clase ClaseTipoPlanilla, fecha time.Time, out *ParametrosCalculo) error {
+	switch clase {
+	case ClaseAguinaldo:
+		m, err := c.decimalGeneral(ctx, ClaveAguinaldoMeses, fecha)
+		if err != nil {
+			return err
+		}
+		if !m.IsPositive() {
+			return fmt.Errorf("planilla: %s debe ser > 0, es %s", ClaveAguinaldoMeses, m)
+		}
+		out.AguinaldoMeses = m
+	case ClaseSalarioEscolar:
+		pct, err := c.fuente.ObtenerPorcentajeSalarioEscolarEnFecha(ctx, fecha)
+		if errors.Is(err, sql.ErrNoRows) {
+			return faltante("no hay parametros_salario_escolar vigente al %s", fecha.Format("2006-01-02"))
+		}
+		if err != nil {
+			return fmt.Errorf("planilla: leyendo parametros_salario_escolar: %w", err)
+		}
+		if !pct.IsPositive() || pct.GreaterThan(decimal.NewFromInt(1)) {
+			return fmt.Errorf("planilla: parametros_salario_escolar.porcentaje debe ser una fracción en (0, 1], es %s", pct)
+		}
+		out.PorcentajeSalarioEscolar = pct
+	default:
+		return ErrClaseNoAcumulable
+	}
+	return nil
+}
+
+// CargarMetodoRenta: RENTA_METODO_PERIODO, obligatorio solo en un período
+// regular que cubre una fracción del mes.
+func (c *CargadorParametros) CargarMetodoRenta(ctx context.Context, fecha time.Time, out *ParametrosCalculo) error {
+	m, err := c.generales.Texto(ctx, ClaveRentaMetodoPeriodo, fecha)
+	var nc parametros.ErrParametroNoConfigurado
+	switch {
+	case errors.As(err, &nc):
+		return fmt.Errorf("%w: %w", ErrParametroFaltante, err)
+	case err != nil:
+		return err
+	case !MetodoRentaValido(m):
+		return fmt.Errorf("planilla: %s = %q inválido (%s | %s)", ClaveRentaMetodoPeriodo, m, RentaAcumuladoMes, RentaProyeccion)
+	}
+	out.RentaMetodoPeriodo = m
+	return nil
+}
+
+// AjustesEmpleadoLector: valores propios de un empleado vigentes a una fecha
+// (empleado_parametros_generales).
+type AjustesEmpleadoLector interface {
+	ListarParametrosGeneralesEmpleadoEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) ([]dto.ParametroGeneralEmpleadoRow, error)
+}
+
+// ConAjustesPorEmpleado habilita los parámetros generales propios de un
+// empleado: lector dice si el empleado tiene alguno vigente y paraEmpleado da
+// el lector de generales que los aplica sobre los generales.
+func (c *CargadorParametros) ConAjustesPorEmpleado(lector AjustesEmpleadoLector, paraEmpleado func(empleadoID int64) GeneralesLector) *CargadorParametros {
+	c.ajustes, c.paraEmpleado = lector, paraEmpleado
+	return c
+}
+
+// AjustesEmpleado: clave -> valor de los parámetros generales propios del
+// empleado vigentes a `fecha`; nil si no tiene o no están habilitados.
+func (c *CargadorParametros) AjustesEmpleado(ctx context.Context, empleadoID int64, fecha time.Time) (map[string]string, error) {
+	if c.ajustes == nil || c.paraEmpleado == nil {
+		return nil, nil
+	}
+	filas, err := c.ajustes.ListarParametrosGeneralesEmpleadoEnFecha(ctx, empleadoID, fecha)
+	if err != nil {
+		return nil, fmt.Errorf("planilla: leyendo parámetros propios del empleado_id=%d: %w", empleadoID, err)
+	}
+	if len(filas) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(filas))
+	for _, f := range filas {
+		out[f.Clave] = f.Valor
+	}
+	return out, nil
+}
+
+// ParametrosEmpleado: los parámetros del período con los generales propios del
+// empleado. Vuelve a resolver todo lo que sale de parametros_generales (base,
+// liquidación, acumulado y método de renta según la clase); las tablas
+// paramétricas se comparten con el período.
+func (c *CargadorParametros) ParametrosEmpleado(ctx context.Context, empleadoID int64, clase ClaseTipoPlanilla, fecha time.Time, base ParametrosCalculo) (ParametrosCalculo, error) {
+	ce := &CargadorParametros{fuente: c.fuente, generales: c.paraEmpleado(empleadoID)}
+	p := base
+	if err := ce.cargarGenerales(ctx, fecha, &p); err != nil {
+		return ParametrosCalculo{}, err
+	}
+	switch clase {
+	case ClaseAguinaldo, ClaseSalarioEscolar:
+		if err := ce.CargarAcumulado(ctx, clase, fecha, &p); err != nil {
+			return ParametrosCalculo{}, err
+		}
+	case ClaseLiquidacion:
+		if err := ce.CargarLiquidacion(ctx, fecha, &p); err != nil {
+			return ParametrosCalculo{}, err
+		}
+	default:
+		if p.FraccionMensualPeriodo.IsPositive() {
+			p.DiasPeriodoCompleto = p.DivisorDiasMes.Mul(p.FraccionMensualPeriodo)
+			if p.FraccionMensualPeriodo.LessThan(decimal.NewFromInt(1)) {
+				if err := ce.CargarMetodoRenta(ctx, fecha, &p); err != nil {
+					return ParametrosCalculo{}, err
+				}
+			}
+		}
+	}
+	return p, nil
 }

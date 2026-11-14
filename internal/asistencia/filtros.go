@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
 // parseFechaQuery lee un query param de fecha (YYYY-MM-DD); devuelve nil si
@@ -41,7 +41,7 @@ func parseActivoQuery(c *gin.Context) *bool {
 	return &activo
 }
 
-func turnosFiltro(c *gin.Context, p pagination.Parametros) dto.ListarTurnosParams {
+func turnosFiltro(c *gin.Context, p paginacion.Parametros) dto.ListarTurnosParams {
 	return dto.ListarTurnosParams{
 		Activo: parseActivoQuery(c),
 		Limit:  int32(p.Tamano),
@@ -49,7 +49,7 @@ func turnosFiltro(c *gin.Context, p pagination.Parametros) dto.ListarTurnosParam
 	}
 }
 
-func asistenciaFiltro(c *gin.Context, empleadoID int64, p pagination.Parametros) dto.ListarAsistenciaEmpleadoParams {
+func asistenciaFiltro(c *gin.Context, empleadoID int64, p paginacion.Parametros) dto.ListarAsistenciaEmpleadoParams {
 	return dto.ListarAsistenciaEmpleadoParams{
 		EmpleadoID: empleadoID,
 		Estado:     parseEstadoQuery(c),
@@ -69,7 +69,7 @@ func asistenciaFiltroConteo(c *gin.Context, empleadoID int64) dto.ContarAsistenc
 	}
 }
 
-func buildListarIncapacidadesParams(empleadoID int64, entidad *string, p pagination.Parametros) dto.ListarIncapacidadesEmpleadoParams {
+func buildListarIncapacidadesParams(empleadoID int64, entidad *string, p paginacion.Parametros) dto.ListarIncapacidadesEmpleadoParams {
 	return dto.ListarIncapacidadesEmpleadoParams{
 		EmpleadoID:     empleadoID,
 		EntidadEmisora: entidad,

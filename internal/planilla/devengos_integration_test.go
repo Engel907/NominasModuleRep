@@ -7,10 +7,10 @@ import (
 	"errors"
 	"testing"
 
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
-func TestL9DevengosManuales(t *testing.T) {
+func TestDevengosManuales(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	f.sembrarSalarioMinimoInembargable(t)
 	ctx := context.Background()
@@ -27,7 +27,6 @@ func TestL9DevengosManuales(t *testing.T) {
 		t.Fatalf("devengo creado: %+v", r)
 	}
 
-	// Concepto que no es de captura manual (SAL_BASE) -> 422; monto inválido -> 400.
 	if _, err := dev.Crear(ctx, f.preparador, p.ID, NuevoDevengo{EmpleadoID: f.emp[2], ConceptoSalarialID: f.concepto["SAL_BASE"], Monto: d("10")}); !errors.Is(err, ErrConceptoNoCapturable) {
 		t.Errorf("SAL_BASE no es capturable: %v", err)
 	}
@@ -44,12 +43,11 @@ func TestL9DevengosManuales(t *testing.T) {
 	if err := dev.Eliminar(ctx, f.preparador, p.ID, borrar.ID); !errors.Is(err, ErrDevengoNoEncontrado) {
 		t.Errorf("eliminar dos veces: %v", err)
 	}
-	filas, total, err := dev.Listar(ctx, p.ID, nil, pagination.Parametros{})
+	filas, total, err := dev.Listar(ctx, p.ID, nil, paginacion.Parametros{})
 	if err != nil || total != 1 || len(filas) != 1 {
 		t.Fatalf("listar: %d filas, total %d, %v", len(filas), total, err)
 	}
 
-	// El motor consume el devengo.
 	if _, err := svc.Calcular(ctx, f.preparador, p.ID); err != nil {
 		t.Fatalf("calcular: %v", err)
 	}
@@ -61,7 +59,6 @@ WHERE pde.periodo_planilla_id = ? AND pde.empleado_id = ? AND pdc.concepto_salar
 		t.Fatalf("línea COMISIONES = %q, %v", monto, err)
 	}
 
-	// Período calculado: no admite devengos (409).
 	if _, err := dev.Crear(ctx, f.preparador, p.ID, NuevoDevengo{EmpleadoID: f.emp[1], ConceptoSalarialID: f.concepto["COMISIONES"], Monto: d("5")}); !errors.Is(err, ErrEstadoInvalido) {
 		t.Errorf("devengo en período calculado: %v, se esperaba 409", err)
 	}

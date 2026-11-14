@@ -17,7 +17,7 @@ func tramosCCSS() []TramoSubsidio {
 }
 
 func TestCalcularSubsidioIncapacidadGolden(t *testing.T) {
-	diario := d("30000") // 900 000 / 30
+	diario := d("30000")
 	casos := []struct {
 		nombre               string
 		desde, hasta         string
@@ -27,15 +27,9 @@ func TestCalcularSubsidioIncapacidadGolden(t *testing.T) {
 		lineas               int
 		primeraSerieHastaEsp int32
 	}{
-		// 2 días (serie 1–2): 30 000 × 2 × 50 % = 30 000
 		{"2 días dentro del período", "2026-03-10", "2026-03-11", 1, 2, "30000", "0", 1, 2},
-		// Marzo de una boleta 25-mar..3-abr: serie 1–7. Días 1–3 → patrono
-		// 30 000 × 3 × 50 % = 45 000; días 4–7 (28, 29, 30, 31; el 31 vale 0) →
-		// CCSS 30 000 × 3 × 60 % = 54 000.
 		{"boleta que cruza: parte de marzo", "2026-03-25", "2026-03-31", 1, 6, "45000", "54000", 2, 3},
-		// Abril de la misma boleta: serie 8–10, todo tramo abierto (sin dia_hasta).
 		{"boleta que cruza: parte de abril (serie continua)", "2026-04-01", "2026-04-03", 8, 3, "0", "54000", 1, 10},
-		// Todo marzo: 3 días patrono (45 000) + 27 días CCSS × 30 000 × 60 % = 486 000.
 		{"cubre todo el período", "2026-03-01", "2026-03-31", 1, 30, "45000", "486000", 2, 3},
 	}
 	for _, c := range casos {
@@ -96,13 +90,11 @@ func TestCalcularEmpleadoConIncapacidad(t *testing.T) {
 		lineasIncapacidad  int
 		totalIngresosEsper string
 	}{
-		// 900 000 × 28/30 = 840 000; SUB_INCAP 30 000
 		{"2 días", "2026-03-10", "2026-03-11", "28", "840000", "30000", 1, "870000"},
-		// salario 0; SUB_INCAP solo días 1–3 = 45 000 (los 27 de CCSS no suman)
 		{"todo el período", "2026-03-01", "2026-03-31", "0", "0", "45000", 2, "45000"},
 	}
 	for _, c := range casos {
-		in := CalculoEmpleadoInput{EmpleadoID: 7, FechaEfectiva: time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC),
+		in := CalculoEmpleadoInput{EmpleadoID: 7, RegimenCCSSID: 1, FechaEfectiva: time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC),
 			Segmentos: seg, DiasTrabajados: d(c.diasTrab),
 			Incapacidades: []IncapacidadInput{{IncapacidadID: 9, EntidadEmisoraID: 1, Desde: fecha(c.desde), Hasta: fecha(c.hasta), DiaSerieDesde: 1}}}
 		r, err := NewMotorEmpleado(repo).CalcularEmpleado(context.Background(), in, p)
@@ -123,8 +115,7 @@ func TestCalcularEmpleadoConIncapacidad(t *testing.T) {
 		}
 	}
 
-	// DiasTrabajados que no descuenta la incapacidad: error (no se paga dos veces).
-	in := CalculoEmpleadoInput{EmpleadoID: 7, FechaEfectiva: time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC), Segmentos: seg, DiasTrabajados: d("30"),
+	in := CalculoEmpleadoInput{EmpleadoID: 7, RegimenCCSSID: 1, FechaEfectiva: time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC), Segmentos: seg, DiasTrabajados: d("30"),
 		Incapacidades: []IncapacidadInput{{IncapacidadID: 9, EntidadEmisoraID: 1, Desde: fecha("2026-03-10"), Hasta: fecha("2026-03-11"), DiaSerieDesde: 1}}}
 	if _, err := NewMotorEmpleado(repo).CalcularEmpleado(context.Background(), in, p); err == nil {
 		t.Fatal("DiasTrabajados sin descontar la incapacidad debe dar error")

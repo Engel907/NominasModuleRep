@@ -1,4 +1,4 @@
-package security
+package credenciales
 
 import (
 	"encoding/json"
@@ -31,24 +31,15 @@ const (
 )
 
 // Payload es el contenido verificado de un token PASETO v4 local.
-//
-// F15 (S7/S17): el token lleva iss, aud, iat, nbf, exp, jti (registrados) y los
-// claims propios uid, usr, perm, rcp, pv, tipo. El footer lleva el kid de la
-// clave con que se cifró. "pv" es la versión de permisos del usuario al emitir:
-// el middleware la compara contra la BD (con caché corta) para que una
-// revocación de rol, la desactivación o un cambio de contraseña surtan efecto
-// en <= AUTH_CACHE_TTL y no al expirar el access token.
-//
-// El refresh token NO lleva Permisos ni pv: sus permisos se re-resuelven en BD.
 type Payload struct {
 	ID            uuid.UUID
 	Tipo          TipoToken
 	UsuarioID     int64
 	NombreUsuario string
 	Permisos      []string
-	// RequiereCambioPassword (claim "rcp", F14).
+	// RequiereCambioPassword (claim "rcp").
 	RequiereCambioPassword bool
-	// PermisosVersion (claim "pv", F15).
+	// PermisosVersion (claim "pv").
 	PermisosVersion uint32
 	// KID de la clave con que se cifró (footer).
 	KID       string
@@ -160,7 +151,7 @@ func (m *PasetoMaker) CrearAccessToken(usuarioID int64, nombreUsuario string, pe
 	return m.crearToken(TipoTokenAcceso, usuarioID, nombreUsuario, permisos, rcp, pv, duracion)
 }
 
-// CrearRefreshToken no recibe permisos ni pv — ver comentario en Payload.
+// CrearRefreshToken emite un refresh token; no lleva permisos ni pv.
 func (m *PasetoMaker) CrearRefreshToken(usuarioID int64, duracion time.Duration) (string, *Payload, error) {
 	return m.crearToken(TipoTokenRefresco, usuarioID, "", nil, false, 0, duracion)
 }
@@ -169,8 +160,6 @@ func (m *PasetoMaker) CrearRefreshToken(usuarioID int64, duracion time.Duration)
 // tipo. Los tokens sin esos claims se rechazan. La revocación efectiva
 // (usuario inactivo / pv distinto) la aplica el middleware, no este método.
 func (m *PasetoMaker) VerificarToken(token string, tipoEsperado TipoToken) (*Payload, error) {
-	// Parser sin chequeo de expiración automático: se valida a mano para poder
-	// distinguir ErrTokenExpirado. Las reglas de iss/aud sí son del parser.
 	parser := paseto.NewParserWithoutExpiryCheck()
 	parser.AddRule(paseto.IssuedBy(m.issuer), paseto.ForAudience(m.audience))
 
@@ -230,7 +219,6 @@ func (m *PasetoMaker) VerificarToken(token string, tipoEsperado TipoToken) (*Pay
 	if err := t.Get("pv", &p.PermisosVersion); err != nil {
 		return nil, ErrTokenInvalido
 	}
-	// "perm" es opcional (refresh y usuarios sin permisos no lo llevan).
 	_ = t.Get("perm", &p.Permisos)
 	return p, nil
 }

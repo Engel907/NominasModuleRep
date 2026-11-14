@@ -1,10 +1,5 @@
-// Comando de jobs/batch de planillas. Subcomandos:
-//
-//	verificar-parametros [--fecha YYYY-MM-DD]
-//
-// Códigos de salida: 0 = todo en orden; 1 = hay requeridos sin valor vigente;
-// 2 = uso incorrecto o error operativo (config, BD, tipo/valor ilegible).
-// L25 y L27 agregan más subcomandos.
+// Command jobs ejecuta los procesos batch de planillas: verificar-parametros,
+// acumular-vacaciones, cerrar-salidas y cifrar-existentes.
 package main
 
 import (
@@ -20,6 +15,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"planillas-ccdr/internal/config"
+	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/parametros"
 )
 
@@ -43,6 +39,12 @@ func ejecutar(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	switch args[0] {
 	case "verificar-parametros":
 		return cmdVerificarParametros(ctx, args[1:], stdout, stderr)
+	case "acumular-vacaciones":
+		return cmdAcumularVacaciones(ctx, args[1:], stdout, stderr)
+	case "cerrar-salidas":
+		return cmdCerrarSalidas(ctx, args[1:], stdout, stderr)
+	case "cifrar-existentes":
+		return cmdCifrarExistentes(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		uso(stdout)
 		return codigoOK
@@ -56,6 +58,9 @@ func ejecutar(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 func uso(w io.Writer) {
 	fmt.Fprintln(w, "uso: jobs <subcomando> [opciones]")
 	fmt.Fprintln(w, "  verificar-parametros [--fecha YYYY-MM-DD]   lista los parámetros requeridos sin valor vigente (sale con 1 si hay alguno)")
+	fmt.Fprintln(w, "  acumular-vacaciones --usuario-id N [--fecha YYYY-MM-DD]   acredita vacaciones según VACACIONES_POLITICA_ACUMULACION (idempotente; sale con 1 si algún empleado falló)")
+	fmt.Fprintln(w, "  cerrar-salidas --usuario-id N [--fecha YYYY-MM-DD]   cierra contrato y baja de las liquidaciones con salida programada hasta la fecha (idempotente; sale con 1 si alguna falló)")
+	fmt.Fprintln(w, "  cifrar-existentes --usuario-id N [--lote 500] [--recifrar]   cifra lo que siga en claro y, con --recifrar, rota la llave de datos (Ley 8968)")
 }
 
 func cmdVerificarParametros(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -94,7 +99,6 @@ func cmdVerificarParametros(ctx context.Context, args []string, stdout, stderr i
 	ctx, cancel := context.WithTimeout(ctx, timeoutComando)
 	defer cancel()
 
-	// TTL 0: un job siempre lee el valor fresco de la BD.
 	g := parametros.NewGenerales(parametros.NewRepositorioSQL(sqlDB), 0)
 	return verificar(ctx, g, fecha, stdout, stderr)
 }
@@ -134,24 +138,5 @@ func resolverFecha(valor string, ahora time.Time) (time.Time, error) {
 }
 
 // connectDB abre el pool a MySQL con los mismos timeouts y TLS que cmd/api.
-func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) {
-	if err := dbCfg.RegistrarTLS(); err != nil {
-		return nil, err
-	}
-	sqlDB, err := sql.Open("mysql", dbCfg.DSN())
-	if err != nil {
-		return nil, err
-	}
-	sqlDB.SetMaxOpenConns(dbCfg.MaxOpenConns)
-	sqlDB.SetMaxIdleConns(dbCfg.MaxIdleConns)
-	sqlDB.SetConnMaxLifetime(dbCfg.ConnMaxLifetime)
-	sqlDB.SetConnMaxIdleTime(dbCfg.ConnMaxIdleTime)
-
-	ctx, cancel := context.WithTimeout(context.Background(), dbCfg.PingTimeout)
-	defer cancel()
-	if err := sqlDB.PingContext(ctx); err != nil {
-		_ = sqlDB.Close()
-		return nil, err
-	}
-	return sqlDB, nil
-}
+// connectDB: ver internal/db.Conectar (una sola implementación).
+func connectDB(dbCfg config.DatabaseConfig) (*sql.DB, error) { return db.Conectar(dbCfg) }

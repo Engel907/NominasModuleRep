@@ -1,8 +1,3 @@
-// Orquestador del cálculo de un período (implementa Calculador de F19).
-//
-// Corre DENTRO de la transacción que abre PeriodoService: si cualquier
-// empleado falla, devuelve ErrCalculoConErrores con TODOS los errores, la
-// transacción se revierte y la BD queda idéntica (todo o nada).
 package planilla
 
 import (
@@ -15,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/shopspring/decimal"
 
 	"planillas-ccdr/internal/db/dto"
 )
@@ -43,19 +39,32 @@ func (e *ErrCalculoConErrores) Error() string {
 	return fmt.Sprintf("planilla: %d empleado(s) con errores; no se persistió el cálculo", len(e.Errores))
 }
 
+// ObservadorCalculo: recibe la duración y el resultado de cada cálculo
+// de período (métricas). nil = sin observación.
+type ObservadorCalculo interface {
+	ObservarCalculo(clase string, duracion time.Duration, empleadosConError int, ok bool)
+}
+
 type Orquestador struct {
-	h     *Hidratador
-	m     *MotorEmpleado
-	c     *CargadorParametros
-	w     *EscritorDetalle
-	tipos TipoPlanillaLector
+	obs      ObservadorCalculo
+	h        *Hidratador
+	m        *MotorEmpleado
+	c        *CargadorParametros
+	w        *EscritorDetalle
+	tipos    TipoPlanillaLector
+	ventanas *Ventanas // valida que un período de acumulado sea su ventana de cálculo
 }
 
 var _ Calculador = (*Orquestador)(nil)
 
-func NewOrquestador(h *Hidratador, m *MotorEmpleado, c *CargadorParametros, w *EscritorDetalle, tipos TipoPlanillaLector) *Orquestador {
-	return &Orquestador{h: h, m: m, c: c, w: w, tipos: tipos}
+func NewOrquestador(h *Hidratador, m *MotorEmpleado, c *CargadorParametros, w *EscritorDetalle, tipos TipoPlanillaLector, ventanas *Ventanas) *Orquestador {
+	return &Orquestador{h: h, m: m, c: c, w: w, tipos: tipos, ventanas: ventanas}
 }
+
+// ErrPeriodoNoEsVentana: un período de aguinaldo/salario escolar debe tener
+// exactamente las fechas de su ventana de cálculo (créelo con
+// POST /aguinaldo|salario-escolar/:anio/ejecutar).
+var ErrPeriodoNoEsVentana = &ErrorCiclo{"periodo_no_es_ventana", "las fechas del período no coinciden con la ventana de cálculo del acumulado", 422}
 
 // snapshotCalculo: lo que se guarda en periodos_planilla.parametros_snapshot
 // para reconstruir con qué valores se calculó (porcentajes en FRACCIÓN).
@@ -68,9 +77,36 @@ type snapshotCalculo struct {
 	Clase          string             `json:"clase"`
 	CalculadoEn    time.Time          `json:"calculado_en"`
 	Parametros     *ParametrosCalculo `json:"parametros"`
+	// AjustesPorEmpleado: parámetros generales propios con que se calculó cada
+	// empleado que los tiene (empleado_id -> clave -> valor).
+	AjustesPorEmpleado map[int64]map[string]string `json:"ajustes_por_empleado,omitempty"`
 }
 
-func (o *Orquestador) Calcular(ctx context.Context, q *dto.Queries, periodo dto.PeriodoCicloRow, usuarioID int64) error {
+// ConObservador agrega el observador de métricas.
+func (o *Orquestador) ConObservador(obs ObservadorCalculo) *Orquestador {
+	o.obs = obs
+	return o
+}
+
+func (o *Orquestador) Calcular(ctx context.Context, q *dto.Queries, periodo dto.PeriodoCicloRow, usuarioID int64) (err error) {
+	if o.obs != nil {
+		inicio, clase := time.Now(), "desconocida"
+		defer func() {
+			if t, e := o.tipos.ObtenerTipoPlanilla(ctx, periodo.TipoPlanillaID); e == nil {
+				clase = t.Clase
+			}
+			n := 0
+			var ce *ErrCalculoConErrores
+			if errors.As(err, &ce) {
+				n = len(ce.Errores)
+			}
+			o.obs.ObservarCalculo(clase, time.Since(inicio), n, err == nil)
+		}()
+	}
+	return o.calcular(ctx, q, periodo)
+}
+
+func (o *Orquestador) calcular(ctx context.Context, q *dto.Queries, periodo dto.PeriodoCicloRow) error {
 	tipo, err := o.tipos.ObtenerTipoPlanilla(ctx, periodo.TipoPlanillaID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrTipoPlanillaNoEncontrado
@@ -78,18 +114,25 @@ func (o *Orquestador) Calcular(ctx context.Context, q *dto.Queries, periodo dto.
 	if err != nil {
 		return fmt.Errorf("planilla: leyendo tipo de planilla %d: %w", periodo.TipoPlanillaID, err)
 	}
-	// Aguinaldo, salario escolar y liquidación entran al motor en L19/L22.
-	if ClaseTipoPlanilla(tipo.Clase) != ClaseRegular {
+	clase := ClaseTipoPlanilla(tipo.Clase)
+	acumulado := clase == ClaseAguinaldo || clase == ClaseSalarioEscolar
+	liquidacion := clase == ClaseLiquidacion
+	if clase != ClaseRegular && !acumulado && !liquidacion {
 		return ErrClaseNoSoportada
 	}
-	if !tipo.FraccionMensual.Valid || !tipo.FraccionMensual.Decimal.IsPositive() {
+	if clase == ClaseRegular && (!tipo.FraccionMensual.Valid || !tipo.FraccionMensual.Decimal.IsPositive()) {
 		return fmt.Errorf("planilla: el tipo de planilla %d (regular) no tiene fraccion_mensual válida", tipo.ID)
 	}
 
 	params, err := o.c.Cargar(ctx, periodo.FechaInicio, periodo.FechaFin)
+	if err == nil && acumulado {
+		err = o.c.CargarAcumulado(ctx, clase, periodo.FechaFin, params)
+	}
+	if err == nil && liquidacion {
+		err = o.c.CargarLiquidacion(ctx, periodo.FechaFin, params)
+	}
 	if err != nil {
 		if errors.Is(err, ErrParametroFaltante) || errors.Is(err, ErrTramosRentaInvalidos) {
-			// El mensaje del cargador es de dominio (clave y fecha), apto para el cliente.
 			return &ErrorCiclo{Codigo: ErrParametrosIncompletos.Codigo, Mensaje: err.Error(), HTTP: ErrParametrosIncompletos.HTTP}
 		}
 		return fmt.Errorf("planilla: cargando parámetros: %w", err)
@@ -98,14 +141,33 @@ func (o *Orquestador) Calcular(ctx context.Context, q *dto.Queries, periodo dto.
 	if err != nil {
 		return &ErrorCiclo{Codigo: ErrParametrosIncompletos.Codigo, Mensaje: err.Error(), HTTP: ErrParametrosIncompletos.HTTP}
 	}
-	fraccion := tipo.FraccionMensual.Decimal
-	params.FraccionMensualPeriodo = fraccion
-	params.DiasPeriodoCompleto = params.DivisorDiasMes.Mul(fraccion)
+	var fraccion decimal.Decimal
+	anio := int32(0)
+	if acumulado {
+		v, err := o.ventanaDelPeriodo(ctx, clase, periodo)
+		if err != nil {
+			return err
+		}
+		anio = int32(v.Anio)
+	} else if !liquidacion {
+		fraccion = tipo.FraccionMensual.Decimal
+		params.FraccionMensualPeriodo = fraccion
+		params.DiasPeriodoCompleto = params.DivisorDiasMes.Mul(fraccion)
+		if fraccion.LessThan(decimal.NewFromInt(1)) {
+			if err := o.c.CargarMetodoRenta(ctx, periodo.FechaFin, params); err != nil {
+				if errors.Is(err, ErrParametroFaltante) {
+					return &ErrorCiclo{Codigo: ErrParametrosIncompletos.Codigo, Mensaje: err.Error(), HTTP: ErrParametrosIncompletos.HTTP}
+				}
+				return fmt.Errorf("planilla: cargando parámetros: %w", err)
+			}
+		}
+	}
 
 	pc := PeriodoParaCalculo{
 		ID: periodo.ID, Inicio: periodo.FechaInicio, Fin: periodo.FechaFin,
 		Clase: tipo.Clase, TipoPlanillaID: tipo.ID, FraccionMensual: fraccion,
 		DiasPeriodoCompleto: params.DiasPeriodoCompleto, DivisorDiasMes: divisor,
+		LiqPrestamosModo: params.LiqPrestamosModo,
 	}
 	ids, err := o.h.EmpleadosDelPeriodo(ctx, pc)
 	if err != nil {
@@ -118,20 +180,41 @@ func (o *Orquestador) Calcular(ctx context.Context, q *dto.Queries, periodo dto.
 	var (
 		resultados []ResultadoPersistible
 		errores    []EmpleadoErrorOutput
+		ajustes    = map[int64]map[string]string{}
 	)
 	for _, id := range ids {
-		r, codigo, err := o.calcularEmpleado(ctx, pc, *params, id)
+		pcE, pE, aj, err := o.parametrosDelEmpleado(ctx, clase, periodo, pc, *params, id)
 		if err != nil {
 			if esErrorInfraestructura(err) {
-				return err // falla de BD/red: no es culpa del empleado, se aborta con 500
+				return err
+			}
+			errores = append(errores, EmpleadoErrorOutput{EmpleadoID: id, Codigo: "parametros_empleado_invalidos", Mensaje: err.Error()})
+			continue
+		}
+		if aj != nil {
+			ajustes[id] = aj
+		}
+		r, codigo, err := o.calcularEmpleado(ctx, pcE, pE, id)
+		if err != nil {
+			if esErrorInfraestructura(err) {
+				return err
 			}
 			errores = append(errores, EmpleadoErrorOutput{EmpleadoID: id, Codigo: codigo, Mensaje: err.Error()})
 			continue
+		}
+		if acumulado {
+			if !r.Detalle.TotalIngresos.IsPositive() {
+				continue
+			}
+			r.Acumulado = acumuladoDe(clase, anio, periodo, r, pE)
 		}
 		resultados = append(resultados, r)
 	}
 	if len(errores) > 0 {
 		return &ErrCalculoConErrores{Errores: errores}
+	}
+	if len(resultados) == 0 {
+		return ErrPeriodoSinEmpleados
 	}
 
 	if err := o.w.Escribir(ctx, q, periodo.ID, resultados); err != nil {
@@ -146,11 +229,64 @@ func (o *Orquestador) Calcular(ctx context.Context, q *dto.Queries, periodo dto.
 		Clase:          tipo.Clase,
 		CalculadoEn:    time.Now().UTC(),
 		Parametros:     params,
+
+		AjustesPorEmpleado: ajustes,
 	})
 	if err != nil {
 		return fmt.Errorf("planilla: serializando snapshot: %w", err)
 	}
 	return o.w.GuardarSnapshot(ctx, q, periodo.ID, snap, VersionMotor)
+}
+
+// parametrosDelEmpleado: período y parámetros con que se calcula el empleado.
+// Si tiene parámetros generales propios vigentes a la fecha fin, se vuelven a
+// resolver con ellos (y con ellos el divisor y los días del período); si no,
+// los del período. aj = los valores propios aplicados (nil si no tiene).
+func (o *Orquestador) parametrosDelEmpleado(ctx context.Context, clase ClaseTipoPlanilla, periodo dto.PeriodoCicloRow,
+	pc PeriodoParaCalculo, p ParametrosCalculo, empleadoID int64) (PeriodoParaCalculo, ParametrosCalculo, map[string]string, error) {
+	aj, err := o.c.AjustesEmpleado(ctx, empleadoID, periodo.FechaFin)
+	if err != nil || aj == nil {
+		return pc, p, nil, err
+	}
+	pe, err := o.c.ParametrosEmpleado(ctx, empleadoID, clase, periodo.FechaFin, p)
+	if err != nil {
+		return pc, p, nil, fmt.Errorf("planilla: empleado_id=%d, parámetros propios: %w", empleadoID, err)
+	}
+	div, err := divisorEntero(pe.DivisorDiasMes)
+	if err != nil {
+		return pc, p, nil, fmt.Errorf("planilla: empleado_id=%d, parámetros propios: %w", empleadoID, err)
+	}
+	pc.DivisorDiasMes, pc.DiasPeriodoCompleto, pc.LiqPrestamosModo = div, pe.DiasPeriodoCompleto, pe.LiqPrestamosModo
+	return pc, pe, aj, nil
+}
+
+// ventanaDelPeriodo: el año del acumulado es el de fecha_fin y el período debe
+// coincidir exactamente con la ventana de cálculo de ese año (los parámetros
+// de la ventana se leen a fecha_fin).
+func (o *Orquestador) ventanaDelPeriodo(ctx context.Context, clase ClaseTipoPlanilla, periodo dto.PeriodoCicloRow) (VentanaAcumulado, error) {
+	if o.ventanas == nil {
+		return VentanaAcumulado{}, ErrClaseNoSoportada
+	}
+	v, err := o.ventanas.Ventana(ctx, clase, periodo.FechaFin.Year(), periodo.FechaFin)
+	if err != nil {
+		return VentanaAcumulado{}, err
+	}
+	if !v.CalculoDesde.Equal(soloFecha(periodo.FechaInicio)) || !v.CalculoHasta.Equal(soloFecha(periodo.FechaFin)) {
+		return VentanaAcumulado{}, &ErrorCiclo{Codigo: ErrPeriodoNoEsVentana.Codigo, HTTP: ErrPeriodoNoEsVentana.HTTP,
+			Mensaje: fmt.Sprintf("el %s %d se calcula del %s al %s", clase, v.Anio,
+				v.CalculoDesde.Format("2006-01-02"), v.CalculoHasta.Format("2006-01-02"))}
+	}
+	return v, nil
+}
+
+// acumuladoDe arma la fila de aguinaldos / salarios_escolares del empleado.
+func acumuladoDe(clase ClaseTipoPlanilla, anio int32, periodo dto.PeriodoCicloRow, r ResultadoPersistible, p ParametrosCalculo) *AcumuladoPersistible {
+	a := &AcumuladoPersistible{Clase: clase, Anio: anio, Desde: periodo.FechaInicio, Hasta: periodo.FechaFin,
+		TotalBase: r.Detalle.baseAcumulada, Monto: r.Detalle.TotalIngresos}
+	if clase == ClaseSalarioEscolar {
+		a.Porcentaje = p.PorcentajeSalarioEscolar
+	}
+	return a
 }
 
 // calcularEmpleado hidrata, calcula y valida el cuadre de un empleado.
@@ -160,11 +296,14 @@ func (o *Orquestador) calcularEmpleado(ctx context.Context, pc PeriodoParaCalcul
 	if err != nil {
 		var sinContrato ErrEmpleadoSinContrato
 		var sinLaborales ErrEmpleadoSinDatosLaborales
+		var sinRegimen ErrEmpleadoSinRegimenCCSS
 		switch {
 		case errors.As(err, &sinContrato):
 			return ResultadoPersistible{}, "empleado_sin_contrato", err
 		case errors.As(err, &sinLaborales):
 			return ResultadoPersistible{}, "empleado_sin_datos_laborales", err
+		case errors.As(err, &sinRegimen):
+			return ResultadoPersistible{}, "empleado_sin_regimen_ccss", err
 		}
 		return ResultadoPersistible{}, "datos_incompletos", err
 	}
@@ -172,9 +311,14 @@ func (o *Orquestador) calcularEmpleado(ctx context.Context, pc PeriodoParaCalcul
 	if err != nil {
 		return ResultadoPersistible{}, "calculo_invalido", err
 	}
+	det.baseAcumulada = ent.Input.BaseAguinaldoAcumulada.Add(ent.Input.BaseSalarioEscolarAcumulada)
 	r := ResultadoPersistible{
 		Detalle: det, ContratoID: ent.ContratoID, ProgramaPresupuestarioID: ent.ProgramaPresupuestarioID,
 		Patronal: det.Patronal, Incapacidad: det.Incapacidades, Prestamos: det.Prestamos,
+		VacacionesCompensadas: det.VacacionesCompensadas,
+	}
+	if ent.Input.Liquidacion != nil {
+		r.LiquidacionID = ent.Input.Liquidacion.LiquidacionID
 	}
 	if err := verificarCuadre(r); err != nil {
 		return ResultadoPersistible{}, "detalle_no_cuadra", err
@@ -184,7 +328,7 @@ func (o *Orquestador) calcularEmpleado(ctx context.Context, pc PeriodoParaCalcul
 
 // esErrorInfraestructura: errores de BD, conexión o contexto. Esos abortan el
 // cálculo completo (500) en vez de reportarse como error de un empleado, y su
-// texto nunca llega al cliente (D9).
+// texto nunca llega al cliente.
 func esErrorInfraestructura(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me) ||

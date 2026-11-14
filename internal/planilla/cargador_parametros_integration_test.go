@@ -30,7 +30,7 @@ func sembrarSalarioMinimoFixture(t *testing.T, db *sql.DB) {
 INSERT INTO parametros_generales
 	(clave, valor, tipo, descripcion, fuente_legal, fecha_inicio_vigencia, fecha_fin_vigencia, creado_por)
 VALUES
-	(?, ?, 'decimal', 'Fixture de prueba L4', 'FIXTURE DE PRUEBA - NO ES UN VALOR LEGAL', '2026-01-01', NULL, 1)`,
+	(?, ?, 'decimal', 'Fixture de prueba', 'FIXTURE DE PRUEBA - NO ES UN VALOR LEGAL', '2026-01-01', NULL, 1)`,
 		parametros.ClaveSalarioMinimoInembargable, montoFixtureSalarioMinimo)
 	if err != nil {
 		t.Fatalf("sembrando fixture de %s: %v", parametros.ClaveSalarioMinimoInembargable, err)
@@ -56,8 +56,16 @@ func TestCargadorSeedsReales(t *testing.T) {
 			t.Errorf("%s = %s, se esperaba %s", nombre, got, want)
 		}
 	}
-	eq("CCSS obrero", p.CargaSocial.PorcentajeObrero, "0.1083")
-	eq("CCSS patronal", p.CargaSocial.PorcentajePatronal, "0.2683")
+	idConcepto := func(codigo string) int64 {
+		t.Helper()
+		var id int64
+		if err := db.QueryRow(`SELECT id FROM conceptos_salariales WHERE codigo = ?`, codigo).Scan(&id); err != nil {
+			t.Fatalf("concepto %s: %v", codigo, err)
+		}
+		return id
+	}
+	eq("CCSS obrero", p.CargasSociales[idConcepto("CCSS_OBR")][0].PorcentajeObrero, "0.1083")
+	eq("CCSS patronal", p.CargasSociales[idConcepto("CCSS_PAT")][0].PorcentajePatronal, "0.2683")
 	if len(p.TramosRenta) != 5 {
 		t.Fatalf("tramos renta = %d, se esperaban 5", len(p.TramosRenta))
 	}
@@ -67,7 +75,7 @@ func TestCargadorSeedsReales(t *testing.T) {
 	if !p.TramosRenta[4].Abierto {
 		t.Fatal("el último tramo de renta debe estar marcado como abierto")
 	}
-	eq("divisor de la jornada DIURNA (sembrado desde HORAS_MENSUALES_ORDINARIAS)", p.DivisorPorJornada[1], "240")
+	eq("divisor de la jornada DIURNA", p.DivisorPorJornada[1], "240")
 	eq("divisor de días del mes", p.DivisorDiasMes, "30")
 	eq("salario mínimo inembargable", p.SalarioMinimoInembargable, montoFixtureSalarioMinimo)
 	if len(p.FactoresHoraExtra) == 0 || len(p.SubsidiosIncapacidad) == 0 ||
@@ -84,7 +92,7 @@ func TestCargadorSeedsReales(t *testing.T) {
 }
 
 func TestCargadorFallaSinSalarioMinimoInembargable(t *testing.T) {
-	db := testutil.NuevaBD(t) // sin fixture: la clave no existe en la BD
+	db := testutil.NuevaBD(t)
 	fuente := infra.NewFuenteParametros(dto.New(db))
 	gen := parametros.NewGenerales(parametros.NewRepositorioSQL(db), 0)
 	c := planilla.NewCargadorParametros(fuente, gen)

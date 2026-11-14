@@ -10,6 +10,7 @@ func TestReglasPorDefectoCubreTodosLosTipos(t *testing.T) {
 		formulaReferenciaDirecta, formulaHorasExtra, formulaIncapacidad,
 		formulaAguinaldo, formulaSalarioEscolar, formulaVacaciones,
 		formulaCargaSocial, formulaRenta, formulaEmbargo, formulaPrestamo,
+		formulaLiquidacion, formulaFeriadoLaborado, formulaAsignacion,
 	}
 	for _, tipo := range tipos {
 		if r[tipo] == nil {

@@ -14,7 +14,7 @@ import (
 	"planillas-ccdr/internal/api/middleware"
 	"planillas-ccdr/internal/authz"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
 type AuditoriaHandler struct {
@@ -30,7 +30,7 @@ func (h *AuditoriaHandler) RegisterRoutes(rg *gin.RouterGroup) {
 }
 
 func (h *AuditoriaHandler) listar(c *gin.Context) {
-	p := pagination.Desde(c)
+	p := paginacion.Desde(c)
 	filtro := dto.FiltroAuditoria{Tabla: strings.TrimSpace(c.Query("tabla")), Limit: p.Limit32(), Offset: p.Offset32()}
 	var err error
 	if filtro.RegistroID, err = queryPositiveID(c, "registro_id"); err != nil {
@@ -68,7 +68,7 @@ func (h *AuditoriaHandler) listar(c *gin.Context) {
 			return
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"data": registros, "paginacion": pagination.NuevaMeta(p, total)})
+	c.JSON(http.StatusOK, gin.H{"data": registros, "paginacion": paginacion.NuevaMeta(p, total)})
 }
 
 func queryPositiveID(c *gin.Context, key string) (*int64, error) {

@@ -1,9 +1,7 @@
-// Package security implementa las primitivas de bajo nivel del módulo de
+// Package credenciales implementa las primitivas de bajo nivel del módulo de
 // seguridad: hashing de contraseñas (argon2id, con verificación de hashes
 // bcrypt legados) y construcción/verificación de tokens PASETO v2 local.
-//
-// No conoce la base de datos ni Gin — es la capa que internal/auth orquesta.
-package security
+package credenciales
 
 import (
 	"errors"
@@ -20,11 +18,10 @@ var (
 	ErrHashDesconocido = errors.New("security: formato de hash desconocido")
 )
 
-// paramsArgon2id son los parámetros de costo para todo hash NUEVO.
-// 64 MiB / 3 iteraciones / 2 hilos es un perfil razonable para un backend
-// concurrente (ajustar según benchmark de hardware real antes de producción).
+// paramsArgon2id son los parámetros de costo para todo hash nuevo.
+// 64 MiB, 3 iteraciones y 2 hilos.
 var paramsArgon2id = &argon2id.Params{
-	Memory:      64 * 1024, // KiB
+	Memory:      64 * 1024,
 	Iterations:  3,
 	Parallelism: 2,
 	SaltLength:  16,
@@ -32,7 +29,7 @@ var paramsArgon2id = &argon2id.Params{
 }
 
 // HashPassword genera un hash argon2id de la contraseña en texto plano.
-// Todo password NUEVO (alta de usuario, cambio de contraseña, reset,
+// Todo password nuevo (alta de usuario, cambio de contraseña, reset,
 // re-hash de un login exitoso con hash bcrypt legado) debe usar este método.
 func HashPassword(password string) (string, error) {
 	return argon2id.CreateHash(password, paramsArgon2id)
@@ -41,11 +38,6 @@ func HashPassword(password string) (string, error) {
 // VerifyPassword compara `password` contra `hash`, soportando:
 //   - hashes argon2id nuevos (prefijo "$argon2id$")
 //   - hashes bcrypt legados del esquema v11 (prefijo "$2a$"/"$2b$"/"$2y$")
-//
-// necesitaRehash=true cuando el hash verificado fue bcrypt: la capa de
-// servicio debe entonces llamar a HashPassword tras un login exitoso y
-// persistir el nuevo hash argon2id, migrando al usuario de forma perezosa
-// sin forzar una migración masiva de toda `usuarios.password_hash`.
 func VerifyPassword(password, hash string) (necesitaRehash bool, err error) {
 	switch {
 	case strings.HasPrefix(hash, "$argon2id$"):

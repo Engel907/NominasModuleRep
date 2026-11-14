@@ -1,19 +1,7 @@
-// Cálculo de UN empleado: evaluarConcepto, despacho de cada concepto a su
-// Regla (reglas.go y regla_*.go) y totales.
-//
-// Las reglas componen las funciones puras de calculator.go (CalcularBaseCCSS,
-// CalcularCCSS, CalcularBaseRenta, CalcularImpuestoRenta,
-// ResolverCreditosFiscales, CalcularEmbargos, CalcularPrestamos).
-//
-// Regla de diseño (igual que el resto del motor): nada de defaults
-// implícitos. Si falta un parámetro, un régimen, una fórmula o un factor,
-// se retorna error explícito.
 package planilla
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -21,18 +9,15 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ============================================================================
-// Acceso a datos
-// ============================================================================
-
 // ContratoVigente: subconjunto de contratos que necesita el motor.
 type ContratoVigente struct {
 	ContratoID       int64
 	EmpleadoID       int64
 	RegimenLaboralID int64
 	SalarioPactado   decimal.Decimal
+	ModalidadSalario string // unidad de SalarioPactado (modalidad_salario.go)
 	Jornada          string
-	JornadaID        *int64 // L12: el divisor de la hora extra depende de la jornada
+	JornadaID        *int64 // el divisor de la hora extra depende de la jornada
 }
 
 // ConceptoAplicableFila es la fila cruda (aún sin interpretar la fórmula).
@@ -42,18 +27,16 @@ type ConceptoAplicableFila struct {
 	TipoCalculo          string
 	FormulaID            *int64
 	ExpresionFormula     *string
+	FormulaEmpleadoID    *int64 // fórmula propia del empleado (reemplaza a la general)
 }
 
 // MotorRepository: lecturas de referencia del orquestador. Sin escrituras.
 type MotorRepository interface {
 	ObtenerContratoVigenteEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) (ContratoVigente, error)
-	ListarConceptosAplicablesEnFecha(ctx context.Context, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]ConceptoAplicableFila, error)
+	// Con la fórmula propia del empleado donde la tenga.
+	ListarConceptosAplicablesEnFecha(ctx context.Context, empleadoID, regimenLaboralID, tipoPlanillaID int64, fecha time.Time) ([]ConceptoAplicableFila, error)
 	ListarParametrosHorasExtraEnFecha(ctx context.Context, fecha time.Time) ([]ParametroHoraExtra, error)
 }
-
-// ============================================================================
-// evaluarConcepto
-// ============================================================================
 
 const (
 	naturalezaIngreso   = "ingreso"
@@ -69,9 +52,14 @@ type ConceptoAplicable struct {
 	ConceptoOrdenCalculo
 	Naturaleza  string
 	TipoCalculo string
-	FormulaID   int64  // 0 si no tiene versión de fórmula (solo captura_manual)
-	TipoFormula string // expresion_formula.tipo ("" si no aplica)
-	Lado        string // expresion_formula.lado ("" si no aplica)
+	FormulaID   int64 // 0 si no tiene versión de fórmula (solo captura_manual)
+	// FormulaEmpleadoID: empleado_concepto_formula usada en lugar de la
+	// general (FormulaID queda en 0).
+	FormulaEmpleadoID int64
+	TipoFormula       string // expresion_formula.tipo ("" si no aplica)
+	Lado              string // expresion_formula.lado ("" si no aplica)
+	Rubro             string // expresion_formula.rubro (solo tipo liquidacion)
+	Base              string // expresion_formula.base (solo tipo asignacion_empleado)
 }
 
 // MotorEmpleado orquesta el cálculo de un empleado.
@@ -85,15 +73,6 @@ func NewMotorEmpleado(repo MotorRepository) *MotorEmpleado {
 }
 
 // evaluarConcepto resuelve qué conceptos aplican a un empleado en una fecha:
-//
-//	(a) vigencia a `fecha` de regla de aplicabilidad, orden y fórmula;
-//	(b) el concepto está en el catálogo activo y tiene orden de cálculo;
-//	(c) aplica al régimen laboral del contrato vigente a `fecha`;
-//	(d) lo calcula el tipo de planilla (tipo_planilla_concepto, D18).
-//
-// Devuelve también el contrato (el salario base SAL_BASE sale de
-// contratos.salario_pactado, ver seed de concepto_salarial_formula).
-// Resultado ordenado por OrdenCalculo (luego ConceptoSalarialID).
 func (m *MotorEmpleado) evaluarConcepto(ctx context.Context, empleadoID, tipoPlanillaID int64, fecha time.Time) (ContratoVigente, []ConceptoAplicable, error) {
 	contrato, err := m.repo.ObtenerContratoVigenteEnFecha(ctx, empleadoID, fecha)
 	if err != nil {
@@ -101,7 +80,7 @@ func (m *MotorEmpleado) evaluarConcepto(ctx context.Context, empleadoID, tipoPla
 			empleadoID, fecha.Format("2006-01-02"), err)
 	}
 
-	filas, err := m.repo.ListarConceptosAplicablesEnFecha(ctx, contrato.RegimenLaboralID, tipoPlanillaID, fecha)
+	filas, err := m.repo.ListarConceptosAplicablesEnFecha(ctx, empleadoID, contrato.RegimenLaboralID, tipoPlanillaID, fecha)
 	if err != nil {
 		return ContratoVigente{}, nil, fmt.Errorf("planilla: error resolviendo conceptos aplicables (regimen_laboral_id=%d): %w", contrato.RegimenLaboralID, err)
 	}
@@ -129,29 +108,26 @@ func (m *MotorEmpleado) evaluarConcepto(ctx context.Context, empleadoID, tipoPla
 		if f.FormulaID != nil {
 			c.FormulaID = *f.FormulaID
 		}
+		if f.FormulaEmpleadoID != nil {
+			c.FormulaID, c.FormulaEmpleadoID = 0, *f.FormulaEmpleadoID
+		}
+		tieneFormula := c.FormulaID != 0 || c.FormulaEmpleadoID != 0
 
 		switch c.TipoCalculo {
 		case calculoCapturaManual:
-			// No requiere fórmula.
 		case calculoFijo:
-			if c.FormulaID == 0 || f.MontoFijo == nil {
+			if !tieneFormula || f.MontoFijo == nil {
 				return ContratoVigente{}, nil, fmt.Errorf("planilla: concepto fijo %q sin monto_fijo vigente al %s", c.Codigo, fecha.Format("2006-01-02"))
 			}
 		case calculoFormula:
-			if c.FormulaID == 0 || f.ExpresionFormula == nil {
+			if !tieneFormula || f.ExpresionFormula == nil {
 				return ContratoVigente{}, nil, fmt.Errorf("planilla: concepto %q (formula) sin expresion_formula vigente al %s", c.Codigo, fecha.Format("2006-01-02"))
 			}
-			var e struct {
-				Tipo string `json:"tipo"`
-				Lado string `json:"lado"`
+			e, err := ParsearExpresionFormula(*f.ExpresionFormula)
+			if err != nil {
+				return ContratoVigente{}, nil, fmt.Errorf("planilla: concepto %q: %w", c.Codigo, err)
 			}
-			if err := json.Unmarshal([]byte(*f.ExpresionFormula), &e); err != nil {
-				return ContratoVigente{}, nil, fmt.Errorf("planilla: expresion_formula inválida en concepto %q: %w", c.Codigo, err)
-			}
-			if e.Tipo == "" {
-				return ContratoVigente{}, nil, fmt.Errorf("planilla: expresion_formula de %q no define 'tipo'", c.Codigo)
-			}
-			c.TipoFormula, c.Lado = e.Tipo, e.Lado
+			c.TipoFormula, c.Lado, c.Rubro, c.Base = e.Tipo, e.Lado, e.Rubro, e.Base
 		default:
 			return ContratoVigente{}, nil, fmt.Errorf("planilla: concepto %q tiene tipo_calculo desconocido %q", c.Codigo, c.TipoCalculo)
 		}
@@ -167,16 +143,12 @@ func (m *MotorEmpleado) evaluarConcepto(ctx context.Context, empleadoID, tipoPla
 	return contrato, out, nil
 }
 
-// ============================================================================
-// CalcularEmpleado
-// ============================================================================
-
 // ParametrosCalculo: parámetros vigentes ya resueltos por el llamador para
 // la FechaEfectiva. Los campos se validan solo cuando el flujo los usa.
 type ParametrosCalculo struct {
-	// Carga social ya combinada (obrero de CCSS_OBR + patronal de CCSS_PAT),
-	// EXPRESADA COMO FRACCIÓN (0.1083), no como 10.83 — ver nota en la respuesta.
-	CargaSocial ParametroCargaSocial
+	// CargasSociales: concepto_salarial_id -> regimen_ccss_id (0 = general)
+	// -> tasa en fracción (0.1083, no 10.83).
+	CargasSociales map[int64]map[int64]ParametroCargaSocial
 
 	TramosRenta      []TramoRenta // Porcentaje como fracción (0.10), no 10.00
 	CreditosFiscales map[int64]CreditoFiscalParametro
@@ -188,38 +160,89 @@ type ParametrosCalculo struct {
 	EscalaEmbargo             []TramoEscalaEmbargo
 
 	// Divisor de días del mes (parametros_generales.DIVISOR_DIAS_MES): base
-	// de los días comerciales y del salario diario (D15).
+	// de los días comerciales y del salario diario.
 	DivisorDiasMes decimal.Decimal
 
-	// Divisor de la hora ordinaria por jornada (parametros_jornada, L12):
+	// Divisor de la hora ordinaria por jornada (parametros_jornada):
 	// jornada_id -> horas mensuales ordinarias.
 	DivisorPorJornada map[int64]decimal.Decimal
+	// Horas ordinarias de un día por jornada (parametros_jornada; solo las
+	// que lo tienen definido): valoran el día de un salario por hora y la
+	// hora de un salario diario.
+	HorasDiariasPorJornada map[int64]decimal.Decimal
+
+	// SALARIO_DIARIO_BASE vigente (comerciales | asistencia); "" = no
+	// configurado (solo se exige con contratos diarios).
+	SalarioDiarioBase string
 
 	// Fracción del mes que cubre el tipo de planilla (mes 1, quincena 0.5) y
 	// días comerciales del período completo (= DivisorDiasMes × fracción).
-	// SAL_BASE se calcula por segmentos (L10); DiasPeriodoCompleto acota
+	// SAL_BASE se calcula por segmentos; DiasPeriodoCompleto acota
 	// DiasTrabajados.
 	FraccionMensualPeriodo decimal.Decimal
 	DiasPeriodoCompleto    decimal.Decimal
+
+	// Acumulados (CargarAcumulado): solo en períodos de su clase.
+	AguinaldoMeses           decimal.Decimal // parametros_generales.AGUINALDO_MESES
+	PorcentajeSalarioEscolar decimal.Decimal // parametros_salario_escolar, fracción
+
+	// VACACIONES_MODO_PAGO vigente; "" = no configurado.
+	VacacionesModoPago string
+
+	// Factores del feriado laborado; nil = no configurado.
+	FactorFeriadoObligatorio   *decimal.Decimal
+	FactorFeriadoNoObligatorio *decimal.Decimal
+
+	// RENTA_METODO_PERIODO vigente: cómo se retiene la renta en un período
+	// que cubre menos de un mes; "" = período mensual o de liquidación.
+	RentaMetodoPeriodo string
+
+	// SinBaseMinimaCCSS: la planilla de liquidación cotiza sobre la base
+	// real de sus rubros, sin base mínima contributiva (la mínima del mes la
+	// cubre la planilla regular).
+	SinBaseMinimaCCSS bool
+	// LIQ_PRESTAMOS_MODO vigente; "" = no configurado.
+	LiqPrestamosModo string
+	// LIQ_EMBARGO_MONTO_FIJO vigente; "" = no configurado.
+	LiqEmbargoMontoFijo string
+}
+
+// TasaCarga: la tasa del concepto para el régimen CCSS del empleado; si el
+// régimen no tiene fila propia, la general del concepto.
+func (p ParametrosCalculo) TasaCarga(conceptoID, regimenCCSSID int64) (ParametroCargaSocial, bool) {
+	porRegimen := p.CargasSociales[conceptoID]
+	if t, ok := porRegimen[regimenCCSSID]; ok && regimenCCSSID != 0 {
+		return t, true
+	}
+	t, ok := porRegimen[0]
+	return t, ok
 }
 
 // CalculoEmpleadoDetalle: resultado + trazabilidad de fórmula por concepto
 // (para planilla_detalle_concepto.concepto_salarial_formula_id).
 type CalculoEmpleadoDetalle struct {
 	ResultadoEmpleadoOutput
-	FormulaPorConcepto map[int64]int64    // concepto_salarial_id -> concepto_salarial_formula_id
-	SalarioBasePeriodo decimal.Decimal    // planilla_detalle_empleado.salario_base_periodo
-	Patronal           []LineaPatronal    // planilla_detalle_patronal
-	Prestamos          []LineaPrestamo    // planilla_detalle_prestamo
-	Incapacidades      []LineaIncapacidad // planilla_detalle_incapacidad (L11)
+	FormulaPorConcepto map[int64]int64 // concepto_salarial_id -> concepto_salarial_formula_id
+	// concepto_salarial_id -> empleado_concepto_formula_id (fórmula propia).
+	FormulaEmpleadoPorConcepto map[int64]int64
+	SalarioBasePeriodo         decimal.Decimal    // planilla_detalle_empleado.salario_base_periodo
+	Patronal                   []LineaPatronal    // planilla_detalle_patronal
+	Prestamos                  []LineaPrestamo    // planilla_detalle_prestamo
+	Incapacidades              []LineaIncapacidad // planilla_detalle_incapacidad
+
+	baseAcumulada decimal.Decimal // base del aguinaldo / salario escolar (la fija el orquestador)
+
+	VacacionesCompensadas []int64 // movimientos 'compensacion' que paga el período
 }
 
 type estadoCalculo struct {
 	lineas   []ConceptoCalculadoOutput
 	ingresos []ConceptoCalculadoOutput
 	formulas map[int64]int64
-	res      *ResultadoEmpleadoOutput
-	usados   map[string]bool
+	// formulasEmpleado: concepto -> empleado_concepto_formula_id.
+	formulasEmpleado map[int64]int64
+	res              *ResultadoEmpleadoOutput
+	usados           map[string]bool
 
 	salarioBase              decimal.Decimal
 	totalIng, totalDed       decimal.Decimal
@@ -231,6 +254,10 @@ type estadoCalculo struct {
 	patronal      []LineaPatronal
 	prestamos     []LineaPrestamo
 	incapacidades []LineaIncapacidad
+
+	conceptoPrestamoID int64 // concepto de la regla prestamo (reparte el tope de neto)
+
+	vacacionesCompensadas []int64
 }
 
 func (s *estadoCalculo) agregar(c ConceptoAplicable, monto, cantidad decimal.Decimal) {
@@ -246,10 +273,16 @@ func (s *estadoCalculo) agregar(c ConceptoAplicable, monto, cantidad decimal.Dec
 		AfectaBaseAguinaldo:  c.AfectaBaseAguinaldo,
 		AfectaBaseCesantia:   c.AfectaBaseCesantia,
 		AfectaBaseVacaciones: c.AfectaBaseVacaciones,
+		AfectaBaseEmbargo:    c.AfectaBaseEmbargo,
+
+		EsDeduccionObligatoria: c.EsDeduccionObligatoria,
 	}
 	s.lineas = append(s.lineas, l)
 	if c.FormulaID != 0 {
 		s.formulas[c.ConceptoSalarialID] = c.FormulaID
+	}
+	if c.FormulaEmpleadoID != 0 {
+		s.formulasEmpleado[c.ConceptoSalarialID] = c.FormulaEmpleadoID
 	}
 	if c.Naturaleza == naturalezaIngreso {
 		s.ingresos = append(s.ingresos, l)
@@ -270,9 +303,8 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 	}
 
 	res := &ResultadoEmpleadoOutput{EmpleadoID: in.EmpleadoID, PeriodoID: in.PeriodoID}
-	st := &estadoCalculo{formulas: map[int64]int64{}, res: res, usados: map[string]bool{}}
+	st := &estadoCalculo{formulas: map[int64]int64{}, formulasEmpleado: map[int64]int64{}, res: res, usados: map[string]bool{}}
 
-	// Devengos manuales por concepto; todos deben consumirse.
 	manuales := map[int64]decimal.Decimal{}
 	for _, d := range in.DevengosManuales {
 		manuales[d.ConceptoSalarialID] = manuales[d.ConceptoSalarialID].Add(d.Monto)
@@ -287,7 +319,6 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 		}
 	}
 
-	// Factores de horas extra: solo si hay horas.
 	var factores map[int64]ParametroHoraExtra
 	if len(in.HorasExtra) > 0 {
 		ps, err := m.repo.ListarParametrosHorasExtraEnFecha(ctx, in.FechaEfectiva)
@@ -306,9 +337,11 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 		}
 	}
 
-	// Insumos que existen pero cuyo concepto no aplicó: nunca se ignoran en silencio.
 	if len(in.HorasExtra) > 0 && !st.usados[formulaHorasExtra] {
 		return nil, fmt.Errorf("planilla: empleado_id=%d tiene horas extra pero HRS_EXTRA no aplica a su régimen", in.EmpleadoID)
+	}
+	if len(in.FeriadosLaborados) > 0 && !st.usados[formulaFeriadoLaborado] {
+		return nil, fmt.Errorf("planilla: empleado_id=%d trabajó feriados pero FERIADO_LAB no aplica a su régimen/tipo de planilla", in.EmpleadoID)
 	}
 	if len(in.Embargos) > 0 && !st.usados[formulaEmbargo] {
 		return nil, fmt.Errorf("planilla: empleado_id=%d tiene embargos activos pero EMBARGO no aplica a su régimen", in.EmpleadoID)
@@ -319,17 +352,31 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 	if len(in.Prestamos) > 0 && !st.usados[formulaPrestamo] {
 		return nil, fmt.Errorf("planilla: empleado_id=%d tiene préstamos activos pero PRESTAMO no aplica a su régimen", in.EmpleadoID)
 	}
+	for _, a := range in.Asignaciones {
+		if !aplicables[a.ConceptoSalarialID] {
+			return nil, fmt.Errorf("planilla: empleado_id=%d tiene la asignación %d de un concepto que no aplica a su régimen/tipo de planilla (concepto_salarial_id=%d)",
+				in.EmpleadoID, a.AsignacionID, a.ConceptoSalarialID)
+		}
+	}
+	if in.Liquidacion != nil && !st.usados[formulaLiquidacion] {
+		return nil, fmt.Errorf("planilla: empleado_id=%d tiene una liquidación que pagar pero ningún concepto LIQ_* aplica a su régimen/tipo de planilla", in.EmpleadoID)
+	}
+	if (len(in.VacacionesCompensacion) > 0 || (len(in.VacacionesDisfrute) > 0 && pagaDisfrute(p.VacacionesModoPago))) && !st.usados[formulaVacaciones] {
+		return nil, fmt.Errorf("planilla: empleado_id=%d tiene vacaciones que pagar pero PAGO_VACACIONES no aplica a su régimen/tipo de planilla", in.EmpleadoID)
+	}
 
-	// Totales y bases.
+	if err := AplicarTopeNeto(st); err != nil {
+		return nil, fmt.Errorf("planilla: empleado_id=%d: %w", in.EmpleadoID, err)
+	}
+
 	res.TotalIngresos = st.totalIng.Round(dosDecimales)
 	res.TotalDeducciones = st.totalDed.Round(dosDecimales)
 	res.NetoPagado = res.TotalIngresos.Sub(res.TotalDeducciones)
-	if res.NetoPagado.IsNegative() {
-		return nil, fmt.Errorf("planilla: empleado_id=%d: deducciones (%s) exceden ingresos (%s)",
-			in.EmpleadoID, res.TotalDeducciones.StringFixed(dosDecimales), res.TotalIngresos.StringFixed(dosDecimales))
-	}
 
 	res.BaseCCSS = CalcularBaseCCSS(st.ingresos)
+	if st.ccssHecho {
+		res.BaseCCSS = st.baseCCSS
+	}
 	res.BaseRenta = CalcularBaseRenta(st.ingresos)
 	for _, l := range st.ingresos {
 		if l.AfectaBaseAguinaldo {
@@ -342,12 +389,15 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 			res.BaseVacaciones = res.BaseVacaciones.Add(l.Monto)
 		}
 	}
+	res.BaseEmbargo = liquidoEmbargable(st)
 	res.CuotaObreroCCSS, res.CuotaPatronalCCSS = st.ccssObrero, st.ccssPatronal
 	res.ImpuestoRentaNeto = st.rentaNeta
 	res.DesglosePorConcepto = st.lineas
 
-	return &CalculoEmpleadoDetalle{ResultadoEmpleadoOutput: *res, FormulaPorConcepto: st.formulas, SalarioBasePeriodo: st.salarioBase,
+	return &CalculoEmpleadoDetalle{ResultadoEmpleadoOutput: *res, FormulaPorConcepto: st.formulas,
+		FormulaEmpleadoPorConcepto: st.formulasEmpleado, SalarioBasePeriodo: st.salarioBase,
 		Patronal: st.patronal, Prestamos: st.prestamos, Incapacidades: st.incapacidades,
+		VacacionesCompensadas: st.vacacionesCompensadas,
 	}, nil
 }
 
@@ -359,21 +409,16 @@ func (m *MotorEmpleado) calcularConcepto(
 	case calculoCapturaManual:
 		monto, ok := manuales[c.ConceptoSalarialID]
 		if !ok {
-			return nil // nada capturado en este período
-		}
-		if c.Naturaleza != naturalezaIngreso {
-			return errors.New("captura manual solo soportada para conceptos de ingreso (DevengosManuales)")
+			return nil
 		}
 		st.agregar(c, monto.Round(dosDecimales), decimal.Zero)
 		return nil
 
 	case calculoFijo:
-		// evaluarConcepto ya garantizó MontoFijo != nil.
 		st.agregar(c, c.montoFijoRedondeado(), decimal.NewFromInt(1))
 		return nil
 	}
 
-	// tipo_calculo = formula: cada tipo de fórmula tiene su Regla.
 	regla, ok := m.reglas[c.TipoFormula]
 	if !ok {
 		return fmt.Errorf("tipo de fórmula desconocido %q", c.TipoFormula)

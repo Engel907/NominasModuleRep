@@ -1,5 +1,3 @@
--- F15: separar la administración de permisos globales de la asignación
--- individual de roles a usuarios.
 INSERT INTO permisos (codigo, nombre, modulo)
 SELECT 'roles.administrar', 'Administrar roles y sus permisos', 'auditoria'
 WHERE NOT EXISTS (

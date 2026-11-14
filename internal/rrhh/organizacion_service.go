@@ -1,30 +1,4 @@
-// services/organizacion_service.go
-//
-// Fase 3 — Puestos, Unidades Organizativas, Programas Presupuestarios y
-// Clasificaciones de Puesto. Son catálogos SIN patrón de vigencia (no están
-// en la lista de 19 tablas del ADR-000 sección 2), así que su CRUD es
-// directo. Las escrituras van envueltas en db.WithAuditContext porque los
-// triggers de auditoría (trg_aud_*) aplican a nivel de tabla y leen
-// @auditoria_usuario_id.
-//
-// FASE 3B — cableado a funciones reales de internal/db/dto contra columnas
-// reales de db/schema.sql:
-//   - `puestos` no tiene columna `descripcion`.
-//   - `unidades_organizativas` no tiene programa_presupuestario_id (vive en
-//     empleado_datos_laborales).
-//   - clasificaciones_puesto / programas_presupuestarios no tienen
-//     created_at/updated_at (unidades_organizativas sí).
-//
-// F03 (esta revisión):
-//   - Firma real de db.WithAuditContext (callback con ctx, usuarioID int64);
-//     IDs int64; paginación en internal/pagination (20/100).
-//   - `Activo` en los *UpdateInput pasa a *bool con binding:"required": con
-//     `bool` plano, un PUT que omitía "activo" DESACTIVABA el registro en
-//     silencio. Cambio de contrato: ahora es obligatorio en el PUT.
-//   - Unidades: se valida unidad_padre_id (existe, no es ella misma, no
-//     genera ciclos en la jerarquía).
-//   - Violaciones de UNIQUE/FK de MySQL se traducen a errores tipados.
-package services
+package rrhh
 
 import (
 	"context"
@@ -34,7 +8,7 @@ import (
 
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
 var ErrNoEncontrado = errors.New("recurso no encontrado")
@@ -42,8 +16,6 @@ var ErrNoEncontrado = errors.New("recurso no encontrado")
 // profundidadMaximaUnidades acota el recorrido ascendente de la jerarquía de
 // unidades (defensa ante un ciclo preexistente en la BD).
 const profundidadMaximaUnidades = 100
-
-// ----------------------------- DTOs -----------------------------------------
 
 type ClasificacionPuestoInput struct {
 	Codigo string `json:"codigo" binding:"required,max=20"`
@@ -91,17 +63,14 @@ type PuestoUpdateInput struct {
 	Activo                *bool  `json:"activo" binding:"required"`
 }
 
-// Los *ListRequest se bindean del query string con gin; Paginacion NO (el
-// handler la llena con pagination.Desde(c)).
-
 type CatalogoListRequest struct {
-	Paginacion pagination.Parametros `form:"-"`
+	Paginacion paginacion.Parametros `form:"-"`
 	Activo     *bool                 `form:"activo"`
 	Nombre     *string               `form:"nombre"`
 }
 
 type PuestoListRequest struct {
-	Paginacion            pagination.Parametros `form:"-"`
+	Paginacion            paginacion.Parametros `form:"-"`
 	Activo                *bool                 `form:"activo"`
 	Nombre                *string               `form:"nombre"`
 	UnidadOrganizativaID  *int64                `form:"unidad_organizativa_id"`
@@ -109,23 +78,21 @@ type PuestoListRequest struct {
 }
 
 type UnidadOrganizativaListRequest struct {
-	Paginacion    pagination.Parametros `form:"-"`
+	Paginacion    paginacion.Parametros `form:"-"`
 	Activo        *bool                 `form:"activo"`
 	Nombre        *string               `form:"nombre"`
 	UnidadPadreID *int64                `form:"unidad_padre_id"`
 }
 
 // requerirTexto recorta espacios y exige no vacío (binding:"required" deja
-// pasar "   ").
+// pasar " ").
 func requerirTexto(campo, valor string) (string, error) { return noVacio(campo, valor) }
-
-// ----------------------------- Servicio: Clasificaciones de Puesto ---------
 
 type ClasificacionPuestoService interface {
 	Crear(ctx context.Context, usuarioID int64, in ClasificacionPuestoInput) (dto.ClasificacionesPuesto, error)
 	Actualizar(ctx context.Context, usuarioID, id int64, in ClasificacionPuestoUpdateInput) error
 	Get(ctx context.Context, id int64) (dto.ClasificacionesPuesto, error)
-	List(ctx context.Context, req CatalogoListRequest) ([]dto.ClasificacionesPuesto, pagination.Meta, error)
+	List(ctx context.Context, req CatalogoListRequest) ([]dto.ClasificacionesPuesto, paginacion.Meta, error)
 }
 
 type clasificacionPuestoService struct{ sqlDB *sql.DB }
@@ -196,30 +163,28 @@ func (s *clasificacionPuestoService) Get(ctx context.Context, id int64) (dto.Cla
 	return c, nil
 }
 
-func (s *clasificacionPuestoService) List(ctx context.Context, req CatalogoListRequest) ([]dto.ClasificacionesPuesto, pagination.Meta, error) {
+func (s *clasificacionPuestoService) List(ctx context.Context, req CatalogoListRequest) ([]dto.ClasificacionesPuesto, paginacion.Meta, error) {
 	pag := req.Paginacion.Normalizado()
 	q := dto.New(s.sqlDB)
 	rows, err := q.ListClasificacionesPuesto(ctx, req.Activo, req.Nombre, pag.Limit32(), pag.Offset32())
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("listar clasificaciones de puesto: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("listar clasificaciones de puesto: %w", err)
 	}
 	total, err := q.CountClasificacionesPuesto(ctx, req.Activo, req.Nombre)
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("contar clasificaciones de puesto: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("contar clasificaciones de puesto: %w", err)
 	}
 	if rows == nil {
 		rows = []dto.ClasificacionesPuesto{}
 	}
-	return rows, pagination.NuevaMeta(pag, total), nil
+	return rows, paginacion.NuevaMeta(pag, total), nil
 }
-
-// ----------------------------- Servicio: Programas Presupuestarios ---------
 
 type ProgramaPresupuestarioService interface {
 	Crear(ctx context.Context, usuarioID int64, in ProgramaPresupuestarioInput) (dto.ProgramasPresupuestario, error)
 	Actualizar(ctx context.Context, usuarioID, id int64, in ProgramaPresupuestarioUpdateInput) error
 	Get(ctx context.Context, id int64) (dto.ProgramasPresupuestario, error)
-	List(ctx context.Context, req CatalogoListRequest) ([]dto.ProgramasPresupuestario, pagination.Meta, error)
+	List(ctx context.Context, req CatalogoListRequest) ([]dto.ProgramasPresupuestario, paginacion.Meta, error)
 }
 
 type programaPresupuestarioService struct{ sqlDB *sql.DB }
@@ -290,30 +255,28 @@ func (s *programaPresupuestarioService) Get(ctx context.Context, id int64) (dto.
 	return p, nil
 }
 
-func (s *programaPresupuestarioService) List(ctx context.Context, req CatalogoListRequest) ([]dto.ProgramasPresupuestario, pagination.Meta, error) {
+func (s *programaPresupuestarioService) List(ctx context.Context, req CatalogoListRequest) ([]dto.ProgramasPresupuestario, paginacion.Meta, error) {
 	pag := req.Paginacion.Normalizado()
 	q := dto.New(s.sqlDB)
 	rows, err := q.ListProgramasPresupuestarios(ctx, req.Activo, req.Nombre, pag.Limit32(), pag.Offset32())
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("listar programas presupuestarios: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("listar programas presupuestarios: %w", err)
 	}
 	total, err := q.CountProgramasPresupuestarios(ctx, req.Activo, req.Nombre)
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("contar programas presupuestarios: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("contar programas presupuestarios: %w", err)
 	}
 	if rows == nil {
 		rows = []dto.ProgramasPresupuestario{}
 	}
-	return rows, pagination.NuevaMeta(pag, total), nil
+	return rows, paginacion.NuevaMeta(pag, total), nil
 }
-
-// ----------------------------- Servicio: Unidades Organizativas ------------
 
 type UnidadOrganizativaService interface {
 	Crear(ctx context.Context, usuarioID int64, in UnidadOrganizativaInput) (dto.UnidadesOrganizativa, error)
 	Actualizar(ctx context.Context, usuarioID, id int64, in UnidadOrganizativaUpdateInput) error
 	Get(ctx context.Context, id int64) (dto.UnidadesOrganizativa, error)
-	List(ctx context.Context, req UnidadOrganizativaListRequest) ([]dto.UnidadesOrganizativa, pagination.Meta, error)
+	List(ctx context.Context, req UnidadOrganizativaListRequest) ([]dto.UnidadesOrganizativa, paginacion.Meta, error)
 }
 
 type unidadOrganizativaService struct{ sqlDB *sql.DB }
@@ -327,7 +290,7 @@ func NewUnidadOrganizativaService(sqlDB *sql.DB) UnidadOrganizativaService {
 // formar parte de un ciclo). Recorre la cadena de ancestros de la unidad
 // padre; si aparece `id` (o la cadena excede la profundidad máxima) es un
 // ciclo. Corre dentro de la Tx. Dos Actualizar concurrentes sobre unidades
-// distintas podrían igualmente cerrar un ciclo entre sí (ver informe F03).
+// distintas podrían igualmente cerrar un ciclo entre sí.
 func validarPadreUnidad(ctx context.Context, q *dto.Queries, id int64, padreID *int64) error {
 	if padreID == nil {
 		return nil
@@ -343,13 +306,13 @@ func validarPadreUnidad(ctx context.Context, q *dto.Queries, id int64, padreID *
 			if i == 0 {
 				return validacion("unidad_padre_id", "la unidad padre no existe")
 			}
-			return nil // cadena rota por datos inconsistentes; la FK impide llegar aquí
+			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("recorrer jerarquía de unidades: %w", err)
 		}
 		if !u.UnidadPadreID.Valid {
-			return nil // llegó a la raíz sin encontrar `id`
+			return nil
 		}
 		actual = u.UnidadPadreID.Int64
 		if id != 0 && actual == id {
@@ -427,30 +390,28 @@ func (s *unidadOrganizativaService) Get(ctx context.Context, id int64) (dto.Unid
 	return u, nil
 }
 
-func (s *unidadOrganizativaService) List(ctx context.Context, req UnidadOrganizativaListRequest) ([]dto.UnidadesOrganizativa, pagination.Meta, error) {
+func (s *unidadOrganizativaService) List(ctx context.Context, req UnidadOrganizativaListRequest) ([]dto.UnidadesOrganizativa, paginacion.Meta, error) {
 	pag := req.Paginacion.Normalizado()
 	q := dto.New(s.sqlDB)
 	rows, err := q.ListUnidadesOrganizativas(ctx, req.Activo, req.Nombre, req.UnidadPadreID, pag.Limit32(), pag.Offset32())
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("listar unidades organizativas: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("listar unidades organizativas: %w", err)
 	}
 	total, err := q.CountUnidadesOrganizativas(ctx, req.Activo, req.Nombre, req.UnidadPadreID)
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("contar unidades organizativas: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("contar unidades organizativas: %w", err)
 	}
 	if rows == nil {
 		rows = []dto.UnidadesOrganizativa{}
 	}
-	return rows, pagination.NuevaMeta(pag, total), nil
+	return rows, paginacion.NuevaMeta(pag, total), nil
 }
-
-// ----------------------------- Servicio: Puestos ----------------------------
 
 type PuestoService interface {
 	Crear(ctx context.Context, usuarioID int64, in PuestoInput) (dto.Puesto, error)
 	Actualizar(ctx context.Context, usuarioID, id int64, in PuestoUpdateInput) error
 	Get(ctx context.Context, id int64) (dto.Puesto, error)
-	List(ctx context.Context, req PuestoListRequest) ([]dto.Puesto, pagination.Meta, error)
+	List(ctx context.Context, req PuestoListRequest) ([]dto.Puesto, paginacion.Meta, error)
 }
 
 type puestoService struct{ sqlDB *sql.DB }
@@ -521,19 +482,19 @@ func (s *puestoService) Get(ctx context.Context, id int64) (dto.Puesto, error) {
 	return p, nil
 }
 
-func (s *puestoService) List(ctx context.Context, req PuestoListRequest) ([]dto.Puesto, pagination.Meta, error) {
+func (s *puestoService) List(ctx context.Context, req PuestoListRequest) ([]dto.Puesto, paginacion.Meta, error) {
 	pag := req.Paginacion.Normalizado()
 	q := dto.New(s.sqlDB)
 	rows, err := q.ListPuestos(ctx, req.Activo, req.Nombre, req.UnidadOrganizativaID, req.ClasificacionPuestoID, pag.Limit32(), pag.Offset32())
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("listar puestos: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("listar puestos: %w", err)
 	}
 	total, err := q.CountPuestos(ctx, req.Activo, req.Nombre, req.UnidadOrganizativaID, req.ClasificacionPuestoID)
 	if err != nil {
-		return nil, pagination.Meta{}, fmt.Errorf("contar puestos: %w", err)
+		return nil, paginacion.Meta{}, fmt.Errorf("contar puestos: %w", err)
 	}
 	if rows == nil {
 		rows = []dto.Puesto{}
 	}
-	return rows, pagination.NuevaMeta(pag, total), nil
+	return rows, paginacion.NuevaMeta(pag, total), nil
 }

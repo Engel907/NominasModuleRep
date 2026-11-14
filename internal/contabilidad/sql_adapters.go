@@ -1,14 +1,5 @@
 package contabilidad
 
-// Adaptadores database/sql de Fase 11B:
-//
-//   - DetallesSQL reconstruye, desde lo persistido, los DetallePlanilla que
-//     exige Service.ContabilizarPeriodo.
-//   - LectorSQL lee asientos ya generados (cabecera + líneas).
-//
-// Asume que el DSN usa parseTime=true (igual que el código sqlc del resto del
-// proyecto, que ya recibe/entrega time.Time).
-
 import (
 	"context"
 	"database/sql"
@@ -20,100 +11,20 @@ import (
 	"github.com/shopspring/decimal"
 
 	"planillas-ccdr/internal/planilla"
-	"planillas-ccdr/internal/shared/porcentaje"
 )
 
-// ============================================================================
-// DetallesSQL
-// ============================================================================
-
 // DetallesSQL reconstruye la corrida de un período leyendo
-// planilla_detalle_empleado y planilla_detalle_concepto.
-//
-// Lo único que NO está persistido es la cuota patronal de CCSS. Se deriva con
-// la misma fórmula del motor (motor_calculo.go / CalcularCCSS):
-//
-//	patronal = round2( Σ ingresos con afecta_base_ccss × %patronal )
-//
-// usando el % vigente de parametros_cargas_sociales a periodos_planilla.fecha_fin.
-//
-// Supuestos verificables (si fallan, se retorna error; nunca se contabiliza a ciegas):
-//  1. La FechaEfectiva del cálculo fue periodos_planilla.fecha_fin.
-//  2. El % patronal es el de la fila vigente del concepto CCSS_PAT y el obrero
-//     el de CCSS_OBR, guardados como puntos porcentuales (26.8300 = 26.83 %);
-//     se convierten a fracción con internal/shared/porcentaje (el motor
-//     trabaja con fracciones).
-//
-// D3 — escala de porcentajes: el DOMINIO trabaja con fracciones (0.2683); la
-// base de datos guarda puntos porcentuales (parametros_cargas_sociales.
-// porcentaje_* DECIMAL(6,4), seed 26.8300 / 10.8300). La conversión la hace
-// ÚNICAMENTE internal/shared/porcentaje; este archivo no divide ni multiplica
-// por 100.
-//
-// Solo se reconstruyen períodos en estado `pagada` (D4); la verificación
-// definitiva (con bloqueo FOR UPDATE) la hace Service.ContabilizarPeriodo
-// dentro de la transacción. Aquí se comprueba antes para devolver el error
-// correcto (409) en vez de uno derivado ("sin detalles").
-//
-// Salvaguarda: con el mismo método se recalcula la cuota OBRERA y se compara con
-// la línea CCSS_OBR persistida de cada empleado. Si no coincide, algún supuesto
-// no se cumple y se aborta. Aun así, la solución de fondo es persistir la cuota
-// patronal al calcular.
+// planilla_detalle_empleado, planilla_detalle_concepto y
+// planilla_detalle_patronal.
 type DetallesSQL struct {
-	db             *sql.DB
-	codigoPatronal string
-	codigoObrero   string
+	db *sql.DB
 }
 
-// NewDetallesSQL: cfg aporta el código del concepto patronal (Seed: CCSS_PAT);
-// codigoObrero es el del concepto obrero (Seed: CCSS_OBR).
-func NewDetallesSQL(db *sql.DB, cfg ConfigGeneracion, codigoObrero string) (*DetallesSQL, error) {
-	if strings.TrimSpace(cfg.ConceptoCuotaPatronalCCSS) == "" || strings.TrimSpace(codigoObrero) == "" {
-		return nil, fmt.Errorf("%w: códigos de concepto CCSS obligatorios", ErrConfigInvalida)
+func NewDetallesSQL(db *sql.DB) (*DetallesSQL, error) {
+	if db == nil {
+		return nil, fmt.Errorf("%w: conexión a la base de datos obligatoria", ErrConfigInvalida)
 	}
-	return &DetallesSQL{db: db, codigoPatronal: cfg.ConceptoCuotaPatronalCCSS, codigoObrero: codigoObrero}, nil
-}
-
-// porcentajeVigente devuelve (patronal, obrero) como FRACCIÓN, exigiendo
-// exactamente una fila vigente a fecha_fin del período.
-func (r *DetallesSQL) porcentajeVigente(ctx context.Context, periodoID int64, codigo string) (decimal.Decimal, decimal.Decimal, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT pcs.porcentaje_patronal, pcs.porcentaje_obrero
-		FROM parametros_cargas_sociales pcs
-		JOIN conceptos_salariales cs ON cs.id = pcs.concepto_salarial_id
-		JOIN periodos_planilla pp    ON pp.id = ?
-		WHERE cs.codigo = ?
-		  AND pcs.fecha_inicio_vigencia <= pp.fecha_fin
-		  AND (pcs.fecha_fin_vigencia IS NULL OR pcs.fecha_fin_vigencia >= pp.fecha_fin)`, periodoID, codigo)
-	if err != nil {
-		return decimal.Zero, decimal.Zero, err
-	}
-	defer rows.Close()
-
-	var pat, obr decimal.Decimal
-	n := 0
-	for rows.Next() {
-		if err := rows.Scan(&pat, &obr); err != nil {
-			return decimal.Zero, decimal.Zero, err
-		}
-		n++
-	}
-	if err := rows.Err(); err != nil {
-		return decimal.Zero, decimal.Zero, err
-	}
-	if n != 1 {
-		return decimal.Zero, decimal.Zero, fmt.Errorf("%w: se esperaba 1 parametros_cargas_sociales vigente para %q a la fecha fin del periodo_id=%d y hay %d", ErrConfigInvalida, codigo, periodoID, n)
-	}
-
-	pp, err := porcentaje.DesdePorcentaje(pat)
-	if err != nil {
-		return decimal.Zero, decimal.Zero, fmt.Errorf("%w: %q porcentaje patronal: %v", ErrConfigInvalida, codigo, err)
-	}
-	po, err := porcentaje.DesdePorcentaje(obr)
-	if err != nil {
-		return decimal.Zero, decimal.Zero, fmt.Errorf("%w: %q porcentaje obrero: %v", ErrConfigInvalida, codigo, err)
-	}
-	return pp.Fraccion(), po.Fraccion(), nil
+	return &DetallesSQL{db: db}, nil
 }
 
 func (r *DetallesSQL) DetallesParaContabilizar(ctx context.Context, periodoID int64) ([]DetallePlanilla, error) {
@@ -128,17 +39,9 @@ func (r *DetallesSQL) DetallesParaContabilizar(ctx context.Context, periodoID in
 		return nil, fmt.Errorf("%w: periodo_id=%d está %q (se requiere %q)", ErrPeriodoEstadoInvalido, periodoID, estado, estadoContabilizable)
 	}
 
-	pctPat, _, err := r.porcentajeVigente(ctx, periodoID, r.codigoPatronal)
-	if err != nil {
-		return nil, err
-	}
-	_, pctObr, err := r.porcentajeVigente(ctx, periodoID, r.codigoObrero)
-	if err != nil {
-		return nil, err
-	}
-
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT pde.empleado_id, pde.programa_presupuestario_id, pde.neto_pagado,
+		       pde.base_ccss, pde.cuota_obrera_ccss, pde.cuota_patronal_ccss,
 		       pdc.concepto_salarial_id, cs.codigo, cs.naturaleza, cs.afecta_base_ccss,
 		       pdc.monto, pdc.cantidad
 		FROM planilla_detalle_empleado pde
@@ -151,64 +54,48 @@ func (r *DetallesSQL) DetallesParaContabilizar(ctx context.Context, periodoID in
 	}
 	defer rows.Close()
 
-	type emp struct {
-		det         DetallePlanilla
-		baseCCSS    decimal.Decimal
-		obreroSaved decimal.Decimal
-	}
-	var orden []*emp
-	porID := map[int64]*emp{}
-
+	var orden []*DetallePlanilla
+	porID := map[int64]*DetallePlanilla{}
 	for rows.Next() {
 		var (
-			empID, prog int64
-			neto        decimal.Decimal
-			conceptoID  sql.NullInt64
-			codigo      sql.NullString
-			naturaleza  sql.NullString
-			afectaCCSS  sql.NullInt64
-			monto       decimal.NullDecimal
-			cantidad    decimal.NullDecimal
+			empID, prog                      int64
+			neto, baseCCSS, obrero, patronal decimal.Decimal
+			conceptoID                       sql.NullInt64
+			codigo, naturaleza               sql.NullString
+			afectaCCSS                       sql.NullInt64
+			monto, cantidad                  decimal.NullDecimal
 		)
-		if err := rows.Scan(&empID, &prog, &neto, &conceptoID, &codigo, &naturaleza, &afectaCCSS, &monto, &cantidad); err != nil {
+		if err := rows.Scan(&empID, &prog, &neto, &baseCCSS, &obrero, &patronal,
+			&conceptoID, &codigo, &naturaleza, &afectaCCSS, &monto, &cantidad); err != nil {
 			return nil, fmt.Errorf("contabilidad: leyendo fila de detalle: %w", err)
 		}
 		e := porID[empID]
 		if e == nil {
-			e = &emp{det: DetallePlanilla{
+			e = &DetallePlanilla{
 				ProgramaPresupuestarioID: prog,
 				Calculo: &planilla.CalculoEmpleadoDetalle{ResultadoEmpleadoOutput: planilla.ResultadoEmpleadoOutput{
 					EmpleadoID: empID, PeriodoID: periodoID, NetoPagado: neto,
+					BaseCCSS: baseCCSS, CuotaObreroCCSS: obrero, CuotaPatronalCCSS: patronal,
 				}},
-			}}
+			}
 			porID[empID] = e
 			orden = append(orden, e)
 		}
 		if !conceptoID.Valid || !monto.Valid {
-			continue // empleado sin líneas de concepto
+			continue
 		}
 		linea := planilla.ConceptoCalculadoOutput{
 			ConceptoSalarialID: conceptoID.Int64,
 			Codigo:             codigo.String,
+			Naturaleza:         naturaleza.String,
 			Monto:              monto.Decimal,
 			AfectaBaseCCSS:     afectaCCSS.Int64 == 1,
 		}
 		if cantidad.Valid {
 			linea.Cantidad = cantidad.Decimal
 		}
-		if linea.Codigo == r.codigoPatronal {
-			// La cuota patronal se DERIVA más abajo; si además viniera
-			// persistida como línea se contaría dos veces.
-			return nil, fmt.Errorf("%w: empleado_id=%d trae persistida una línea %q; la cuota patronal se deriva y no debe existir como concepto", ErrDetalleInconsistente, empID, r.codigoPatronal)
-		}
-		res := &e.det.Calculo.ResultadoEmpleadoOutput
+		res := &e.Calculo.ResultadoEmpleadoOutput
 		res.DesglosePorConcepto = append(res.DesglosePorConcepto, linea)
-		if naturaleza.String == "ingreso" && linea.AfectaBaseCCSS {
-			e.baseCCSS = e.baseCCSS.Add(monto.Decimal)
-		}
-		if linea.Codigo == r.codigoObrero {
-			e.obreroSaved = e.obreroSaved.Add(monto.Decimal)
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("contabilidad: recorriendo detalle de planilla: %w", err)
@@ -216,27 +103,49 @@ func (r *DetallesSQL) DetallesParaContabilizar(ctx context.Context, periodoID in
 	if len(orden) == 0 {
 		return nil, ErrSinDetalles
 	}
-
+	if err := r.cargarPatronal(ctx, periodoID, porID); err != nil {
+		return nil, err
+	}
 	out := make([]DetallePlanilla, 0, len(orden))
 	for _, e := range orden {
-		base := e.baseCCSS.Round(dosDecimales)
-		obreroEsperado := base.Mul(pctObr).Round(dosDecimales)
-		if !obreroEsperado.Equal(e.obreroSaved) {
-			return nil, fmt.Errorf("%w: empleado_id=%d: la cuota obrera recalculada (%s) no coincide con la persistida (%s); no se puede derivar la cuota patronal con certeza",
-				ErrDetalleInconsistente, e.det.Calculo.EmpleadoID, obreroEsperado.StringFixed(dosDecimales), e.obreroSaved.StringFixed(dosDecimales))
-		}
-		res := &e.det.Calculo.ResultadoEmpleadoOutput
-		res.BaseCCSS = base
-		res.CuotaObreroCCSS = e.obreroSaved
-		res.CuotaPatronalCCSS = base.Mul(pctPat).Round(dosDecimales)
-		out = append(out, e.det)
+		out = append(out, *e)
 	}
 	return out, nil
 }
 
-// ============================================================================
-// LectorSQL
-// ============================================================================
+// cargarPatronal agrega a cada empleado sus líneas patronales persistidas (una
+// por concepto de carga social). Un concepto patronal que además figure en el
+// desglose del neto es un detalle inconsistente.
+func (r *DetallesSQL) cargarPatronal(ctx context.Context, periodoID int64, porID map[int64]*DetallePlanilla) error {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT pde.empleado_id, pat.concepto_salarial_id, pat.base, pat.porcentaje, pat.monto
+		FROM planilla_detalle_patronal pat
+		JOIN planilla_detalle_empleado pde ON pde.id = pat.planilla_detalle_empleado_id
+		WHERE pde.periodo_planilla_id = ?
+		ORDER BY pde.empleado_id, pat.concepto_salarial_id`, periodoID)
+	if err != nil {
+		return fmt.Errorf("contabilidad: leyendo cargas patronales del periodo_id=%d: %w", periodoID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var empID int64
+		var l planilla.LineaPatronal
+		if err := rows.Scan(&empID, &l.ConceptoSalarialID, &l.Base, &l.Porcentaje, &l.Monto); err != nil {
+			return fmt.Errorf("contabilidad: leyendo línea patronal: %w", err)
+		}
+		e := porID[empID]
+		if e == nil {
+			return fmt.Errorf("%w: línea patronal de empleado_id=%d sin detalle de empleado", ErrDetalleInconsistente, empID)
+		}
+		for _, d := range e.Calculo.DesglosePorConcepto {
+			if d.ConceptoSalarialID == l.ConceptoSalarialID {
+				return fmt.Errorf("%w: empleado_id=%d trae el concepto patronal %q también en el desglose del neto", ErrDetalleInconsistente, empID, d.Codigo)
+			}
+		}
+		e.Calculo.Patronal = append(e.Calculo.Patronal, l)
+	}
+	return rows.Err()
+}
 
 type LectorSQL struct{ db *sql.DB }
 

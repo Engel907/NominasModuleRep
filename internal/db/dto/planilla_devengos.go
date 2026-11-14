@@ -1,7 +1,3 @@
-// internal/db/dto/planilla_devengos.go
-//
-// L9 — Devengos manuales del período (planilla_devengos_manuales): comisiones,
-// bonos, viáticos capturados a mano que consume el cálculo.
 package dto
 
 import (
@@ -105,14 +101,14 @@ func (q *Queries) EliminarDevengoManual(ctx context.Context, periodoID, id int64
 	return res.RowsAffected()
 }
 
-// ConceptoCapturable: concepto activo, de captura manual, de ingreso y que el
-// tipo de planilla calcula (tipo_planilla_concepto, D18).
+// ConceptoCapturable: concepto activo, de captura manual (ingreso o
+// deducción) y que el tipo de planilla calcula (tipo_planilla_concepto).
 func (q *Queries) ConceptoCapturable(ctx context.Context, tipoPlanillaID, conceptoID int64) (bool, error) {
 	var n int
 	err := q.db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM conceptos_salariales cs
 JOIN tipo_planilla_concepto tpc ON tpc.concepto_salarial_id = cs.id AND tpc.tipo_planilla_id = ?
-WHERE cs.id = ? AND cs.activo = 1 AND cs.tipo_calculo = 'captura_manual' AND cs.naturaleza = 'ingreso'`,
+WHERE cs.id = ? AND cs.activo = 1 AND cs.tipo_calculo = 'captura_manual'`,
 		tipoPlanillaID, conceptoID).Scan(&n)
 	return n > 0, err
 }

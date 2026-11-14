@@ -24,7 +24,7 @@ func TestValidarFilaDispersion(t *testing.T) {
 	casos := []struct {
 		nombre string
 		mod    func(*FilaDispersionBancaria)
-		motivo string // "" = válida
+		motivo string
 	}{
 		{"fila válida", func(f *FilaDispersionBancaria) {}, ""},
 		{"IBAN vacío", func(f *FilaDispersionBancaria) { f.IBAN = "" }, MotivoIBANVacio},
@@ -136,8 +136,6 @@ func TestArmarArchivoDispersion(t *testing.T) {
 	})
 }
 
-// ---- fakes para el servicio ----
-
 type fakeTx struct {
 	filas     []FilaDispersionBancaria
 	registros []ExportacionRegistro
@@ -155,6 +153,9 @@ func (f *fakeTx) ObtenerDesgloseConceptosBoletaPago(context.Context, int64, int6
 	return nil, nil
 }
 func (f *fakeTx) ObtenerEmbargosBoletaPago(context.Context, int64, int64) ([]EmbargoBoletaPago, error) {
+	return nil, nil
+}
+func (f *fakeTx) ObtenerIncapacidadesBoletaPago(context.Context, int64, int64) ([]IncapacidadBoletaPago, error) {
 	return nil, nil
 }
 func (f *fakeTx) RegistrarExportacion(_ context.Context, r ExportacionRegistro) (int64, error) {
@@ -251,5 +252,19 @@ func TestGenerarArchivoDispersionBancaria(t *testing.T) {
 				t.Fatalf("llamadas a la UoW = %d, quería %d", u.llamadas, tc.llamadas)
 			}
 		})
+	}
+}
+
+// Un empleado con neto 0 (tope de neto) no va al archivo ni lo bloquea.
+func TestSinNetoCeroExcluyeSoloCeros(t *testing.T) {
+	filas := []FilaDispersionBancaria{
+		{EmpleadoID: 1, NetoPagado: dec("100")}, {EmpleadoID: 2, NetoPagado: decimal.Zero}, {EmpleadoID: 3, NetoPagado: dec("-1")},
+	}
+	got := sinNetoCero(filas)
+	if len(got) != 2 || got[0].EmpleadoID != 1 || got[1].EmpleadoID != 3 {
+		t.Fatalf("filas: %+v", got)
+	}
+	if _, _, err := armarArchivoDispersion(got); err == nil {
+		t.Fatal("un neto negativo debe seguir abortando el archivo")
 	}
 }

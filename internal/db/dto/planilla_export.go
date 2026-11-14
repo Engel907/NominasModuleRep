@@ -1,31 +1,10 @@
-// internal/db/dto/planilla_export.go
-//
-// Fase 6c / F09 — Comprobantes, boletas de pago y exportación bancaria.
-// Helpers (rowScanner) en asistencia.go. Argumentos posicionales, structs *Row
-// y decimal.Decimal para todo monto.
-//
-// F09 — SQL verificado contra db/migrations/000000_esquema_base.up.sql:
-//
-//   - planilla_detalle_empleado se une a su período por periodo_planilla_id.
-//   - Los estados del período son los del ENUM real de periodos_planilla.estado
-//     (borrador|calculada|aprobada|pagada|contabilizada). Los estados permitidos llegan como parámetro
-//     (planilla.EstadosParaDispersion() / EstadosParaAcumulados()); dto no
-//     puede importar planilla (ciclo), por eso se reciben como []string y se
-//     expanden a IN (?,?,...) parametrizado.
-//   - planilla_detalle_concepto no guarda el orden de cálculo: sale de
-//     orden_calculo_concepto.orden, vigente a periodos_planilla.fecha_fin.
-//   - planilla_detalle_embargo solo tiene orden_prioridad y monto.
-//     F20: agregará monto_calculado, monto_aplicado y saldo_pendiente_insatisfecho.
-//   - nombre_completo y numero_identificacion (cédula) viven en `empleados`.
-//   - empleado_datos_bancarios.numero_cuenta ("Número de cuenta o IBAN") se
-//     usa como IBAN. ⚠️ Confirmar con datos reales que guarda el IBAN y no el
-//     número de cuenta local.
 package dto
 
 import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -46,24 +25,17 @@ func argsEstadosExport(estados []string, prefix ...interface{}) []interface{} {
 	return args
 }
 
-// ============================================================================
-// DISPERSIÓN BANCARIA
-// ============================================================================
-
 type ObtenerDetallesPlanillaParaDispersionRow struct {
 	EmpleadoID     int64
-	Cedula         string
+	Cedula         ValorSensible
 	NombreCompleto string
-	IBAN           string
+	IBAN           ValorSensible
 	NetoPagado     decimal.Decimal
 }
 
 // ObtenerDetallesPlanillaParaDispersion devuelve una fila por empleado con lo
 // estrictamente necesario para el archivo plano de dispersión. Solo períodos
 // cuyo estado esté en `estados` (el servicio pasa aprobada|pagada).
-//
-// Nota: el JOIN a empleado_datos_bancarios es INNER; un empleado sin cuenta
-// vigente queda fuera del archivo sin error.
 func (q *Queries) ObtenerDetallesPlanillaParaDispersion(ctx context.Context, periodoID int64, estados []string) ([]ObtenerDetallesPlanillaParaDispersionRow, error) {
 	if len(estados) == 0 {
 		return nil, errExportSinEstados
@@ -71,9 +43,11 @@ func (q *Queries) ObtenerDetallesPlanillaParaDispersion(ctx context.Context, per
 	query := `
 SELECT
     e.id,
-    e.numero_identificacion,
+    e.numero_identificacion_cifrado,
+    e.numero_identificacion_kid,
     e.nombre_completo,
-    edb.numero_cuenta,
+    edb.numero_cuenta_cifrado,
+    edb.numero_cuenta_kid,
     pde.neto_pagado
 FROM planilla_detalle_empleado pde
 JOIN periodos_planilla pp
@@ -95,7 +69,7 @@ ORDER BY e.nombre_completo ASC, e.id ASC`
 	var out []ObtenerDetallesPlanillaParaDispersionRow
 	for rows.Next() {
 		var r ObtenerDetallesPlanillaParaDispersionRow
-		if err := rows.Scan(&r.EmpleadoID, &r.Cedula, &r.NombreCompleto, &r.IBAN, &r.NetoPagado); err != nil {
+		if err := rows.Scan(&r.EmpleadoID, &r.Cedula.Cifrado, &r.Cedula.Kid, &r.NombreCompleto, &r.IBAN.Cifrado, &r.IBAN.Kid, &r.NetoPagado); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -103,12 +77,11 @@ ORDER BY e.nombre_completo ASC, e.id ASC`
 	return out, rows.Err()
 }
 
-// ============================================================================
-// TRAZABILIDAD DE EXPORTACIONES (S14)
-// ============================================================================
-
+// InsertarExportacionGeneradaParams: PeriodoID > 0 para el archivo de un
+// período, o PeriodoID = 0 con Anio y Mes para el consolidado de un mes.
 type InsertarExportacionGeneradaParams struct {
 	PeriodoID     int64
+	Anio, Mes     int32
 	FormatoCodigo string
 	NombreArchivo string
 	HashSHA256    string
@@ -125,12 +98,12 @@ type InsertarExportacionGeneradaParams struct {
 func (q *Queries) InsertarExportacionGenerada(ctx context.Context, p InsertarExportacionGeneradaParams) (int64, error) {
 	res, err := q.db.ExecContext(ctx, `
 INSERT INTO exportaciones_generadas
-    (periodo_planilla_id, formato_exportacion_id, fecha_generacion, ruta_archivo,
+    (periodo_planilla_id, anio, mes, formato_exportacion_id, fecha_generacion, ruta_archivo,
      hash_verificacion, generado_por_usuario_id, nombre_archivo, cantidad_filas, total_monto)
-SELECT ?, f.id, NOW(), NULL, ?, ?, ?, ?, ?
+SELECT NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, 0), f.id, NOW(), NULL, ?, ?, ?, ?, ?
 FROM formatos_exportacion f
 WHERE f.codigo = ?`,
-		p.PeriodoID, p.HashSHA256, p.UsuarioID, p.NombreArchivo, p.CantidadFilas, p.TotalMonto, p.FormatoCodigo)
+		p.PeriodoID, p.Anio, p.Mes, p.HashSHA256, p.UsuarioID, p.NombreArchivo, p.CantidadFilas, p.TotalMonto, p.FormatoCodigo)
 	if err != nil {
 		return 0, err
 	}
@@ -144,16 +117,12 @@ WHERE f.codigo = ?`,
 	return res.LastInsertId()
 }
 
-// ============================================================================
-// BOLETA DE PAGO
-// ============================================================================
-
 type ObtenerDatosBoletaPagoRow struct {
 	PlanillaDetalleEmpleadoID int64
 	EmpleadoID                int64
 	PeriodoID                 int64
 	NombreCompleto            string
-	Cedula                    string
+	Cedula                    ValorSensible
 	SalarioBasePeriodo        decimal.Decimal
 	TotalIngresos             decimal.Decimal
 	TotalDeducciones          decimal.Decimal
@@ -175,7 +144,8 @@ SELECT
     pde.empleado_id,
     pde.periodo_planilla_id,
     e.nombre_completo,
-    e.numero_identificacion,
+    e.numero_identificacion_cifrado,
+    e.numero_identificacion_kid,
     pde.salario_base_periodo,
     pde.total_ingresos,
     pde.total_deducciones,
@@ -190,7 +160,7 @@ WHERE pde.periodo_planilla_id = ?
   AND pp.estado IN (` + placeholdersExport(len(estados)) + `)`
 
 	err := q.db.QueryRowContext(ctx, query, argsEstadosExport(estados, periodoID, empleadoID)...).
-		Scan(&r.PlanillaDetalleEmpleadoID, &r.EmpleadoID, &r.PeriodoID, &r.NombreCompleto, &r.Cedula,
+		Scan(&r.PlanillaDetalleEmpleadoID, &r.EmpleadoID, &r.PeriodoID, &r.NombreCompleto, &r.Cedula.Cifrado, &r.Cedula.Kid,
 			&r.SalarioBasePeriodo, &r.TotalIngresos, &r.TotalDeducciones, &r.NetoPagado)
 	return r, err
 }
@@ -206,7 +176,7 @@ type ObtenerDesgloseConceptosBoletaPagoRow struct {
 
 // ObtenerDesgloseConceptosBoletaPago devuelve el desglose por concepto en
 // orden de cálculo. El orden sale de orden_calculo_concepto vigente a la
-// fecha fin del período. LEFT JOIN: un concepto sin orden vigente NO se
+// fecha fin del período. LEFT JOIN: un concepto sin orden vigente no se
 // pierde de la boleta (queda al final, OrdenCalculo = 0). cantidad es NULL
 // en la tabla cuando no aplica: se normaliza a 0.
 func (q *Queries) ObtenerDesgloseConceptosBoletaPago(ctx context.Context, periodoID, empleadoID int64) ([]ObtenerDesgloseConceptosBoletaPagoRow, error) {
@@ -254,8 +224,6 @@ type ObtenerEmbargosBoletaPagoRow struct {
 	TipoEmbargoNombre string
 	OrdenPrioridad    int32 // planilla_detalle_embargo.orden_prioridad
 	Monto             decimal.Decimal
-	// F20: agregar MontoCalculado, MontoAplicado y SaldoPendienteInsatisfecho
-	// cuando planilla_detalle_embargo tenga esas columnas.
 }
 
 // ObtenerEmbargosBoletaPago devuelve los embargos efectivamente retenidos en
@@ -288,6 +256,43 @@ ORDER BY pdemb.orden_prioridad ASC, pdemb.id ASC`, periodoID, empleadoID)
 	for rows.Next() {
 		var r ObtenerEmbargosBoletaPagoRow
 		if err := rows.Scan(&r.EmbargoID, &r.TipoEmbargoCodigo, &r.TipoEmbargoNombre, &r.OrdenPrioridad, &r.Monto); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ObtenerIncapacidadesBoletaPagoRow: tramo de subsidio de incapacidad (boleta).
+type ObtenerIncapacidadesBoletaPagoRow struct {
+	IncapacidadID           int64
+	NumeroBoleta            string
+	FechaInicio, FechaFin   time.Time
+	DiaSerieDesde           int32
+	DiaSerieHasta           int32
+	Dias                    decimal.Decimal
+	MontoPatronal           decimal.Decimal
+	MontoEntidadInformativo decimal.Decimal
+}
+
+func (q *Queries) ObtenerIncapacidadesBoletaPago(ctx context.Context, periodoID, empleadoID int64) ([]ObtenerIncapacidadesBoletaPagoRow, error) {
+	rows, err := q.db.QueryContext(ctx, `
+SELECT pdi.incapacidad_id, i.numero_boleta, i.fecha_inicio, i.fecha_fin, pdi.dia_serie_desde, pdi.dia_serie_hasta,
+       pdi.dias, pdi.monto_patronal, pdi.monto_entidad_informativo
+FROM planilla_detalle_incapacidad pdi
+JOIN planilla_detalle_empleado pde ON pde.id = pdi.planilla_detalle_empleado_id
+JOIN incapacidades i ON i.id = pdi.incapacidad_id
+WHERE pde.periodo_planilla_id = ? AND pde.empleado_id = ?
+ORDER BY i.fecha_inicio, pdi.dia_serie_desde`, periodoID, empleadoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ObtenerIncapacidadesBoletaPagoRow
+	for rows.Next() {
+		var r ObtenerIncapacidadesBoletaPagoRow
+		if err := rows.Scan(&r.IncapacidadID, &r.NumeroBoleta, &r.FechaInicio, &r.FechaFin, &r.DiaSerieDesde, &r.DiaSerieHasta,
+			&r.Dias, &r.MontoPatronal, &r.MontoEntidadInformativo); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

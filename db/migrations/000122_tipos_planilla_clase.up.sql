@@ -1,14 +1,8 @@
--- ============================================================================
--- L3 (000122) — Clase y fracción mensual por tipo de planilla (D16) y
--- conceptos que calcula cada tipo (D18).
--- tipos_planilla no tenía seed: aquí se siembran los 5 tipos.
--- ============================================================================
 ALTER TABLE tipos_planilla
-  ADD COLUMN clase ENUM('regular','aguinaldo','salario_escolar','liquidacion') NOT NULL DEFAULT 'regular' COMMENT 'Comportamiento del tipo (D16); Go nunca usa codigo',
+  ADD COLUMN clase ENUM('regular','aguinaldo','salario_escolar','liquidacion') NOT NULL DEFAULT 'regular' COMMENT 'Comportamiento del tipo',
   ADD COLUMN fraccion_mensual DECIMAL(6,4) NULL COMMENT 'Fracción del mes que cubre un período (mensual 1.0000, quincenal 0.5000); NULL si no es regular',
   ADD CONSTRAINT chk_tp_fraccion CHECK ((clase = 'regular' AND fraccion_mensual IS NOT NULL AND fraccion_mensual > 0 AND fraccion_mensual <= 1) OR (clase <> 'regular' AND fraccion_mensual IS NULL));
 
--- Auditoría de tipos_planilla regenerada con las columnas nuevas (antes del seed).
 DROP TRIGGER IF EXISTS trg_aud_tipos_planilla_ins;
 CREATE TRIGGER trg_aud_tipos_planilla_ins AFTER INSERT ON tipos_planilla
 FOR EACH ROW
@@ -45,7 +39,7 @@ SELECT v.codigo, v.nombre, v.clase, v.fraccion FROM (
 CREATE TABLE tipo_planilla_concepto (
   id                   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador',
   tipo_planilla_id     BIGINT UNSIGNED NOT NULL COMMENT 'Tipo de planilla',
-  concepto_salarial_id BIGINT UNSIGNED NOT NULL COMMENT 'Concepto que ese tipo calcula (D18)',
+  concepto_salarial_id BIGINT UNSIGNED NOT NULL COMMENT 'Concepto que ese tipo calcula',
   CONSTRAINT fk_tpc_tipo     FOREIGN KEY (tipo_planilla_id)     REFERENCES tipos_planilla(id),
   CONSTRAINT fk_tpc_concepto FOREIGN KEY (concepto_salarial_id) REFERENCES conceptos_salariales(id),
   UNIQUE KEY uk_tpc (tipo_planilla_id, concepto_salarial_id)

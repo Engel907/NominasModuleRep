@@ -1,9 +1,6 @@
-// Package asistencia implementa la lógica de negocio de Fase 4 para turnos,
-// calendario laboral, marcaje/asistencia e incapacidades, siguiendo las reglas
-// del ADR-000: toda escritura pasa por db.WithAuditContext (trazabilidad del
-// usuario en los triggers), transacción de 2 pasos para tablas con patrón
-// `es_vigente` (aquí: empleado_turno) y decimal.Decimal para toda columna
-// DECIMAL — sin float64 en los cálculos.
+// Package asistencia gestiona turnos, calendario laboral, marcas de asistencia,
+// incapacidades, horas extra y vacaciones. Toda escritura pasa por
+// db.WithAuditContext.
 package asistencia
 
 import (
@@ -34,11 +31,9 @@ var estadosAsistencia = map[string]struct{}{
 	"incapacidad": {}, "vacaciones": {}, "feriado": {}, "dia_libre": {},
 }
 
-// Queries es el subconjunto de LECTURAS de *dto.Queries que el servicio usa
-// fuera de transacción — permite mockear en pruebas. Deliberadamente NO
-// incluye ninguna escritura: toda escritura se hace con el *dto.Queries que
-// db.WithAuditContext entrega ligado a la transacción, de modo que sea
-// imposible escribir sin auditoría a través de s.queries.
+// Queries es el subconjunto de lecturas de *dto.Queries que el servicio usa
+// fuera de transacción. No incluye escrituras: toda escritura usa el
+// *dto.Queries ligado a la transacción auditada.
 type Queries interface {
 	ObtenerTurno(ctx context.Context, id int64) (dto.Turno, error)
 	ListarTurnos(ctx context.Context, arg dto.ListarTurnosParams) ([]dto.Turno, error)
@@ -46,6 +41,8 @@ type Queries interface {
 
 	ObtenerTurnoVigenteEmpleado(ctx context.Context, empleadoID int64) (dto.ObtenerTurnoVigenteEmpleadoRow, error)
 
+	ListarFeriadosCatalogo(ctx context.Context) ([]dto.FeriadoCatalogo, error)
+	ExisteEntidadEmisoraActiva(ctx context.Context, codigo string) (bool, error)
 	ObtenerDiaCalendario(ctx context.Context, fecha time.Time) (dto.CalendarioLaboralDia, error)
 	ListarCalendarioPorRango(ctx context.Context, desde, hasta time.Time) ([]dto.ListarCalendarioPorRangoRow, error)
 
@@ -59,34 +56,28 @@ type Queries interface {
 	ContarAsistenciaEmpleado(ctx context.Context, arg dto.ContarAsistenciaEmpleadoParams) (int64, error)
 }
 
-// Opciones son los parámetros de negocio inyectados al construir el servicio.
-type Opciones struct {
-	// ToleranciaTardanzaMin: minutos de gracia en la entrada antes de contar
-	// tardanza. SIN valor por defecto: el llamador debe decidirlo (hoy desde
-	// config; desde parametros_generales cuando exista, F18). 0 es válido
-	// ("sin gracia"); un valor negativo es error de configuración.
-	ToleranciaTardanzaMin int
+// LectorParametros lee parametros_generales vigentes a una fecha.
+type LectorParametros interface {
+	Texto(ctx context.Context, clave string, fecha time.Time) (string, error)
 }
 
-// Service agrupa la conexión (para las escrituras auditadas), las lecturas y
-// las opciones de negocio.
 type Service struct {
-	sqlDB   *sql.DB
-	queries Queries
-	opts    Opciones
+	sqlDB      *sql.DB
+	queries    Queries
+	parametros LectorParametros
 }
 
-func NewService(sqlDB *sql.DB, queries Queries, opts Opciones) (*Service, error) {
+func NewService(sqlDB *sql.DB, queries Queries, parametros LectorParametros) (*Service, error) {
 	if sqlDB == nil {
 		return nil, errors.New("asistencia: sqlDB es requerido")
 	}
 	if queries == nil {
 		return nil, errors.New("asistencia: queries es requerido")
 	}
-	if opts.ToleranciaTardanzaMin < 0 {
-		return nil, fmt.Errorf("asistencia: ToleranciaTardanzaMin no puede ser negativa (%d)", opts.ToleranciaTardanzaMin)
+	if parametros == nil {
+		return nil, errors.New("asistencia: lector de parámetros es requerido")
 	}
-	return &Service{sqlDB: sqlDB, queries: queries, opts: opts}, nil
+	return &Service{sqlDB: sqlDB, queries: queries, parametros: parametros}, nil
 }
 
 // vacioANil devuelve nil (→ NULL en la BD) si s está vacío o solo tiene espacios.
@@ -97,8 +88,6 @@ func vacioANil(s string) *string {
 	}
 	return &s
 }
-
-// --- Lecturas (sin transacción) ----------------------------------------------
 
 func (s *Service) ListarTurnos(ctx context.Context, arg dto.ListarTurnosParams) ([]dto.Turno, error) {
 	return s.queries.ListarTurnos(ctx, arg)
@@ -124,16 +113,18 @@ func (s *Service) ListarIncapacidadesEmpleado(ctx context.Context, arg dto.Lista
 	return s.queries.ListarIncapacidadesEmpleado(ctx, arg)
 }
 
-// --- Turnos --------------------------------------------------------------
-
 type CrearTurnoInput struct {
 	Codigo                    string
 	Nombre                    string
 	HoraEntrada, HoraSalida   time.Time
-	HoraEntradaAlmuerzo       *time.Time
-	HoraSalidaAlmuerzo        *time.Time
-	DiasLaborables            string // CSV "1,2,3,4,5"
-	ToleranciaTardanzaMinutos int16
+	ToleranciaTardanzaMinutos int
+}
+
+func validarTolerancia(minutos int) error {
+	if minutos < 0 || minutos > 240 {
+		return fmt.Errorf("%w: tolerancia_tardanza_minutos debe estar entre 0 y 240", ErrTurnoInvalido)
+	}
+	return nil
 }
 
 // validarHorarioTurno exige entrada != salida (una jornada de 0 h, o de 24 h
@@ -154,17 +145,17 @@ func (s *Service) CrearTurno(ctx context.Context, in CrearTurnoInput, creadoPor 
 		return dto.Turno{}, err
 	}
 
-	// `turnos` (v11 base) solo tiene codigo, nombre, hora_inicio y hora_fin:
-	// HoraEntradaAlmuerzo, HoraSalidaAlmuerzo, DiasLaborables y
-	// ToleranciaTardanzaMinutos de CrearTurnoInput NO se persisten hasta que la
-	// tabla tenga esas columnas (ver dto/asistencia.go).
+	if err := validarTolerancia(in.ToleranciaTardanzaMinutos); err != nil {
+		return dto.Turno{}, err
+	}
 	var creado dto.Turno
 	err := db.WithAuditContext(ctx, s.sqlDB, creadoPor, func(ctx context.Context, q *dto.Queries) error {
 		t, err := q.CrearTurno(ctx, dto.CrearTurnoParams{
-			Codigo:      in.Codigo,
-			Nombre:      in.Nombre,
-			HoraEntrada: in.HoraEntrada,
-			HoraSalida:  in.HoraSalida,
+			Codigo:                    in.Codigo,
+			Nombre:                    in.Nombre,
+			HoraEntrada:               in.HoraEntrada,
+			HoraSalida:                in.HoraSalida,
+			ToleranciaTardanzaMinutos: in.ToleranciaTardanzaMinutos,
 		})
 		if err != nil {
 			return err
@@ -176,16 +167,16 @@ func (s *Service) CrearTurno(ctx context.Context, in CrearTurnoInput, creadoPor 
 }
 
 type ActualizarTurnoInput struct {
-	ID                      int64
-	Nombre                  string
-	HoraEntrada, HoraSalida time.Time
+	ID                        int64
+	Nombre                    string
+	HoraEntrada, HoraSalida   time.Time
+	ToleranciaTardanzaMinutos int
 }
 
 // ActualizarTurno cambia nombre y/u horario de un turno. Regla de histórico:
 // si el horario cambia y el turno tiene asignaciones vigentes (empleado_turno
-// con fecha_fin_vigencia NULL), se rechaza con ErrTurnoConAsignacionesVigentes
-// — el camino correcto es crear un turno nuevo y reasignar (AsignarTurnoEmpleado
-// cierra y abre vigencia). Renombrar siempre se permite. El conteo y el UPDATE
+// con fecha_fin_vigencia NULL), se rechaza con ErrTurnoConAsignacionesVigentes;
+// se debe crear un turno nuevo y reasignar. Renombrar siempre se permite. El conteo y el UPDATE
 // van en la misma transacción auditada.
 func (s *Service) ActualizarTurno(ctx context.Context, in ActualizarTurnoInput, usuarioID int64) (dto.Turno, error) {
 	in.Nombre = strings.TrimSpace(in.Nombre)
@@ -193,6 +184,9 @@ func (s *Service) ActualizarTurno(ctx context.Context, in ActualizarTurnoInput, 
 		return dto.Turno{}, fmt.Errorf("%w: nombre es requerido", ErrTurnoInvalido)
 	}
 	if err := validarHorarioTurno(in.HoraEntrada, in.HoraSalida); err != nil {
+		return dto.Turno{}, err
+	}
+	if err := validarTolerancia(in.ToleranciaTardanzaMinutos); err != nil {
 		return dto.Turno{}, err
 	}
 
@@ -219,16 +213,17 @@ func (s *Service) ActualizarTurno(ctx context.Context, in ActualizarTurnoInput, 
 			}
 		}
 
-		if !cambiaHorario && actual.Nombre == in.Nombre {
-			resultado = actual // nada que escribir
+		if !cambiaHorario && actual.Nombre == in.Nombre && actual.ToleranciaTardanzaMinutos == in.ToleranciaTardanzaMinutos {
+			resultado = actual
 			return nil
 		}
 
 		t, err := q.ActualizarTurno(ctx, dto.ActualizarTurnoParams{
-			ID:          in.ID,
-			Nombre:      in.Nombre,
-			HoraEntrada: in.HoraEntrada,
-			HoraSalida:  in.HoraSalida,
+			ID:                        in.ID,
+			Nombre:                    in.Nombre,
+			HoraEntrada:               in.HoraEntrada,
+			HoraSalida:                in.HoraSalida,
+			ToleranciaTardanzaMinutos: in.ToleranciaTardanzaMinutos,
 		})
 		if err != nil {
 			return fmt.Errorf("actualizando turno: %w", err)
@@ -239,8 +234,8 @@ func (s *Service) ActualizarTurno(ctx context.Context, in ActualizarTurnoInput, 
 	return resultado, err
 }
 
-// AsignarTurnoEmpleado aplica la transacción de 2 pasos obligatoria del ADR-000
-// §2 para tablas con patrón de vigencia: cierra la fila vigente de
+// AsignarTurnoEmpleado aplica la transacción de 2 pasos de las tablas con
+// vigencia: cierra la fila vigente de
 // empleado_turno (si existe) y abre la nueva, todo dentro de una sola Tx.
 func (s *Service) AsignarTurnoEmpleado(ctx context.Context, empleadoID, turnoID int64, fechaEfectiva time.Time, creadoPor int64) (dto.EmpleadoTurno, error) {
 	if _, err := s.queries.ObtenerTurno(ctx, turnoID); err != nil {
@@ -252,8 +247,6 @@ func (s *Service) AsignarTurnoEmpleado(ctx context.Context, empleadoID, turnoID 
 
 	var nuevo dto.EmpleadoTurno
 	err := db.WithAuditContext(ctx, s.sqlDB, creadoPor, func(ctx context.Context, q *dto.Queries) error {
-		// Paso 1: cerrar la fila vigente anterior (si la hay). No es error que
-		// no exista ninguna — es la primera asignación del empleado.
 		if err := q.CerrarTurnoVigenteEmpleado(ctx, dto.CerrarTurnoVigenteEmpleadoParams{
 			EmpleadoID:       empleadoID,
 			FechaFinVigencia: &fechaEfectiva,
@@ -261,7 +254,6 @@ func (s *Service) AsignarTurnoEmpleado(ctx context.Context, empleadoID, turnoID 
 			return fmt.Errorf("cerrando turno vigente: %w", err)
 		}
 
-		// Paso 2: abrir la nueva fila vigente.
 		creado, err := q.AbrirTurnoEmpleado(ctx, dto.AbrirTurnoEmpleadoParams{
 			EmpleadoID:          empleadoID,
 			TurnoID:             turnoID,
@@ -277,8 +269,6 @@ func (s *Service) AsignarTurnoEmpleado(ctx context.Context, empleadoID, turnoID 
 	return nuevo, err
 }
 
-// --- Asistencia ------------------------------------------------------------
-
 type RegistrarAsistenciaInput struct {
 	EmpleadoID      int64
 	Fecha           time.Time
@@ -293,13 +283,8 @@ type RegistrarAsistenciaInput struct {
 
 // RegistrarAsistencia calcula horas ordinarias, exceso sobre jornada y
 // tardanza contra el turno vigente del empleado y hace upsert del registro
-// del día dentro de WithAuditContext. No usa la transacción de 2 pasos:
-// registro_asistencia_detalle es único por (empleado_id, fecha), no tiene
-// patrón es_vigente — ver excepción documentada en ADR-000 §2.
-//
-// El "exceso sobre jornada" se guarda en horas_extra (total) y, tipificado por
-// clase (L14), en asistencia_hora_extra_tipificada. Solo se paga si el día
-// tiene autorización (L13).
+// del día dentro de WithAuditContext. registro_asistencia_detalle es único
+// por (empleado_id, fecha) y no tiene vigencias.
 func (s *Service) RegistrarAsistencia(ctx context.Context, in RegistrarAsistenciaInput) (dto.RegistroAsistenciaDetalle, error) {
 	if _, ok := estadosAsistencia[in.Estado]; !ok {
 		return dto.RegistroAsistenciaDetalle{}, fmt.Errorf("%w: estado %q no válido", ErrRegistroAsistenciaInvalido, in.Estado)
@@ -310,24 +295,18 @@ func (s *Service) RegistrarAsistencia(ctx context.Context, in RegistrarAsistenci
 	horas := calcularHorasCero()
 	switch {
 	case err == nil:
-		// turno.ID es el id de la fila de empleado_turno; el turno es TurnoID.
 		turnoID = &turno.TurnoID
 		if in.Estado == "presente" && in.HoraEntradaReal != nil && in.HoraSalidaReal != nil {
 			horas = calcularHoras(turno.HoraEntrada, turno.HoraSalida,
-				*in.HoraEntradaReal, *in.HoraSalidaReal, s.opts.ToleranciaTardanzaMin)
+				*in.HoraEntradaReal, *in.HoraSalidaReal, turno.ToleranciaTardanzaMinutos)
 		}
 	case errors.Is(err, sql.ErrNoRows):
-		// Sin turno vigente: se guarda igual con horas en cero — el handler debe
-		// advertir al usuario (ErrSinTurnoVigente queda disponible por si el
-		// negocio decide bloquearlo).
 	default:
 		return dto.RegistroAsistenciaDetalle{}, fmt.Errorf("obteniendo turno vigente: %w", err)
 	}
 
 	var registro dto.RegistroAsistenciaDetalle
 	err = db.WithAuditContext(ctx, s.sqlDB, in.CreadoPor, func(ctx context.Context, q *dto.Queries) error {
-		// L14: el exceso se tipifica y se guarda por clase; sin exceso, el día
-		// queda sin horas extra (re-registrar recalcula).
 		tipificadas, err := s.tipificar(ctx, q, in, turno, horas)
 		if err != nil {
 			return err
@@ -342,7 +321,7 @@ func (s *Service) RegistrarAsistencia(ctx context.Context, in RegistrarAsistenci
 			HoraEntradaReal: in.HoraEntradaReal,
 			HoraSalidaReal:  in.HoraSalidaReal,
 			HorasOrdinarias: horas.Ordinarias,
-			HorasExtra:      horas.ExcesoJornada, // total; el desglose por clase va a asistencia_hora_extra_tipificada (L14)
+			HorasExtra:      horas.ExcesoJornada,
 			HorasTardanza:   horas.Tardanza,
 			MinutosTardanza: int16(horas.MinutosTardanza),
 			Estado:          in.Estado,
@@ -360,11 +339,9 @@ func (s *Service) RegistrarAsistencia(ctx context.Context, in RegistrarAsistenci
 	return registro, err
 }
 
-// --- Incapacidades ----------------------------------------------------------
-
 type RegistrarIncapacidadInput struct {
 	EmpleadoID        int64
-	EntidadEmisora    string // CCSS | INS
+	EntidadEmisora    string
 	NumeroBoleta      string
 	FechaInicio       time.Time
 	FechaFin          time.Time
@@ -374,10 +351,14 @@ type RegistrarIncapacidadInput struct {
 }
 
 func (s *Service) RegistrarIncapacidad(ctx context.Context, in RegistrarIncapacidadInput) (dto.Incapacidade, error) {
-	if in.EntidadEmisora != "CCSS" && in.EntidadEmisora != "INS" {
-		return dto.Incapacidade{}, fmt.Errorf("%w: entidad_emisora debe ser CCSS o INS", ErrRegistroAsistenciaInvalido)
+	in.EntidadEmisora = strings.TrimSpace(in.EntidadEmisora)
+	activa, err := s.queries.ExisteEntidadEmisoraActiva(ctx, in.EntidadEmisora)
+	if err != nil {
+		return dto.Incapacidade{}, fmt.Errorf("verificando entidad emisora: %w", err)
 	}
-	// Fechas (sin hora) → días corridos inclusivos, con aritmética entera.
+	if !activa {
+		return dto.Incapacidade{}, fmt.Errorf("%w: entidad_emisora %q no existe o está inactiva en el catálogo", ErrRegistroAsistenciaInvalido, in.EntidadEmisora)
+	}
 	dias := int(in.FechaFin.Sub(in.FechaInicio)/(24*time.Hour)) + 1
 	if dias < 1 {
 		return dto.Incapacidade{}, fmt.Errorf("%w: fecha_fin anterior a fecha_inicio", ErrRegistroAsistenciaInvalido)
@@ -387,7 +368,7 @@ func (s *Service) RegistrarIncapacidad(ctx context.Context, in RegistrarIncapaci
 	}
 
 	var creada dto.Incapacidade
-	err := db.WithAuditContext(ctx, s.sqlDB, in.CreadoPor, func(ctx context.Context, q *dto.Queries) error {
+	err = db.WithAuditContext(ctx, s.sqlDB, in.CreadoPor, func(ctx context.Context, q *dto.Queries) error {
 		i, err := q.CrearIncapacidad(ctx, dto.CrearIncapacidadParams{
 			EmpleadoID:        in.EmpleadoID,
 			EntidadEmisora:    in.EntidadEmisora,
@@ -408,11 +389,8 @@ func (s *Service) RegistrarIncapacidad(ctx context.Context, in RegistrarIncapaci
 	return creada, err
 }
 
-// --- Tipificación de horas extra (L14) ---------------------------------------
-
-// codigoJornadaMixta: código del catálogo `jornadas` cuyo tramo nocturno se
-// tipifica como "mixta".
-const codigoJornadaMixta = "MIXTA"
+// claseJornadaMixta: jornadas.clase cuyo tramo nocturno se tipifica como "mixta".
+const claseJornadaMixta = "mixta"
 
 var (
 	ErrCalendarioNoGenerado = errors.New("el calendario laboral no está generado para esa fecha (no se sabe si es feriado o descanso)")
@@ -439,7 +417,7 @@ func (s *Service) tipificar(ctx context.Context, q *dto.Queries, in RegistrarAsi
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("leyendo franja nocturna: %w", err)
 	}
-	jornada, err := q.ObtenerJornadaContratoEnFecha(ctx, in.EmpleadoID, in.Fecha)
+	jornada, err := q.ObtenerClaseJornadaContratoEnFecha(ctx, in.EmpleadoID, in.Fecha)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrSinJornadaContrato
 	}
@@ -447,7 +425,7 @@ func (s *Service) tipificar(ctx context.Context, q *dto.Queries, in RegistrarAsi
 		return nil, fmt.Errorf("leyendo jornada del contrato: %w", err)
 	}
 	tip, err := TipificarHorasExtra(*in.HoraEntradaReal, *in.HoraSalidaReal, turno.HoraEntrada, turno.HoraSalida,
-		franja, dia.EsFeriado, !dia.EsHabil && !dia.EsFeriado, jornada == codigoJornadaMixta)
+		franja, dia.EsFeriado, !dia.EsHabil && !dia.EsFeriado, jornada == claseJornadaMixta)
 	if err != nil {
 		return nil, err
 	}

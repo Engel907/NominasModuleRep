@@ -11,10 +11,10 @@ import (
 
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
-// PeriodoService orquesta el ciclo de vida del período (F19).
+// PeriodoService orquesta el ciclo de vida del período.
 type PeriodoService struct {
 	db      *sql.DB
 	ganchos PeriodoGanchos
@@ -83,7 +83,7 @@ func (s *PeriodoService) Obtener(ctx context.Context, id int64) (dto.PeriodoCicl
 	return p, err
 }
 
-func (s *PeriodoService) Listar(ctx context.Context, f dto.FiltroPeriodosCiclo, pag pagination.Parametros) ([]dto.PeriodoCicloRow, int64, error) {
+func (s *PeriodoService) Listar(ctx context.Context, f dto.FiltroPeriodosCiclo, pag paginacion.Parametros) ([]dto.PeriodoCicloRow, int64, error) {
 	q := dto.New(s.db)
 	total, err := q.ContarPeriodosCiclo(ctx, f)
 	if err != nil {
@@ -116,7 +116,7 @@ func (s *PeriodoService) transicionar(ctx context.Context, usuarioID, periodoID 
 	return out, traducirErrorBD(err)
 }
 
-// Calcular: borrador -> calculada, delegando el cálculo al gancho (F20).
+// Calcular: borrador -> calculada, delegando el cálculo al gancho.
 func (s *PeriodoService) Calcular(ctx context.Context, usuarioID, periodoID int64) (dto.PeriodoCicloRow, error) {
 	if s.ganchos.Calculador == nil {
 		return dto.PeriodoCicloRow{}, ErrCalculoNoDisponible

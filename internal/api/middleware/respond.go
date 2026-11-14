@@ -16,11 +16,11 @@ import (
 	"github.com/go-playground/validator/v10"
 
 	"planillas-ccdr/internal/auth"
-	"planillas-ccdr/internal/security"
-	"planillas-ccdr/internal/services"
+	"planillas-ccdr/internal/credenciales"
+	"planillas-ccdr/internal/rrhh"
 )
 
-// Mensaje genérico de los 500 (S15): nunca incluye detalles internos. El
+// Mensaje genérico de los 500: nunca incluye detalles internos. El
 // cliente correlaciona con el request_id que viaja en el cuerpo y en la
 // cabecera X-Request-ID.
 const mensajeErrorInterno = "Ocurrió un error inesperado. Intentá de nuevo más tarde."
@@ -36,15 +36,6 @@ type CampoInvalido struct {
 // internal/api/handlers para traducir un error (auth, services, security,
 // sql.ErrNoRows, errores de bind/JSON de Gin, cuerpo demasiado grande,
 // parámetros de ruta inválidos) al contrato JSON de ErrorResponse.
-//
-// No escribe la respuesta: registra un *apiError en el contexto y aborta;
-// ErrorHandler es quien escribe el JSON (una sola vez). Los handlers deben
-// hacer `RespondWithError(c, err); return`.
-//
-// NOTA sobre import cycles: este archivo puede importar auth/services/
-// security porque ninguno de esos paquetes importa middleware. Los
-// paquetes que sí importan middleware (internal/asistencia,
-// internal/prestamos) NO deben agregarse acá.
 func RespondWithError(c *gin.Context, err error) {
 	if err == nil {
 		return
@@ -57,24 +48,17 @@ func RespondWithError(c *gin.Context, err error) {
 // al cliente. Es la única función que decide status/código/mensaje: la usan
 // RespondWithError y ErrorHandler (que también recibe errores crudos vía
 // c.Error(err)).
-//
-// Regla de oro (S15): el mensaje del cliente sale SIEMPRE de este código,
-// jamás de err.Error(). El error original viaja en apiError.cause solo para
-// el log del servidor.
 func traducirError(err error) *apiError {
-	// Ya traducido (p. ej. vino de Fail/FailFromError envuelto).
 	var yaApi *apiError
 	if errors.As(err, &yaApi) {
 		return yaApi
 	}
 
-	// --- cuerpo demasiado grande (http.MaxBytesReader) ---
 	var maxErr *http.MaxBytesError
 	if errors.As(err, &maxErr) {
 		return errCuerpoGrande(maxErr.Limit)
 	}
 
-	// --- parámetro de ruta inválido (ParseIDParam) ---
 	var pe *ErrParametroInvalido
 	if errors.As(err, &pe) {
 		return &apiError{
@@ -85,7 +69,6 @@ func traducirError(err error) *apiError {
 		}
 	}
 
-	// --- bind / validación / JSON malformado ---
 	if campos, ok := camposInvalidos(err); ok {
 		return &apiError{
 			status:  http.StatusBadRequest,
@@ -95,14 +78,12 @@ func traducirError(err error) *apiError {
 		}
 	}
 
-	// --- errores de dominio ---
 	for _, r := range reglasDominio {
 		if errors.Is(err, r.err) {
 			return &apiError{status: r.status, code: r.code, message: r.mensaje}
 		}
 	}
 
-	// --- genérico de base de datos ---
 	if errors.Is(err, sql.ErrNoRows) {
 		return &apiError{status: http.StatusNotFound, code: "not_found", message: "El recurso solicitado no existe."}
 	}
@@ -132,7 +113,6 @@ var reglasDominio = []struct {
 	code    string
 	mensaje string
 }{
-	// --- auth ---
 	{auth.ErrCredencialesInvalidas, http.StatusUnauthorized, "invalid_credentials", "Usuario o contraseña incorrectos."},
 	{auth.ErrUsuarioInactivo, http.StatusForbidden, "user_inactive", "El usuario no está activo."},
 	{auth.ErrUsuarioBloqueado, http.StatusForbidden, "user_locked", "El usuario está bloqueado temporalmente por intentos fallidos."},
@@ -148,29 +128,21 @@ var reglasDominio = []struct {
 	{auth.ErrPermisoInvalido, http.StatusBadRequest, "invalid_permission", "La lista contiene un código de permiso no válido."},
 	{auth.ErrPermisoDuplicado, http.StatusBadRequest, "duplicate_permission", "La lista no puede repetir códigos de permiso."},
 
-	// --- security ---
-	{security.ErrPasswordInvalida, http.StatusBadRequest, "invalid_password", "La contraseña no cumple los requisitos."},
-	{security.ErrTokenInvalido, http.StatusUnauthorized, "invalid_token", "El token es inválido o expiró."},
-	{security.ErrTokenExpirado, http.StatusUnauthorized, "invalid_token", "El token es inválido o expiró."},
+	{credenciales.ErrPasswordInvalida, http.StatusBadRequest, "invalid_password", "La contraseña no cumple los requisitos."},
+	{credenciales.ErrTokenInvalido, http.StatusUnauthorized, "invalid_token", "El token es inválido o expiró."},
+	{credenciales.ErrTokenExpirado, http.StatusUnauthorized, "invalid_token", "El token es inválido o expiró."},
 
-	// --- services (empleados / contratos / organización) ---
-	{services.ErrEmpleadoNoEncontrado, http.StatusNotFound, "not_found", "El recurso solicitado no existe."},
-	{services.ErrContratoNoEncontrado, http.StatusNotFound, "not_found", "El recurso solicitado no existe."},
-	{services.ErrNoEncontrado, http.StatusNotFound, "not_found", "El recurso solicitado no existe."},
-	// Mensaje FIJO: antes devolvía err.Error(), que puede traer montos y
-	// detalles del cálculo interno.
-	{services.ErrSalarioInferiorAlMinimo, http.StatusUnprocessableEntity, "salary_below_minimum", "El salario es inferior al mínimo permitido."},
+	{rrhh.ErrEmpleadoNoEncontrado, http.StatusNotFound, "not_found", "El recurso solicitado no existe."},
+	{rrhh.ErrContratoNoEncontrado, http.StatusNotFound, "not_found", "El recurso solicitado no existe."},
+	{rrhh.ErrNoEncontrado, http.StatusNotFound, "not_found", "El recurso solicitado no existe."},
+	{rrhh.ErrSalarioInferiorAlMinimo, http.StatusUnprocessableEntity, "salary_below_minimum", "El salario es inferior al mínimo permitido."},
 }
 
 // camposInvalidos detecta (con errors.As / errors.Is, sin comparar texto
 // salvo el caso de campos desconocidos) los errores que produce
 // c.ShouldBindJSON y los traduce a una lista de campos en español. Devuelve
 // ok=false si el error no es de binding.
-//
-// Los mensajes se construyen a partir del tag de validación y del nombre
-// del campo; NUNCA incluyen el valor recibido (podría ser una contraseña).
 func camposInvalidos(err error) ([]CampoInvalido, bool) {
-	// Errores de validación (binding:"required", etc.).
 	var ve validator.ValidationErrors
 	if errors.As(err, &ve) {
 		campos := make([]CampoInvalido, 0, len(ve))
@@ -180,7 +152,6 @@ func camposInvalidos(err error) ([]CampoInvalido, bool) {
 		return campos, true
 	}
 
-	// Tipo JSON incompatible con el campo destino (p. ej. "abc" en un int).
 	var ute *json.UnmarshalTypeError
 	if errors.As(err, &ute) {
 		return []CampoInvalido{{
@@ -189,27 +160,20 @@ func camposInvalidos(err error) ([]CampoInvalido, bool) {
 		}}, true
 	}
 
-	// JSON mal formado.
 	var se *json.SyntaxError
 	if errors.As(err, &se) {
 		return []CampoInvalido{{Mensaje: "El cuerpo no es un JSON válido."}}, true
 	}
 
-	// Cuerpo vacío o cortado. OJO: io.EOF / io.ErrUnexpectedEOF también
-	// podrían venir de una capa de datos; es poco probable (el driver MySQL
-	// usa driver.ErrBadConn / ErrInvalidConn) y el costo de un falso positivo
-	// es un 400 en vez de un 500.
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return []CampoInvalido{{Mensaje: "El cuerpo de la petición está vacío o incompleto."}}, true
 	}
 
-	// Fecha/hora con formato inválido dentro del JSON (time.Time).
 	var pe *time.ParseError
 	if errors.As(err, &pe) {
 		return []CampoInvalido{{Mensaje: "Una fecha u hora tiene un formato inválido."}}, true
 	}
 
-	// Decoder con DisallowUnknownFields: el error es un string plano.
 	if strings.HasPrefix(err.Error(), "json: unknown field") {
 		return []CampoInvalido{{Mensaje: "El cuerpo contiene un campo que no está permitido."}}, true
 	}
@@ -314,6 +278,6 @@ func ConfigurarValidador() {
 		if nombre == "-" {
 			return ""
 		}
-		return nombre // "" => el validador usa el nombre del campo Go
+		return nombre
 	})
 }

@@ -1,5 +1,3 @@
-// L9 — Devengos manuales del período (comisiones, bonos, viáticos). Solo se
-// capturan o eliminan con el período en borrador; el cálculo (L8) los consume.
 package planilla
 
 import (
@@ -11,12 +9,12 @@ import (
 
 	"planillas-ccdr/internal/db"
 	"planillas-ccdr/internal/db/dto"
-	"planillas-ccdr/internal/pagination"
+	"planillas-ccdr/internal/paginacion"
 )
 
 var (
 	ErrDevengoNoEncontrado  = &ErrorCiclo{"devengo_no_encontrado", "el devengo manual no existe en este período", 404}
-	ErrConceptoNoCapturable = &ErrorCiclo{"concepto_no_capturable", "el concepto no es un ingreso de captura manual activo que calcule este tipo de planilla", 422}
+	ErrConceptoNoCapturable = &ErrorCiclo{"concepto_no_capturable", "el concepto no es de captura manual, no está activo o no lo calcula este tipo de planilla", 422}
 	ErrEmpleadoNoActivo     = &ErrorCiclo{"empleado_no_activo", "el empleado no existe o no está activo", 422}
 	ErrMontoDevengoInvalido = &ErrorCiclo{"monto_invalido", "el monto debe ser mayor que cero y tener como máximo 2 decimales", 400}
 	ErrObservacionMuyLarga  = &ErrorCiclo{"observacion_muy_larga", "la observación admite como máximo 255 caracteres", 400}
@@ -51,7 +49,6 @@ func enBorrador(ctx context.Context, q *dto.Queries, periodoID int64) (dto.Perio
 }
 
 func (s *DevengosService) Crear(ctx context.Context, usuarioID, periodoID int64, in NuevoDevengo) (dto.DevengoManualRow, error) {
-	// DECIMAL(14,2): > 0, máximo 2 decimales y 12 dígitos enteros.
 	if !in.Monto.IsPositive() || !in.Monto.Equal(in.Monto.Round(2)) || in.Monto.GreaterThanOrEqual(decimal.New(1, 12)) {
 		return dto.DevengoManualRow{}, ErrMontoDevengoInvalido
 	}
@@ -89,7 +86,7 @@ func (s *DevengosService) Crear(ctx context.Context, usuarioID, periodoID int64,
 	return out, traducirErrorBD(err)
 }
 
-func (s *DevengosService) Listar(ctx context.Context, periodoID int64, empleadoID *int64, pag pagination.Parametros) ([]dto.DevengoManualRow, int64, error) {
+func (s *DevengosService) Listar(ctx context.Context, periodoID int64, empleadoID *int64, pag paginacion.Parametros) ([]dto.DevengoManualRow, int64, error) {
 	q := dto.New(s.db)
 	if _, err := q.ObtenerPeriodoCiclo(ctx, periodoID); errors.Is(err, sql.ErrNoRows) {
 		return nil, 0, ErrPeriodoNoEncontrado

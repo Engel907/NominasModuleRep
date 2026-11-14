@@ -1,4 +1,3 @@
--- Revierte 000127 (auditoría de tipos_hora_extra sin clase, como en 000000).
 DROP TRIGGER IF EXISTS trg_aud_tipos_hora_extra_ins;
 CREATE TRIGGER trg_aud_tipos_hora_extra_ins AFTER INSERT ON tipos_hora_extra
 FOR EACH ROW
