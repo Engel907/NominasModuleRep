@@ -11,10 +11,8 @@ import (
 // contratos.salario_pactado, por segmentos de vigencia y según la modalidad de
 // cada segmento:
 //   - mensual: salario × días comerciales ÷ DIVISOR_DIAS_MES;
-//   - diario con SALARIO_DIARIO_BASE = comerciales: salario × días comerciales;
-//   - diario con SALARIO_DIARIO_BASE = asistencia: salario × días pagados por
-//     asistencia (unidadesAsistencia);
-//   - por hora: salario × horas pagadas por asistencia.
+//   - quincenal: salario × 2 × días comerciales ÷ DIVISOR_DIAS_MES;
+//   - semanal: salario × días naturales ÷ 7.
 //
 // Los días de incapacidad y, en modo disfrute, los de vacaciones no se pagan
 // aquí (los pagan SUB_INCAP y PAGO_VACACIONES). Un solo redondeo al final.
@@ -32,8 +30,14 @@ func (reglaSalarioBase) Aplicar(rc *ContextoRegla) error {
 	if err != nil {
 		return err
 	}
-	if total := decimal.NewFromInt(int64(DiasSegmentos(in.Segmentos))); total.GreaterThan(p.DiasPeriodoCompleto) {
-		return fmt.Errorf("los segmentos suman %s días comerciales, más que el período (%s)", total, p.DiasPeriodoCompleto)
+	for _, s := range in.Segmentos {
+		if in.FechaInicioPeriodo.IsZero() || in.FechaFinPeriodo.IsZero() {
+			break
+		}
+		if s.Inicio.Before(soloFecha(in.FechaInicioPeriodo)) || s.Fin.After(soloFecha(in.FechaFinPeriodo)) {
+			return fmt.Errorf("el segmento del contrato %d (%s a %s) sale del período", s.ContratoID,
+				s.Inicio.Format("2006-01-02"), s.Fin.Format("2006-01-02"))
+		}
 	}
 	netos, err := SegmentosNetos(in.Segmentos, in.Incapacidades, divisor)
 	if err != nil {
@@ -47,7 +51,7 @@ func (reglaSalarioBase) Aplicar(rc *ContextoRegla) error {
 	if err != nil {
 		return err
 	}
-	monto, diasPagados, err := salarioBaseSegmentos(pagados, in, p)
+	monto, diasPagados, err := salarioBaseSegmentos(pagados, p)
 	if err != nil {
 		return err
 	}
@@ -58,36 +62,15 @@ func (reglaSalarioBase) Aplicar(rc *ContextoRegla) error {
 
 // salarioBaseSegmentos: monto (redondeado a 2 decimales) y días pagados de
 // los segmentos ya netos de incapacidad y vacaciones.
-func salarioBaseSegmentos(segs []SegmentoSalario, in CalculoEmpleadoInput, p ParametrosCalculo) (decimal.Decimal, int, error) {
-	mensual, otros, dias := decimal.Zero, decimal.Zero, 0
+func salarioBaseSegmentos(segs []SegmentoSalario, p ParametrosCalculo) (decimal.Decimal, int, error) {
+	total, dias := decimal.Zero, 0
 	for _, s := range segs {
-		switch s.Modalidad {
-		case ModalidadMensual, "":
-			mensual = mensual.Add(s.Salario.Mul(decimal.NewFromInt(int64(s.Dias))))
-			dias += s.Dias
-		case ModalidadDiario, ModalidadPorHora:
-			if s.Modalidad == ModalidadDiario && p.SalarioDiarioBase == "" {
-				return decimal.Zero, 0, fmt.Errorf("%w: %s (el contrato %d tiene salario diario; comerciales | asistencia)",
-					ErrParametroFaltante, ClaveSalarioDiarioBase, s.ContratoID)
-			}
-			if !porAsistencia(s, p) {
-				otros = otros.Add(s.Salario.Mul(decimal.NewFromInt(int64(s.Dias))))
-				dias += s.Dias
-				continue
-			}
-			u, d, err := unidadesAsistencia(s, in, p)
-			if err != nil {
-				return decimal.Zero, 0, fmt.Errorf("contrato %d: %w", s.ContratoID, err)
-			}
-			otros = otros.Add(s.Salario.Mul(u))
-			dias += d
-		default:
-			return decimal.Zero, 0, fmt.Errorf("el contrato %d tiene una modalidad de salario desconocida %q", s.ContratoID, s.Modalidad)
+		m, err := s.montoSegmento(p)
+		if err != nil {
+			return decimal.Zero, 0, err
 		}
+		total = total.Add(m)
+		dias += s.Dias
 	}
-	monto := otros
-	if mensual.IsPositive() {
-		monto = monto.Add(mensual.DivRound(p.DivisorDiasMes, 6))
-	}
-	return monto.Round(dosDecimales), dias, nil
+	return total.Round(dosDecimales), dias, nil
 }

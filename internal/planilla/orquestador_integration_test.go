@@ -52,11 +52,16 @@ func (r motorRepoSQL) ListarParametrosHorasExtraEnFecha(ctx context.Context, f t
 	return out, err
 }
 
+// sembrarSalarioMinimoInembargable siembra el salario mínimo inembargable y
+// paga vacaciones e incapacidad con el salario vigente.
 func (f *fixtureCalculo) sembrarSalarioMinimoInembargable(t *testing.T) {
 	t.Helper()
 	mustExec(t, f.db, `
 INSERT INTO parametros_generales (clave, valor, tipo, descripcion, fuente_legal, fecha_inicio_vigencia, creado_por)
-VALUES (?, '300000', 'decimal', 'fixture de prueba', 'FIXTURE DE PRUEBA', '2026-01-01', 1)`, parametros.ClaveSalarioMinimoInembargable)
+VALUES (?, '300000', 'decimal', 'fixture de prueba', 'FIXTURE DE PRUEBA', '2026-01-01', 1),
+       (?, 'vigente', 'texto', 'fixture de prueba', 'FIXTURE DE PRUEBA', '2026-01-01', 1),
+       (?, 'vigente', 'texto', 'fixture de prueba', 'FIXTURE DE PRUEBA', '2026-01-01', 1)`,
+		parametros.ClaveSalarioMinimoInembargable, ClaveVacacionesSalarioBase, ClaveIncapacidadSalarioBase)
 }
 
 func (f *fixtureCalculo) servicio() *PeriodoService {

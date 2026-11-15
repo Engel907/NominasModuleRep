@@ -70,6 +70,7 @@ func params() ParametrosCalculo {
 		},
 		BaseMinimaContributiva: map[int64]decimal.Decimal{1: d("232441")},
 		DivisorPorJornada:      map[int64]decimal.Decimal{1: d("240")}, FraccionMensualPeriodo: d("1"), DiasPeriodoCompleto: d("30"), DivisorDiasMes: d("30"),
+		VacacionesSalarioBase: SalarioBaseVigente, IncapacidadSalarioBase: SalarioBaseVigente,
 	}
 }
 

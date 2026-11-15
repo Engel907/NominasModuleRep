@@ -25,7 +25,7 @@ func (reglaDiferida) Aplicar(rc *ContextoRegla) error {
 		monto, err = CalcularSalarioEscolar(rc.In.BaseSalarioEscolarAcumulada, rc.P.PorcentajeSalarioEscolar)
 	case formulaVacaciones:
 		rc.St.usados[formulaVacaciones] = true
-		monto, dias, movs, err := calcularPagoVacaciones(rc.In, rc.P)
+		monto, dias, movs, err := calcularPagoVacaciones(rc.In, rc.P, rc.St)
 		if err != nil {
 			return err
 		}

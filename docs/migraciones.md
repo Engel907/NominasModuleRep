@@ -14,7 +14,7 @@ NNNNNN_descripcion_en_snake_case.down.sql
 - Seis dígitos, versión estrictamente creciente. Cada migración tiene **siempre** su `.up.sql` y su `.down.sql`.
 - Una migración = una unidad lógica (un cambio de esquema, con los datos que ese cambio necesita).
 - Idempotencia razonable en el `up` (`IF NOT EXISTS`), pero **nunca** `DROP TABLE` sobre tablas existentes ni `ON DUPLICATE KEY UPDATE` que pise valores (ver más abajo).
-- Migraciones existentes: `000000`–`000156`, con huecos. No se editan una vez aplicadas en un ambiente compartido: se corrige con una migración nueva (p. ej. `000149` corrige valores sembrados, cerrando y reponiendo el trigger de inmutabilidad en la misma migración).
+- Migraciones existentes: `000000`–`000159`, con huecos. No se editan una vez aplicadas en un ambiente compartido: se corrige con una migración nueva (p. ej. `000149` corrige valores sembrados, cerrando y reponiendo el trigger de inmutabilidad en la misma migración).
 
 ## Numeración
 
@@ -47,7 +47,12 @@ SELECT id, empleado_id, tipo_contrato, jornada FROM contratos
 ```
 
 `000154` agrega `contratos.modalidad_salario`; los contratos existentes quedan `mensual`.
-Su `down` se niega (CHECK) si hay contratos diarios o por hora.
+Su `down` se niega (CHECK) si hay contratos quincenales o semanales.
+
+`000157` crea los ajustes por empleado de horas extra y jornada; `000158`, los retroactivos
+(`retroactivos` y `planilla_detalle_concepto.retroactivo_periodo_origen_id`); `000159` siembra
+el tipo de planilla `semanal` con los conceptos del quincenal. El `down` de `000159` falla
+(FK) si ya hay períodos semanales.
 
 ## Requisitos de conexión
 

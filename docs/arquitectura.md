@@ -63,9 +63,10 @@ planillas-ccdr/
 - **Acceso a datos.** En `internal/db/dto`, escrito a mano. Hasta 3 argumentos: posicionales. Desde 4: un struct `XxxParams`. Sin tipos `Row` duplicados.
 - **Porcentajes.** En BD son porcentaje (10.83), salvo `parametros_salario_escolar` (fracción 0.0833). El dominio Go usa siempre **fracción** (0.1083). La conversión se hace al cargar (cargador de parámetros e hidratador). Nadie más multiplica ni divide por 100.
 - **Estados del período** (ENUM real): `borrador`, `calculada`, `aprobada`, `pagada`, `contabilizada`. Constantes en `internal/planilla/estados.go`. Dispersión: `aprobada` o `pagada`. Aguinaldo, salario escolar, liquidación, renta acumulada del mes y reportes suman períodos `aprobada`, `pagada` o `contabilizada`.
-- **Fuente única del salario.** `contratos.salario_pactado` del contrato vigente, en la unidad de `contratos.modalidad_salario` (`mensual`, `diario` o `por_hora`); `empleado_datos_laborales.salario_base_nominal` es una copia que mantiene un trigger.
+- **Fuente única del salario.** `contratos.salario_pactado` del contrato vigente, en la unidad de `contratos.modalidad_salario` (`mensual`, `quincenal` o `semanal`); `empleado_datos_laborales.salario_base_nominal` es una copia que mantiene un trigger.
 - **Contratos sin texto duplicado.** El tipo de contrato y la jornada se guardan solo como `tipo_contrato_id` y `jornada_id` (FK a sus catálogos); la API devuelve además sus códigos, leídos del catálogo.
-- **Regla general y regla de un empleado.** La fórmula de cada concepto (`concepto_salarial_formula`) y los parámetros generales (`parametros_generales`) rigen para todos; `empleado_concepto_formula` y `empleado_parametros_generales` los reemplazan solo para un empleado. Las cuatro tablas tienen vigencia y se cambian por propuesta con aprobación.
+- **Regla general y regla de un empleado.** La fórmula de cada concepto (`concepto_salarial_formula`) y los parámetros generales (`parametros_generales`) rigen para todos; los factores de hora extra (`parametros_horas_extra`) y los divisores de jornada (`parametros_jornada`) también; `empleado_concepto_formula`, `empleado_parametros_generales`, `empleado_parametros_horas_extra` y `empleado_parametros_jornada` los reemplazan solo para un empleado. Todas tienen vigencia y se cambian por propuesta con aprobación.
+- **Retroactivos.** Un período regular paga la diferencia de períodos ya aprobados recalculándolos con los datos de hoy (`retroactivos`); la diferencia va como líneas de sus conceptos ligadas al período de origen (`planilla_detalle_concepto.retroactivo_periodo_origen_id`), así que nunca se paga dos veces.
 - **Cargas sociales por concepto.** Cada concepto con fórmula `carga_social` toma su tasa de `parametros_cargas_sociales` (fila general o fila de su régimen CCSS). Se puede trabajar con un concepto obrero y uno patronal agregados (como se siembra) o desglosar componentes (SEM, IVM, Banco Popular, INA, riesgos del trabajo…); nunca las dos cosas a la vez, porque se contaría doble. `BANPOP_PAT` y `FCL_PAT` se siembran inactivos porque están dentro de `CCSS_PAT`.
 - **Auditoría.** Toda escritura pasa por `db.WithAuditContext(ctx, sqlDB, usuarioID int64, func(ctx context.Context, q *dto.Queries) error)`. Los servicios reciben `*sql.DB`, no una función inyectada.
 - **Cero hardcodeo legal.** Los valores legales y las reglas de negocio viven en BD con vigencia (cerrar la vigente e insertar la nueva). Si falta un parámetro, error explícito; nunca un valor por defecto silencioso. Una regla con más de una interpretación válida es un parámetro sin valor sembrado.
@@ -115,10 +116,10 @@ cuenta del neto por pagar (`SAL_BASE`) y el tipo de asiento del pago (`PAGO_PLAN
 
 | `tipo` | Qué calcula | Claves propias |
 |---|---|---|
-| `referencia_directa` | salario del período por segmentos de contrato: mensual por días comerciales, diario por días comerciales o por asistencia (`SALARIO_DIARIO_BASE`), por hora por horas registradas | |
-| `horas_extra`, `feriado_laborado` | recargos sobre la hora ordinaria (salario mensual ÷ horas del mes de la jornada, diario ÷ horas del día de la jornada, o la tarifa por hora) | |
-| `incapacidad` | parte patronal del subsidio por tramos | |
-| `aguinaldo`, `salario_escolar`, `vacaciones` | pagos diferidos y vacaciones | |
+| `referencia_directa` | salario del período por segmentos de contrato: mensual y quincenal por días comerciales, semanal por días naturales | |
+| `horas_extra`, `feriado_laborado` | recargos sobre la hora ordinaria (salario llevado al mes ÷ horas mensuales de la jornada) | |
+| `incapacidad` | parte patronal del subsidio por tramos, con el salario vigente o el promedio de los meses anteriores a la boleta (`INCAPACIDAD_SALARIO_BASE`) | |
+| `aguinaldo`, `salario_escolar`, `vacaciones` | pagos diferidos y vacaciones (día vigente, promedio de las semanas anteriores o el mayor: `VACACIONES_SALARIO_BASE`) | |
 | `carga_social` | cuota obrera o patronal sobre la base CCSS | `lado`: `obrero` o `patronal` |
 | `renta` | impuesto al salario del mes, menos créditos | |
 | `embargo`, `prestamo` | retenciones a terceros con límites legales | |

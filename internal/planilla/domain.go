@@ -36,26 +36,29 @@ type CalculoEmpleadoInput struct {
 	// aumentos a mitad de período parten el salario por días comerciales.
 	Segmentos []SegmentoSalario
 
-	// Asistencia del período. DiasTrabajados = días comerciales con contrato
-	// (Σ Segmentos.Dias); le descuenta la incapacidad.
+	// Asistencia del período. DiasTrabajados = días con contrato (Σ
+	// Segmentos.Dias, cada uno en su base); le descuenta la incapacidad.
 	DiasTrabajados decimal.Decimal
 	HorasExtra     []HoraExtraInput
 	// Horas ordinarias trabajadas en feriados del período.
 	FeriadosLaborados []FeriadoLaboradoInput
 	Incapacidades     []IncapacidadInput // ver incapacidad.go
-	// Días con asistencia y feriados de pago obligatorio del período: solo se
-	// cargan si algún segmento es diario o por hora (modalidad_salario.go).
-	Asistencia              []DiaAsistencia
-	FeriadosPagoObligatorio []time.Time
 
 	// Devengos adicionales que no se derivan de una fórmula automática
 	// (ej. bonos discrecionales, comisiones capturadas manualmente).
 	DevengosManuales []ConceptoDevengoManualInput
 
+	// Retroactivos: diferencias de períodos aprobados que paga este período
+	// (retroactivo.go); cada una se agrega como línea de su concepto.
+	Retroactivos []RetroactivoInput
+
 	// Vacaciones: compensaciones pendientes de pago y días de
 	// vacaciones aprobadas dentro del período (recortados al período).
 	VacacionesCompensacion []CompensacionVacacionesInput
 	VacacionesDisfrute     []RangoVacaciones
+	// PromedioVacaciones: base de vacaciones de las semanas anteriores al
+	// período; solo si VACACIONES_SALARIO_BASE es promedio | mayor.
+	PromedioVacaciones *PromedioSalario
 
 	// Bases acumuladas: solo en períodos de clase aguinaldo /
 	// salario_escolar; Σ base_aguinaldo de los períodos regulares aprobados
@@ -210,6 +213,10 @@ type ConceptoCalculadoOutput struct {
 	AfectaBaseEmbargo    bool // integra el líquido embargable
 
 	EsDeduccionObligatoria bool // no se topa por el neto
+
+	// Retroactivo: la línea paga la diferencia de un período ya aprobado
+	// (nil en las líneas propias del período).
+	Retroactivo *RetroactivoInput
 }
 
 // ResultadoPeriodoOutput agrega los resultados de todos los empleados de un

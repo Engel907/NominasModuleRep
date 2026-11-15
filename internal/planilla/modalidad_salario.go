@@ -8,188 +8,122 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Valores de contratos.modalidad_salario: unidad en que se pacta el salario.
+// Valores de contratos.modalidad_salario: período que remunera el monto de
+// salario_pactado.
 const (
-	ModalidadMensual = "mensual"  // monto del mes; se paga por días comerciales
-	ModalidadDiario  = "diario"   // monto por día
-	ModalidadPorHora = "por_hora" // monto por hora ordinaria
+	ModalidadMensual   = "mensual"   // monto del mes; se devenga por días comerciales
+	ModalidadQuincenal = "quincenal" // monto de la quincena (medio mes); por días comerciales
+	ModalidadSemanal   = "semanal"   // monto de la semana (7 días naturales); por días naturales
 )
 
-// ModalidadSalarioValida: mensual | diario | por_hora.
+// diasSemana: días naturales que remunera un salario semanal (incluido el
+// descanso semanal, como el salario mensual incluye los descansos del mes).
+const diasSemana = 7
+
+// ModalidadSalarioValida: mensual | quincenal | semanal.
 func ModalidadSalarioValida(m string) bool {
-	return m == ModalidadMensual || m == ModalidadDiario || m == ModalidadPorHora
+	return m == ModalidadMensual || m == ModalidadQuincenal || m == ModalidadSemanal
 }
 
-// ClaveSalarioDiarioBase: parametros_generales (texto). Qué días paga un
-// salario diario:
-//   - comerciales: los días comerciales con contrato del período (como el
-//     salario mensual, incluidos descansos y feriados);
-//   - asistencia: los días con asistencia registrada, más los feriados de
-//     pago obligatorio y las vacaciones del período que no se trabajaron.
-//
-// Se exige solo si hay un contrato diario en el período; no se siembra.
-const ClaveSalarioDiarioBase = "SALARIO_DIARIO_BASE"
-
-const (
-	SalarioDiarioComerciales = "comerciales"
-	SalarioDiarioAsistencia  = "asistencia"
-)
-
-// BaseSalarioDiarioValida: comerciales | asistencia.
-func BaseSalarioDiarioValida(b string) bool {
-	return b == SalarioDiarioComerciales || b == SalarioDiarioAsistencia
+// BaseDias: cómo se cuentan los días de un segmento. Los salarios mensual y
+// quincenal se devengan por días comerciales (cada mes vale Divisor días);
+// el semanal, por días naturales.
+type BaseDias struct {
+	Divisor   int
+	Naturales bool
 }
 
-// DiaAsistencia: día con asistencia registrada ('presente') y sus horas
-// ordinarias.
-type DiaAsistencia struct {
-	Fecha time.Time
-	Horas decimal.Decimal
-}
-
-// porAsistencia: el segmento se paga por lo registrado en asistencia (no por
-// días comerciales).
-func porAsistencia(s SegmentoSalario, p ParametrosCalculo) bool {
-	switch s.Modalidad {
-	case ModalidadPorHora:
-		return true
-	case ModalidadDiario:
-		return p.SalarioDiarioBase == SalarioDiarioAsistencia
+// Contar: días de [desde, hasta] (ambos inclusive) en esta base.
+func (b BaseDias) Contar(desde, hasta time.Time) int {
+	if b.Naturales {
+		desde, hasta = soloFecha(desde), soloFecha(hasta)
+		if hasta.Before(desde) {
+			return 0
+		}
+		return int(diasEntre(desde, hasta)) + 1
 	}
-	return false
+	return DiasComerciales(desde, hasta, b.Divisor)
 }
 
-// horasDiariasJornada: horas ordinarias de un día de la jornada
-// (parametros_jornada.horas_diarias_ordinarias).
-func horasDiariasJornada(jornadaID int64, p ParametrosCalculo) (decimal.Decimal, error) {
-	h, ok := p.HorasDiariasPorJornada[jornadaID]
-	if !ok || !h.IsPositive() {
-		return decimal.Zero, fmt.Errorf("la jornada id=%d no tiene horas_diarias_ordinarias vigentes en parametros_jornada", jornadaID)
-	}
-	return h, nil
+// baseDiasModalidad: base de días con que se devenga una modalidad.
+func baseDiasModalidad(modalidad string, divisor int) BaseDias {
+	return BaseDias{Divisor: divisor, Naturales: modalidad == ModalidadSemanal}
 }
 
-// ValorDia: lo que vale un día de salario del segmento. Mensual = salario ÷
-// DIVISOR_DIAS_MES; diario = salario; por hora = salario × horas diarias de la
-// jornada.
-func (s SegmentoSalario) ValorDia(p ParametrosCalculo) (decimal.Decimal, error) {
-	switch s.Modalidad {
+// Base: base de días del segmento.
+func (s SegmentoSalario) Base(divisor int) BaseDias { return baseDiasModalidad(s.Modalidad, divisor) }
+
+// EquivalenteMensual: el salario llevado al mes. Quincenal × 2; semanal ÷ 7 ×
+// DIVISOR_DIAS_MES (el día de un salario semanal vale lo mismo en la planilla y
+// en el mes equivalente).
+func EquivalenteMensual(salario decimal.Decimal, modalidad string, divisorDiasMes decimal.Decimal) (decimal.Decimal, error) {
+	switch modalidad {
 	case ModalidadMensual, "":
+		return salario, nil
+	case ModalidadQuincenal:
+		return salario.Mul(decimal.NewFromInt(2)), nil
+	case ModalidadSemanal:
+		if !divisorDiasMes.IsPositive() {
+			return decimal.Zero, errors.New("DIVISOR_DIAS_MES no definido para llevar el salario semanal al mes")
+		}
+		return salario.Mul(divisorDiasMes).DivRound(decimal.NewFromInt(diasSemana), 6), nil
+	}
+	return decimal.Zero, fmt.Errorf("modalidad de salario desconocida %q", modalidad)
+}
+
+// ValorDia: lo que vale un día de salario del segmento. Mensual y quincenal:
+// equivalente mensual ÷ DIVISOR_DIAS_MES (día comercial); semanal: salario ÷ 7
+// (día natural).
+func (s SegmentoSalario) ValorDia(p ParametrosCalculo) (decimal.Decimal, error) {
+	return valorDiaModalidad(s.Salario, s.Modalidad, s.ContratoID, p)
+}
+
+func valorDiaModalidad(salario decimal.Decimal, modalidad string, contratoID int64, p ParametrosCalculo) (decimal.Decimal, error) {
+	switch modalidad {
+	case ModalidadMensual, ModalidadQuincenal, "":
 		if !p.DivisorDiasMes.IsPositive() {
 			return decimal.Zero, errors.New("DIVISOR_DIAS_MES no definido para valorar el día")
 		}
-		return s.Salario.Div(p.DivisorDiasMes), nil
-	case ModalidadDiario:
-		return s.Salario, nil
-	case ModalidadPorHora:
-		h, err := horasDiariasJornada(s.JornadaID, p)
+		m, err := EquivalenteMensual(salario, modalidad, p.DivisorDiasMes)
 		if err != nil {
 			return decimal.Zero, err
 		}
-		return s.Salario.Mul(h), nil
+		return m.Div(p.DivisorDiasMes), nil
+	case ModalidadSemanal:
+		return salario.Div(decimal.NewFromInt(diasSemana)), nil
 	}
-	return decimal.Zero, fmt.Errorf("modalidad de salario desconocida %q (contrato %d)", s.Modalidad, s.ContratoID)
+	return decimal.Zero, fmt.Errorf("modalidad de salario desconocida %q (contrato %d)", modalidad, contratoID)
 }
 
-// valorHoraOrdinaria: salario y divisor con los que se valora la hora
-// ordinaria (monto = salario × horas ÷ divisor). Mensual: divisor de horas
-// mensuales de la jornada; diario: horas diarias de la jornada; por hora: 1.
+// montoSegmento: lo que devenga el segmento por sus días (sin redondear).
+func (s SegmentoSalario) montoSegmento(p ParametrosCalculo) (decimal.Decimal, error) {
+	switch s.Modalidad {
+	case ModalidadMensual, ModalidadQuincenal, "":
+		m, err := EquivalenteMensual(s.Salario, s.Modalidad, p.DivisorDiasMes)
+		if err != nil {
+			return decimal.Zero, err
+		}
+		return m.Mul(decimal.NewFromInt(int64(s.Dias))).DivRound(p.DivisorDiasMes, 6), nil
+	case ModalidadSemanal:
+		return s.Salario.Mul(decimal.NewFromInt(int64(s.Dias))).DivRound(decimal.NewFromInt(diasSemana), 6), nil
+	}
+	return decimal.Zero, fmt.Errorf("el contrato %d tiene una modalidad de salario desconocida %q", s.ContratoID, s.Modalidad)
+}
+
+// valorHoraOrdinaria: salario mensual equivalente y divisor de horas
+// mensuales de la jornada (parametros_jornada) con que se valora la hora
+// ordinaria (monto = salario × horas ÷ divisor).
 func valorHoraOrdinaria(c ContratoVigente, p ParametrosCalculo) (salario, divisor decimal.Decimal, err error) {
 	if c.JornadaID == nil {
 		return decimal.Zero, decimal.Zero, fmt.Errorf("el contrato %d no tiene jornada del catálogo", c.ContratoID)
 	}
-	switch c.ModalidadSalario {
-	case ModalidadMensual, "":
-		d, ok := p.DivisorPorJornada[*c.JornadaID]
-		if !ok {
-			return decimal.Zero, decimal.Zero, fmt.Errorf("la jornada %q (id %d) no tiene parametros_jornada vigente", c.Jornada, *c.JornadaID)
-		}
-		return c.SalarioPactado, d, nil
-	case ModalidadDiario:
-		h, err := horasDiariasJornada(*c.JornadaID, p)
-		if err != nil {
-			return decimal.Zero, decimal.Zero, err
-		}
-		return c.SalarioPactado, h, nil
-	case ModalidadPorHora:
-		return c.SalarioPactado, decimal.NewFromInt(1), nil
+	d, ok := p.DivisorPorJornada[*c.JornadaID]
+	if !ok {
+		return decimal.Zero, decimal.Zero, fmt.Errorf("la jornada %q (id %d) no tiene parametros_jornada vigente", c.Jornada, *c.JornadaID)
 	}
-	return decimal.Zero, decimal.Zero, fmt.Errorf("modalidad de salario desconocida %q (contrato %d)", c.ModalidadSalario, c.ContratoID)
-}
-
-// unidadesAsistencia: lo que se paga de un segmento por asistencia, en su
-// unidad (días o horas), y los días que representa. Cuenta lo registrado
-// dentro del segmento fuera de incapacidades; suma los feriados de pago
-// obligatorio no trabajados y, si PAGO_VACACIONES no paga el disfrute, los
-// días de vacaciones aprobadas (a horas diarias de la jornada si es por hora).
-func unidadesAsistencia(s SegmentoSalario, in CalculoEmpleadoInput, p ParametrosCalculo) (unidades decimal.Decimal, dias int, err error) {
-	dentro := func(f time.Time) bool { return !f.Before(s.Inicio) && !f.After(s.Fin) }
-	excluido := func(f time.Time) bool {
-		for _, inc := range in.Incapacidades {
-			if !f.Before(soloFecha(inc.Desde)) && !f.After(soloFecha(inc.Hasta)) {
-				return true
-			}
-		}
-		return false
+	m, err := EquivalenteMensual(c.SalarioPactado, c.ModalidadSalario, p.DivisorDiasMes)
+	if err != nil {
+		return decimal.Zero, decimal.Zero, fmt.Errorf("contrato %d: %w", c.ContratoID, err)
 	}
-	enVacaciones := func(f time.Time) bool {
-		for _, v := range in.VacacionesDisfrute {
-			if !f.Before(soloFecha(v.Desde)) && !f.After(soloFecha(v.Hasta)) {
-				return true
-			}
-		}
-		return false
-	}
-	var horasDia decimal.Decimal
-	if s.Modalidad == ModalidadPorHora {
-		if horasDia, err = horasDiariasJornada(s.JornadaID, p); err != nil {
-			return decimal.Zero, 0, err
-		}
-	}
-	unoDia := func() decimal.Decimal {
-		if s.Modalidad == ModalidadPorHora {
-			return horasDia
-		}
-		return decimal.NewFromInt(1)
-	}
-	trabajados := map[time.Time]bool{}
-	for _, a := range in.Asistencia {
-		f := soloFecha(a.Fecha)
-		if !dentro(f) || excluido(f) || !a.Horas.IsPositive() {
-			continue
-		}
-		trabajados[f] = true
-		dias++
-		if s.Modalidad == ModalidadPorHora {
-			unidades = unidades.Add(a.Horas)
-		} else {
-			unidades = unidades.Add(decimal.NewFromInt(1))
-		}
-	}
-	for _, f := range in.FeriadosPagoObligatorio {
-		f = soloFecha(f)
-		if !dentro(f) || excluido(f) || trabajados[f] || enVacaciones(f) {
-			continue
-		}
-		trabajados[f] = true
-		dias++
-		unidades = unidades.Add(unoDia())
-	}
-	if !pagaDisfrute(p.VacacionesModoPago) {
-		for _, v := range in.VacacionesDisfrute {
-			ini, fin, ok := interseccion(s.Inicio, s.Fin, v.Desde, v.Hasta)
-			if !ok {
-				continue
-			}
-			for f := ini; !f.After(fin); f = f.AddDate(0, 0, 1) {
-				if trabajados[f] || excluido(f) {
-					continue
-				}
-				trabajados[f] = true
-				dias++
-				unidades = unidades.Add(unoDia())
-			}
-		}
-	}
-	return unidades, dias, nil
+	return m, d, nil
 }

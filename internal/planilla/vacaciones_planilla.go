@@ -48,7 +48,7 @@ type RangoVacaciones struct {
 
 var errModoVacacionesNoConfigurado = fmt.Errorf("el empleado tiene vacaciones que pagar pero %s no está vigente (configúrelo: compensacion | disfrute | ambos)", ClaveVacacionesModoPago)
 
-// diasVacacionesEnSegmento: días comerciales del segmento dentro de las
+// diasVacacionesEnSegmento: días del segmento (en su base) dentro de las
 // vacaciones aprobadas. Todo el rango de la solicitud
 // (fecha_inicio..fecha_fin, incluidos los días no hábiles que contiene) se
 // paga como vacaciones en modo disfrute.
@@ -56,7 +56,7 @@ func diasVacacionesEnSegmento(s SegmentoSalario, rangos []RangoVacaciones, divis
 	n := 0
 	for _, r := range rangos {
 		if ini, fin, ok := interseccion(s.Inicio, s.Fin, r.Desde, r.Hasta); ok {
-			n += DiasComerciales(ini, fin, divisor)
+			n += s.Base(divisor).Contar(ini, fin)
 		}
 	}
 	return n
@@ -107,8 +107,10 @@ func segmentosSinVacaciones(netos []SegmentoSalario, in CalculoEmpleadoInput, p 
 }
 
 // calcularPagoVacaciones (regla vacaciones): monto y días de PAGO_VACACIONES y
-// los movimientos de compensación que quedan ligados al período.
-func calcularPagoVacaciones(in CalculoEmpleadoInput, p ParametrosCalculo) (monto, dias decimal.Decimal, movimientos []int64, err error) {
+// los movimientos de compensación que quedan ligados al período. El día se
+// valora según VACACIONES_SALARIO_BASE: salario vigente del contrato, promedio
+// de las semanas anteriores (Código de Trabajo, art. 157) o el mayor.
+func calcularPagoVacaciones(in CalculoEmpleadoInput, p ParametrosCalculo, st *estadoCalculo) (monto, dias decimal.Decimal, movimientos []int64, err error) {
 	if len(in.VacacionesCompensacion) == 0 && len(in.VacacionesDisfrute) == 0 {
 		return decimal.Zero, decimal.Zero, nil, nil
 	}
@@ -128,7 +130,11 @@ func calcularPagoVacaciones(in CalculoEmpleadoInput, p ParametrosCalculo) (monto
 		if !pagaCompensacion(modo) {
 			return decimal.Zero, decimal.Zero, nil, fmt.Errorf("hay compensaciones de vacaciones pendientes pero %s = %s", ClaveVacacionesModoPago, modo)
 		}
-		diario, err := in.Segmentos[len(in.Segmentos)-1].ValorDia(p)
+		vigente, err := in.Segmentos[len(in.Segmentos)-1].ValorDia(p)
+		if err != nil {
+			return decimal.Zero, decimal.Zero, nil, err
+		}
+		diario, err := valorDiaSegunBase(ClaveVacacionesSalarioBase, p.VacacionesSalarioBase, vigente, in.PromedioVacaciones, p, st)
 		if err != nil {
 			return decimal.Zero, decimal.Zero, nil, err
 		}
@@ -147,7 +153,11 @@ func calcularPagoVacaciones(in CalculoEmpleadoInput, p ParametrosCalculo) (monto
 			if n == 0 {
 				continue
 			}
-			diario, err := s.ValorDia(p)
+			vigente, err := s.ValorDia(p)
+			if err != nil {
+				return decimal.Zero, decimal.Zero, nil, err
+			}
+			diario, err := valorDiaSegunBase(ClaveVacacionesSalarioBase, p.VacacionesSalarioBase, vigente, in.PromedioVacaciones, p, st)
 			if err != nil {
 				return decimal.Zero, decimal.Zero, nil, err
 			}

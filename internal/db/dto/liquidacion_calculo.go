@@ -54,7 +54,9 @@ type BasePromedioRow struct {
 // pero además devuelve Σ tipos_planilla.fraccion_mensual y el número de
 // períodos (cada mes de historico_salarios_pre_migracion cuenta como un
 // período de un mes): el promedio mensual es Total / Meses (mensual y
-// quincenal por igual). columna ∈ base_cesantia, base_vacaciones, base_aguinaldo.
+// quincenal por igual). columna ∈ base_cesantia, base_vacaciones,
+// base_aguinaldo, base_ccss (en el histórico, base_ccss es el monto bruto del
+// mes).
 func (q *Queries) SumarBasePromedioEmpleado(ctx context.Context, empleadoID int64, desde, hasta time.Time, columna string) (BasePromedioRow, error) {
 	var r BasePromedioRow
 	err := q.db.QueryRowContext(ctx, `
@@ -63,6 +65,7 @@ SELECT COALESCE(SUM(t.base), 0), COALESCE(SUM(t.meses), 0), COUNT(*) FROM (
            WHEN 'base_aguinaldo'  THEN pde.base_aguinaldo
            WHEN 'base_vacaciones' THEN pde.base_vacaciones
            WHEN 'base_cesantia'   THEN pde.base_cesantia
+           WHEN 'base_ccss'       THEN pde.base_ccss
            ELSE 0 END AS base,
          tp.fraccion_mensual AS meses
   FROM planilla_detalle_empleado pde
@@ -78,6 +81,7 @@ SELECT COALESCE(SUM(t.base), 0), COALESCE(SUM(t.meses), 0), COUNT(*) FROM (
            WHEN 'base_aguinaldo'  THEN h.base_aguinaldo
            WHEN 'base_vacaciones' THEN h.base_vacaciones
            WHEN 'base_cesantia'   THEN h.base_cesantia
+           WHEN 'base_ccss'       THEN h.monto_bruto
            ELSE 0 END,
          1
   FROM historico_salarios_pre_migracion h

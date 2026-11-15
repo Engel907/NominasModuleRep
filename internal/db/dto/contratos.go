@@ -233,21 +233,3 @@ func (q *Queries) ExisteTipoContrato(ctx context.Context, id int64) (bool, error
 	err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tipos_contrato WHERE id = ?`, id).Scan(&n)
 	return n > 0, err
 }
-
-// ParametroJornadaVigente: divisor y horas diarias de la jornada a `fecha`.
-type ParametroJornadaVigente struct {
-	DivisorHorasMensuales  decimal.Decimal
-	HorasDiariasOrdinarias decimal.NullDecimal
-}
-
-// ObtenerParametroJornadaEnFecha: parametros_jornada vigente de la jornada;
-// sql.ErrNoRows si no hay.
-func (q *Queries) ObtenerParametroJornadaEnFecha(ctx context.Context, jornadaID int64, fecha time.Time) (ParametroJornadaVigente, error) {
-	var p ParametroJornadaVigente
-	err := q.db.QueryRowContext(ctx, `
-SELECT divisor_horas_mensuales, horas_diarias_ordinarias
-FROM parametros_jornada
-WHERE jornada_id = ? AND fecha_inicio_vigencia <= ? AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
-ORDER BY fecha_inicio_vigencia DESC LIMIT 1`, jornadaID, fecha, fecha).Scan(&p.DivisorHorasMensuales, &p.HorasDiariasOrdinarias)
-	return p, err
-}

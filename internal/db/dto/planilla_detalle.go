@@ -110,15 +110,22 @@ type DetalleConceptoInsert struct {
 	FormulaEmpleadoID  *int64           // empleado_concepto_formula_id (excluye FormulaID)
 	Cantidad           *decimal.Decimal // NULL = no aplica
 	Monto              decimal.Decimal
+	// Línea de retroactivo: período cuya diferencia paga, línea de ese período
+	// que corrige (si la tiene) y motivo. NULL en las líneas propias.
+	RetroactivoPeriodoOrigenID *int64
+	AjusteDeID                 *int64
+	MotivoAjuste               *string
 }
 
 func (q *Queries) InsertarDetallesConcepto(ctx context.Context, filas []DetalleConceptoInsert) error {
 	vals := make([][]any, 0, len(filas))
 	for _, f := range filas {
-		vals = append(vals, []any{f.DetalleEmpleadoID, f.ConceptoSalarialID, f.FormulaID, f.FormulaEmpleadoID, f.Cantidad, f.Monto})
+		vals = append(vals, []any{f.DetalleEmpleadoID, f.ConceptoSalarialID, f.FormulaID, f.FormulaEmpleadoID, f.Cantidad, f.Monto,
+			f.AjusteDeID, f.MotivoAjuste, f.RetroactivoPeriodoOrigenID})
 	}
 	return q.insertarLote(ctx, "planilla_detalle_concepto",
-		[]string{"planilla_detalle_empleado_id", "concepto_salarial_id", "concepto_salarial_formula_id", "empleado_concepto_formula_id", "cantidad", "monto"}, vals)
+		[]string{"planilla_detalle_empleado_id", "concepto_salarial_id", "concepto_salarial_formula_id", "empleado_concepto_formula_id", "cantidad", "monto",
+			"concepto_ajuste_de_id", "motivo_ajuste", "retroactivo_periodo_origen_id"}, vals)
 }
 
 type DetallePatronalInsert struct {

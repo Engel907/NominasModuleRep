@@ -15,6 +15,9 @@ type IncapacidadInput struct {
 	EntidadEmisoraID int64
 	Desde, Hasta     time.Time // ya recortadas al período
 	DiaSerieDesde    int32     // número de día de la boleta que corresponde a Desde
+	// Promedio: salario de los meses anteriores al inicio de la boleta; solo
+	// se carga si INCAPACIDAD_SALARIO_BASE es promedio | mayor.
+	Promedio *PromedioSalario
 }
 
 // TramoSubsidio: tramo vigente de la escala. Porcentajes en FRACCIÓN.
@@ -28,7 +31,7 @@ type TramoSubsidio struct {
 
 // SubsidioIncapacidad: resultado de una boleta (o un tramo de ella).
 type SubsidioIncapacidad struct {
-	Dias                    int // días comerciales
+	Dias                    int // días en la base del segmento (comerciales o naturales)
 	MontoPatronal           decimal.Decimal
 	MontoEntidadInformativo decimal.Decimal
 	Desglose                []LineaIncapacidad
@@ -39,9 +42,10 @@ func (t TramoSubsidio) cubre(dia int32) bool {
 }
 
 // CalcularSubsidioIncapacidad reparte los días de la boleta entre los tramos
-// de su entidad emisora. Un día sin tramo vigente es error.
-func CalcularSubsidioIncapacidad(salarioDiario decimal.Decimal, inc IncapacidadInput, tramos []TramoSubsidio, divisor int) (SubsidioIncapacidad, error) {
-	if divisor <= 0 {
+// de su entidad emisora. Cada día pesa lo que vale en `base` (comercial o
+// natural). Un día sin tramo vigente es error.
+func CalcularSubsidioIncapacidad(salarioDiario decimal.Decimal, inc IncapacidadInput, tramos []TramoSubsidio, base BaseDias) (SubsidioIncapacidad, error) {
+	if !base.Naturales && base.Divisor <= 0 {
 		return SubsidioIncapacidad{}, errors.New("planilla: divisor de días del mes no definido para la incapacidad")
 	}
 	if salarioDiario.IsNegative() {
@@ -93,7 +97,7 @@ func CalcularSubsidioIncapacidad(salarioDiario decimal.Decimal, inc IncapacidadI
 			return SubsidioIncapacidad{}, fmt.Errorf("planilla: no hay tramo de subsidio vigente para el día %d de la incapacidad_id=%d (entidad %d)",
 				serie, inc.IncapacidadID, inc.EntidadEmisoraID)
 		}
-		peso := DiasComerciales(dia, dia, divisor)
+		peso := base.Contar(dia, dia)
 		out.Dias += peso
 		if idx != tramoActual {
 			cerrar()
@@ -126,13 +130,13 @@ func validarIncapacidadesSinSolape(incs []IncapacidadInput) error {
 	return nil
 }
 
-// diasIncapacidadEnSegmento: días comerciales del segmento cubiertos por
+// diasIncapacidadEnSegmento: días del segmento (en su base) cubiertos por
 // incapacidad.
 func diasIncapacidadEnSegmento(s SegmentoSalario, incs []IncapacidadInput, divisor int) int {
 	n := 0
 	for _, inc := range incs {
 		if ini, fin, ok := interseccion(s.Inicio, s.Fin, inc.Desde, inc.Hasta); ok {
-			n += DiasComerciales(ini, fin, divisor)
+			n += s.Base(divisor).Contar(ini, fin)
 		}
 	}
 	return n

@@ -3,62 +3,47 @@ package planilla
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/shopspring/decimal"
 )
 
-func paramsModalidad(base string) ParametrosCalculo {
+func paramsModalidad() ParametrosCalculo {
 	return ParametrosCalculo{
 		DivisorDiasMes: d("30"), DiasPeriodoCompleto: d("30"), FraccionMensualPeriodo: d("1"),
-		DivisorPorJornada:      map[int64]decimal.Decimal{1: d("240")},
-		HorasDiariasPorJornada: map[int64]decimal.Decimal{1: d("8")},
-		SalarioDiarioBase:      base,
-		VacacionesModoPago:     VacacionesPagoCompensacion,
+		DivisorPorJornada:  map[int64]decimal.Decimal{1: d("240")},
+		VacacionesModoPago: VacacionesPagoCompensacion,
 	}
 }
 
-func segmentoMarzo(modalidad, salario string) SegmentoSalario {
-	return SegmentoSalario{ContratoID: 1, Inicio: fecha("2026-03-01"), Fin: fecha("2026-03-31"),
-		Salario: d(salario), Modalidad: modalidad, JornadaID: 1, Dias: 30}
-}
-
-func asistencia(horas string, fechas ...string) []DiaAsistencia {
-	out := make([]DiaAsistencia, 0, len(fechas))
-	for _, f := range fechas {
-		out = append(out, DiaAsistencia{Fecha: fecha(f), Horas: d(horas)})
+func segmentoUnico(t *testing.T, modalidad, salario, desde, hasta string) SegmentoSalario {
+	t.Helper()
+	segs, err := SegmentarPeriodo(fecha(desde), fecha(hasta), []VigenciaContrato{{ContratoID: 1,
+		Desde: fecha(desde), Salario: d(salario), Modalidad: modalidad, JornadaID: 1}}, 30)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("segmentar: %v (%d segmentos)", err, len(segs))
 	}
-	return out
+	return segs[0]
 }
 
 func TestSalarioBaseSegunModalidad(t *testing.T) {
-	trabajados := asistencia("8", "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06")
 	casos := []struct {
-		nombre    string
-		seg       SegmentoSalario
-		base      string
-		in        CalculoEmpleadoInput
-		wantMonto string
-		wantDias  int
+		nombre, modalidad, salario, desde, hasta string
+		wantMonto                                string
+		wantDias                                 int
 	}{
-		{"mensual: días comerciales", segmentoMarzo(ModalidadMensual, "900000"), "", CalculoEmpleadoInput{}, "900000.00", 30},
-		{"diario por días comerciales", segmentoMarzo(ModalidadDiario, "20000"), SalarioDiarioComerciales, CalculoEmpleadoInput{}, "600000.00", 30},
-		{"diario por asistencia", segmentoMarzo(ModalidadDiario, "20000"), SalarioDiarioAsistencia,
-			CalculoEmpleadoInput{Asistencia: trabajados}, "100000.00", 5},
-		{"diario por asistencia + feriado obligatorio no trabajado", segmentoMarzo(ModalidadDiario, "20000"), SalarioDiarioAsistencia,
-			CalculoEmpleadoInput{Asistencia: trabajados, FeriadosPagoObligatorio: []time.Time{fecha("2026-03-19"), fecha("2026-03-02")}}, "120000.00", 6},
-		{"por hora: horas registradas", segmentoMarzo(ModalidadPorHora, "2500"), "",
-			CalculoEmpleadoInput{Asistencia: append(trabajados, DiaAsistencia{Fecha: fecha("2026-03-07"), Horas: d("4.5")})}, "111250.00", 6},
-		{"por hora: feriado obligatorio a horas diarias de la jornada", segmentoMarzo(ModalidadPorHora, "2500"), "",
-			CalculoEmpleadoInput{FeriadosPagoObligatorio: []time.Time{fecha("2026-03-19")}}, "20000.00", 1},
-		{"por hora: el día incapacitado no se paga aunque tenga marca", segmentoMarzo(ModalidadPorHora, "2500"), "",
-			CalculoEmpleadoInput{Asistencia: trabajados, Incapacidades: []IncapacidadInput{{IncapacidadID: 9, Desde: fecha("2026-03-06"), Hasta: fecha("2026-03-06"), DiaSerieDesde: 1}}},
-			"80000.00", 4},
+		{"mensual: mes completo", ModalidadMensual, "900000", "2026-03-01", "2026-03-31", "900000.00", 30},
+		{"mensual en una semana de fin de febrero: días comerciales", ModalidadMensual, "900000", "2026-02-22", "2026-02-28", "270000.00", 9},
+		{"quincenal: primera quincena", ModalidadQuincenal, "450000", "2026-03-01", "2026-03-15", "450000.00", 15},
+		{"quincenal: segunda quincena de febrero", ModalidadQuincenal, "450000", "2026-02-16", "2026-02-28", "450000.00", 15},
+		{"quincenal: mes completo", ModalidadQuincenal, "450000", "2026-03-01", "2026-03-31", "900000.00", 30},
+		{"semanal: una semana", ModalidadSemanal, "70000", "2026-03-02", "2026-03-08", "70000.00", 7},
+		{"semanal: semana que cruza de mes", ModalidadSemanal, "70000", "2026-02-26", "2026-03-04", "70000.00", 7},
+		{"semanal: marzo completo por días naturales", ModalidadSemanal, "70000", "2026-03-01", "2026-03-31", "310000.00", 31},
 	}
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
-			p := paramsModalidad(c.base)
-			monto, dias, err := salarioBaseSegmentos([]SegmentoSalario{c.seg}, c.in, p)
+			seg := segmentoUnico(t, c.modalidad, c.salario, c.desde, c.hasta)
+			monto, dias, err := salarioBaseSegmentos([]SegmentoSalario{seg}, paramsModalidad())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -69,31 +54,37 @@ func TestSalarioBaseSegunModalidad(t *testing.T) {
 	}
 }
 
-func TestSalarioDiarioExigeBase(t *testing.T) {
-	_, _, err := salarioBaseSegmentos([]SegmentoSalario{segmentoMarzo(ModalidadDiario, "20000")}, CalculoEmpleadoInput{}, paramsModalidad(""))
-	if !errors.Is(err, ErrParametroFaltante) {
-		t.Fatalf("sin SALARIO_DIARIO_BASE se esperaba ErrParametroFaltante, fue %v", err)
+func TestModalidadDesconocidaEsError(t *testing.T) {
+	_, err := SegmentarPeriodo(fecha("2026-03-01"), fecha("2026-03-31"),
+		[]VigenciaContrato{{ContratoID: 1, Desde: fecha("2026-03-01"), Salario: d("1000"), Modalidad: "anual"}}, 30)
+	if err == nil {
+		t.Fatal("una modalidad fuera de mensual | quincenal | semanal debe dar error")
+	}
+	if ModalidadSalarioValida("diario") || ModalidadSalarioValida("por_hora") {
+		t.Error("diario y por_hora no son modalidades válidas")
 	}
 }
 
-func TestVacacionesPorAsistenciaSePaganEnSalario(t *testing.T) {
-	in := CalculoEmpleadoInput{Asistencia: asistencia("8", "2026-03-02"),
-		VacacionesDisfrute: []RangoVacaciones{{SolicitudID: 1, Desde: fecha("2026-03-09"), Hasta: fecha("2026-03-11")}}}
-	monto, dias, err := salarioBaseSegmentos([]SegmentoSalario{segmentoMarzo(ModalidadDiario, "20000")}, in, paramsModalidad(SalarioDiarioAsistencia))
-	if err != nil {
-		t.Fatal(err)
+func TestEquivalenteMensual(t *testing.T) {
+	for _, c := range []struct{ modalidad, salario, want string }{
+		{ModalidadMensual, "900000", "900000"}, {ModalidadQuincenal, "450000", "900000"}, {ModalidadSemanal, "70000", "300000"},
+	} {
+		m, err := EquivalenteMensual(d(c.salario), c.modalidad, d("30"))
+		if err != nil || !m.Equal(d(c.want)) {
+			t.Errorf("%s: equivalente %s (%v), esperado %s", c.modalidad, m, err, c.want)
+		}
 	}
-	if monto.StringFixed(2) != "80000.00" || dias != 4 {
-		t.Errorf("monto %s días %d; esperado 80000.00 y 4 (1 trabajado + 3 de vacaciones)", monto.StringFixed(2), dias)
+	if _, err := EquivalenteMensual(d("70000"), ModalidadSemanal, decimal.Zero); err == nil {
+		t.Error("semanal sin DIVISOR_DIAS_MES debe dar error")
 	}
 }
 
 func TestValorDiaYHora(t *testing.T) {
-	p := paramsModalidad(SalarioDiarioComerciales)
+	p := paramsModalidad()
 	for _, c := range []struct {
 		modalidad, salario, wantDia string
-	}{{ModalidadMensual, "900000", "30000"}, {ModalidadDiario, "20000", "20000"}, {ModalidadPorHora, "2500", "20000"}} {
-		v, err := segmentoMarzo(c.modalidad, c.salario).ValorDia(p)
+	}{{ModalidadMensual, "900000", "30000"}, {ModalidadQuincenal, "450000", "30000"}, {ModalidadSemanal, "70000", "10000"}} {
+		v, err := SegmentoSalario{ContratoID: 1, Salario: d(c.salario), Modalidad: c.modalidad}.ValorDia(p)
 		if err != nil || !v.Equal(d(c.wantDia)) {
 			t.Errorf("%s: valor día %s (%v), esperado %s", c.modalidad, v, err, c.wantDia)
 		}
@@ -102,7 +93,7 @@ func TestValorDiaYHora(t *testing.T) {
 	factores := map[int64]ParametroHoraExtra{1: {TipoHoraExtraID: 1, FactorRecargo: d("1.5")}}
 	for _, c := range []struct {
 		modalidad, salario, want string
-	}{{ModalidadMensual, "960000", "12000.00"}, {ModalidadDiario, "32000", "12000.00"}, {ModalidadPorHora, "4000", "12000.00"}} {
+	}{{ModalidadMensual, "960000", "12000.00"}, {ModalidadQuincenal, "480000", "12000.00"}, {ModalidadSemanal, "224000", "12000.00"}} {
 		sal, div, err := valorHoraOrdinaria(ContratoVigente{ContratoID: 1, SalarioPactado: d(c.salario), ModalidadSalario: c.modalidad, JornadaID: ip(1)}, p)
 		if err != nil {
 			t.Fatal(err)
@@ -112,10 +103,70 @@ func TestValorDiaYHora(t *testing.T) {
 			t.Errorf("%s: horas extra %s (%v), esperado %s", c.modalidad, monto, err, c.want)
 		}
 	}
-	sinHoras := p
-	sinHoras.HorasDiariasPorJornada = nil
-	if _, err := segmentoMarzo(ModalidadPorHora, "2500").ValorDia(sinHoras); err == nil {
-		t.Error("salario por hora sin horas diarias de la jornada debe dar error")
+}
+
+func TestBaseDias(t *testing.T) {
+	com, nat := BaseDias{Divisor: 30}, BaseDias{Divisor: 30, Naturales: true}
+	if n := com.Contar(fecha("2026-02-01"), fecha("2026-02-28")); n != 30 {
+		t.Errorf("febrero comercial = %d, esperado 30", n)
+	}
+	if n := nat.Contar(fecha("2026-02-01"), fecha("2026-02-28")); n != 28 {
+		t.Errorf("febrero natural = %d, esperado 28", n)
+	}
+	if n := nat.Contar(fecha("2026-03-05"), fecha("2026-03-04")); n != 0 {
+		t.Errorf("rango invertido = %d, esperado 0", n)
+	}
+}
+
+func TestValorDiaSegunBase(t *testing.T) {
+	p := paramsModalidad()
+	prom := &PromedioSalario{Total: d("2700000"), Meses: d("3"), Periodos: 3} // 900000/mes -> 30000/día
+	vacio := &PromedioSalario{}
+	casos := []struct {
+		nombre, base, vigente string
+		prom                  *PromedioSalario
+		want                  string
+		advierte              bool
+	}{
+		{"vigente", SalarioBaseVigente, "25000", prom, "25000", false},
+		{"promedio", SalarioBasePromedio, "25000", prom, "30000", false},
+		{"mayor: gana el promedio", SalarioBaseMayor, "25000", prom, "30000", false},
+		{"mayor: gana el vigente", SalarioBaseMayor, "35000", prom, "35000", false},
+		{"promedio sin planillas: vigente con advertencia", SalarioBasePromedio, "25000", vacio, "25000", true},
+	}
+	for _, c := range casos {
+		t.Run(c.nombre, func(t *testing.T) {
+			st := &estadoCalculo{res: &ResultadoEmpleadoOutput{}}
+			v, err := valorDiaSegunBase(ClaveVacacionesSalarioBase, c.base, d(c.vigente), c.prom, p, st)
+			if err != nil || !v.Equal(d(c.want)) {
+				t.Fatalf("valor %s (%v), esperado %s", v, err, c.want)
+			}
+			if (len(st.res.Advertencias) > 0) != c.advierte {
+				t.Errorf("advertencias %v", st.res.Advertencias)
+			}
+		})
+	}
+	st := &estadoCalculo{res: &ResultadoEmpleadoOutput{}}
+	if _, err := valorDiaSegunBase(ClaveVacacionesSalarioBase, "", d("1"), nil, p, st); !errors.Is(err, ErrParametroFaltante) {
+		t.Errorf("sin base configurada se esperaba ErrParametroFaltante, fue %v", err)
+	}
+}
+
+func TestCompensacionVacacionesConPromedio(t *testing.T) {
+	p := paramsModalidad()
+	p.VacacionesSalarioBase = SalarioBasePromedio
+	in := CalculoEmpleadoInput{
+		Segmentos:              []SegmentoSalario{segmentoUnico(t, ModalidadMensual, "750000", "2026-03-01", "2026-03-31")},
+		VacacionesCompensacion: []CompensacionVacacionesInput{{MovimientoID: 7, Dias: d("2")}},
+		PromedioVacaciones:     &PromedioSalario{Total: d("10800000"), Meses: d("12"), Periodos: 12},
+	}
+	st := &estadoCalculo{res: &ResultadoEmpleadoOutput{}}
+	monto, dias, movs, err := calcularPagoVacaciones(in, p, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if monto.StringFixed(2) != "60000.00" || !dias.Equal(d("2")) || len(movs) != 1 {
+		t.Errorf("monto %s días %s movs %v; esperado 60000.00 (2 días a 30000 de promedio)", monto.StringFixed(2), dias, movs)
 	}
 }
 

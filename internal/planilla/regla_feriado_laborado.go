@@ -22,10 +22,9 @@ type FeriadoLaboradoInput struct {
 }
 
 // reglaFeriadoLaborado (feriado_laborado, CT arts. 148-149): el salario ya
-// remunera el feriado (el mensual y el diario por días comerciales lo
-// incluyen; los pagados por asistencia lo cuentan como día trabajado o, si es
-// de pago obligatorio y no se trabajó, como día pagado); trabajarlo suma
-// factor × horas ordinarias a la hora ordinaria del contrato.
+// remunera el feriado (el mensual y el quincenal por días comerciales y el
+// semanal por días naturales lo incluyen); trabajarlo suma factor × horas
+// ordinarias a la hora ordinaria del contrato.
 type reglaFeriadoLaborado struct{}
 
 func (reglaFeriadoLaborado) Aplicar(rc *ContextoRegla) error {

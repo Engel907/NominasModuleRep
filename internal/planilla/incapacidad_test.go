@@ -34,7 +34,7 @@ func TestCalcularSubsidioIncapacidadGolden(t *testing.T) {
 	}
 	for _, c := range casos {
 		inc := IncapacidadInput{IncapacidadID: 9, EntidadEmisoraID: 1, Desde: fecha(c.desde), Hasta: fecha(c.hasta), DiaSerieDesde: c.serie}
-		s, err := CalcularSubsidioIncapacidad(diario, inc, tramosCCSS(), 30)
+		s, err := CalcularSubsidioIncapacidad(diario, inc, tramosCCSS(), BaseDias{Divisor: 30})
 		if err != nil {
 			t.Fatalf("%s: %v", c.nombre, err)
 		}
@@ -52,12 +52,12 @@ func TestCalcularSubsidioIncapacidadSinTramo(t *testing.T) {
 	tres := int32(3)
 	soloTres := []TramoSubsidio{{EntidadEmisoraID: 1, DiaDesde: 1, DiaHasta: &tres, PctPatronal: d("0.5")}}
 	inc := IncapacidadInput{IncapacidadID: 9, EntidadEmisoraID: 1, Desde: fecha("2026-03-10"), Hasta: fecha("2026-03-14"), DiaSerieDesde: 1}
-	if _, err := CalcularSubsidioIncapacidad(d("30000"), inc, soloTres, 30); err == nil {
+	if _, err := CalcularSubsidioIncapacidad(d("30000"), inc, soloTres, BaseDias{Divisor: 30}); err == nil {
 		t.Fatal("el día 4 sin tramo vigente debe dar error")
 	}
 	otraEntidad := inc
 	otraEntidad.EntidadEmisoraID = 2
-	if _, err := CalcularSubsidioIncapacidad(d("30000"), otraEntidad, tramosCCSS(), 30); err == nil {
+	if _, err := CalcularSubsidioIncapacidad(d("30000"), otraEntidad, tramosCCSS(), BaseDias{Divisor: 30}); err == nil {
 		t.Fatal("entidad sin tramos debe dar error")
 	}
 }

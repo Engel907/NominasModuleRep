@@ -31,10 +31,10 @@ type CrearContratoRequest struct {
 	PuestoID         int64 `json:"puesto_id" binding:"required,gt=0"`
 	RegimenLaboralID int64 `json:"regimen_laboral_id" binding:"required,gt=0"`
 	TipoContratoID   int64 `json:"tipo_contrato_id" binding:"required,gt=0"` // catálogo tipos_contrato
-	// SalarioPactado va en la unidad de ModalidadSalario (mes, día u hora
-	// ordinaria); validado en el servicio (> 0).
+	// SalarioPactado es el monto del período que indica ModalidadSalario
+	// (mes, quincena o semana); validado en el servicio (> 0).
 	SalarioPactado      decimal.Decimal `json:"salario_pactado"`
-	ModalidadSalario    string          `json:"modalidad_salario" binding:"required"`     // mensual | diario | por_hora
+	ModalidadSalario    string          `json:"modalidad_salario" binding:"required"`     // mensual | quincenal | semanal
 	JornadaID           int64           `json:"jornada_id" binding:"required,gt=0"`       // catálogo jornadas
 	FechaInicioContrato string          `json:"fecha_inicio_contrato" binding:"required"` // YYYY-MM-DD
 	FechaFinContrato    *string         `json:"fecha_fin_contrato"`                       // opcional (plazo fijo)
@@ -103,13 +103,12 @@ func NewContratoService(sqlDB *sql.DB) ContratoService {
 
 // ValidarSalarioMinimo valida `salario` (en la unidad de `modalidad`) contra
 // el salario mínimo VIGENTE (parametros_salario_minimo.es_vigente = 1) de la
-// clasificación del puesto. El mínimo es mensual: un salario diario se lleva
-// al mes con DIVISOR_DIAS_MES y uno por hora con el divisor de horas
-// mensuales de la jornada (parametros_jornada), los mismos con los que la
-// planilla valora el día y la hora. Debe llamarse con el *dto.Queries de la
-// Tx en curso.
+// clasificación del puesto. El mínimo es mensual: un salario quincenal se
+// lleva al mes × 2 y uno semanal ÷ 7 × DIVISOR_DIAS_MES, igual que en la
+// planilla (planilla.EquivalenteMensual). Debe llamarse con el *dto.Queries de
+// la Tx en curso.
 func ValidarSalarioMinimo(ctx context.Context, q *dto.Queries, empleadoID, puestoID int64, salario decimal.Decimal,
-	modalidad string, jornadaID int64, fecha time.Time) error {
+	modalidad string, fecha time.Time) error {
 	puesto, err := q.GetPuestoByID(ctx, puestoID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrPuestoNoEncontrado
@@ -133,7 +132,7 @@ func ValidarSalarioMinimo(ctx context.Context, q *dto.Queries, empleadoID, puest
 		return fmt.Errorf("consultar salario mínimo vigente: %w", err)
 	}
 
-	mensual, err := equivalenteMensual(ctx, q, empleadoID, salario, modalidad, jornadaID, fecha)
+	mensual, err := equivalenteMensual(ctx, q, empleadoID, salario, modalidad, fecha)
 	if err != nil {
 		return err
 	}
@@ -144,36 +143,27 @@ func ValidarSalarioMinimo(ctx context.Context, q *dto.Queries, empleadoID, puest
 	return nil
 }
 
-// equivalenteMensual: el salario pactado llevado al mes.
+// equivalenteMensual: el salario pactado llevado al mes. DIVISOR_DIAS_MES
+// (el que rige para el empleado) solo se lee para un salario semanal.
 func equivalenteMensual(ctx context.Context, q *dto.Queries, empleadoID int64, salario decimal.Decimal,
-	modalidad string, jornadaID int64, fecha time.Time) (decimal.Decimal, error) {
-	switch modalidad {
-	case planilla.ModalidadMensual:
-		return salario, nil
-	case planilla.ModalidadDiario:
+	modalidad string, fecha time.Time) (decimal.Decimal, error) {
+	if !planilla.ModalidadSalarioValida(modalidad) {
+		return decimal.Zero, validacion("modalidad_salario", "debe ser mensual, quincenal o semanal")
+	}
+	div := decimal.Zero
+	if modalidad == planilla.ModalidadSemanal {
 		v, err := q.ValorParametroGeneralEmpleado(ctx, empleadoID, parametros.ClaveDivisorDiasMes, fecha)
 		if errors.Is(err, sql.ErrNoRows) {
-			return decimal.Zero, validacion("modalidad_salario", parametros.ClaveDivisorDiasMes+" no está vigente; no se puede llevar el salario diario al mes")
+			return decimal.Zero, validacion("modalidad_salario", parametros.ClaveDivisorDiasMes+" no está vigente; no se puede llevar el salario semanal al mes")
 		}
 		if err != nil {
 			return decimal.Zero, fmt.Errorf("leer %s: %w", parametros.ClaveDivisorDiasMes, err)
 		}
-		div, err := decimal.NewFromString(v)
-		if err != nil || !div.IsPositive() {
+		if div, err = decimal.NewFromString(v); err != nil || !div.IsPositive() {
 			return decimal.Zero, fmt.Errorf("%s inválido (%q)", parametros.ClaveDivisorDiasMes, v)
 		}
-		return salario.Mul(div), nil
-	case planilla.ModalidadPorHora:
-		pj, err := q.ObtenerParametroJornadaEnFecha(ctx, jornadaID, fecha)
-		if errors.Is(err, sql.ErrNoRows) {
-			return decimal.Zero, validacion("jornada_id", "la jornada no tiene parametros_jornada vigente; no se puede llevar el salario por hora al mes")
-		}
-		if err != nil {
-			return decimal.Zero, fmt.Errorf("leer parametros_jornada: %w", err)
-		}
-		return salario.Mul(pj.DivisorHorasMensuales), nil
 	}
-	return decimal.Zero, validacion("modalidad_salario", "debe ser mensual, diario o por_hora")
+	return planilla.EquivalenteMensual(salario, modalidad, div)
 }
 
 // parseFechasContrato parsea y valida las fechas comunes de crear/actualizar.
@@ -204,7 +194,7 @@ func parseFechasContrato(inicioContrato string, finContrato *string, efectiva st
 
 func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, req CrearContratoRequest) (*ContratoResponse, error) {
 	if !planilla.ModalidadSalarioValida(req.ModalidadSalario) {
-		return nil, validacion("modalidad_salario", "debe ser mensual, diario o por_hora")
+		return nil, validacion("modalidad_salario", "debe ser mensual, quincenal o semanal")
 	}
 	fechaInicioContrato, fechaEfectiva, fechaFinContrato, err := parseFechasContrato(req.FechaInicioContrato, req.FechaFinContrato, req.FechaEfectiva)
 	if err != nil {
@@ -224,7 +214,7 @@ func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, re
 		if err := validarCatalogosContrato(ctx, q, req.TipoContratoID, req.JornadaID); err != nil {
 			return err
 		}
-		if err := ValidarSalarioMinimo(ctx, q, req.EmpleadoID, req.PuestoID, req.SalarioPactado, req.ModalidadSalario, req.JornadaID, fechaEfectiva); err != nil {
+		if err := ValidarSalarioMinimo(ctx, q, req.EmpleadoID, req.PuestoID, req.SalarioPactado, req.ModalidadSalario, fechaEfectiva); err != nil {
 			return err
 		}
 
@@ -256,7 +246,7 @@ func (s *contratoService) CrearContrato(ctx context.Context, usuarioID int64, re
 
 func (s *contratoService) ActualizarContrato(ctx context.Context, usuarioID, empleadoID int64, req ActualizarContratoRequest) (*ContratoResponse, error) {
 	if !planilla.ModalidadSalarioValida(req.ModalidadSalario) {
-		return nil, validacion("modalidad_salario", "debe ser mensual, diario o por_hora")
+		return nil, validacion("modalidad_salario", "debe ser mensual, quincenal o semanal")
 	}
 	fechaInicioContrato, fechaEfectiva, fechaFinContrato, err := parseFechasContrato(req.FechaInicioContrato, req.FechaFinContrato, req.FechaEfectiva)
 	if err != nil {
@@ -276,7 +266,7 @@ func (s *contratoService) ActualizarContrato(ctx context.Context, usuarioID, emp
 		if err := validarCatalogosContrato(ctx, q, req.TipoContratoID, req.JornadaID); err != nil {
 			return err
 		}
-		if err := ValidarSalarioMinimo(ctx, q, empleadoID, req.PuestoID, req.SalarioPactado, req.ModalidadSalario, req.JornadaID, fechaEfectiva); err != nil {
+		if err := ValidarSalarioMinimo(ctx, q, empleadoID, req.PuestoID, req.SalarioPactado, req.ModalidadSalario, fechaEfectiva); err != nil {
 			return err
 		}
 

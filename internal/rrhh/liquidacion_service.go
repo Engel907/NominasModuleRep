@@ -20,7 +20,7 @@ import (
 const (
 	ClaveLiqFraccionMesesUmbral          = "LIQ_FRACCION_MESES_UMBRAL"
 	ClaveLiqPromedioMeses                = "LIQ_PROMEDIO_MESES"
-	ClaveVentanaPromedioVacacionesSemana = "VENTANA_PROMEDIO_VACACIONES_SEMANAS"
+	ClaveVentanaPromedioVacacionesSemana = planilla.ClaveVentanaPromedioVacacionesSemanas
 )
 
 // Errores de la liquidación (el handler los traduce a 422).

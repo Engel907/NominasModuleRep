@@ -169,6 +169,7 @@ func (o *Orquestador) calcular(ctx context.Context, q *dto.Queries, periodo dto.
 		DiasPeriodoCompleto: params.DiasPeriodoCompleto, DivisorDiasMes: divisor,
 		LiqPrestamosModo: params.LiqPrestamosModo,
 	}
+	pc.conBasesSalario(*params)
 	ids, err := o.h.EmpleadosDelPeriodo(ctx, pc)
 	if err != nil {
 		return err
@@ -177,12 +178,21 @@ func (o *Orquestador) calcular(ctx context.Context, q *dto.Queries, periodo dto.
 		return ErrPeriodoSinEmpleados
 	}
 
+	var retros map[int64]dto.RetroactivoRow
+	if clase == ClaseRegular {
+		if retros, err = retroactivosDelPeriodo(ctx, q, periodo.ID); err != nil {
+			return err
+		}
+	}
+
 	var (
 		resultados []ResultadoPersistible
 		errores    []EmpleadoErrorOutput
 		ajustes    = map[int64]map[string]string{}
+		calculados = make(map[int64]bool, len(ids))
 	)
 	for _, id := range ids {
+		calculados[id] = true
 		pcE, pE, aj, err := o.parametrosDelEmpleado(ctx, clase, periodo, pc, *params, id)
 		if err != nil {
 			if esErrorInfraestructura(err) {
@@ -194,7 +204,18 @@ func (o *Orquestador) calcular(ctx context.Context, q *dto.Queries, periodo dto.
 		if aj != nil {
 			ajustes[id] = aj
 		}
-		r, codigo, err := o.calcularEmpleado(ctx, pcE, pE, id)
+		var difs []RetroactivoInput
+		var advRetro []string
+		if sol, ok := retros[id]; ok {
+			if difs, advRetro, err = o.retroactivosEmpleado(ctx, q, periodo, sol); err != nil {
+				if esErrorInfraestructura(err) {
+					return err
+				}
+				errores = append(errores, EmpleadoErrorOutput{EmpleadoID: id, Codigo: "retroactivo_invalido", Mensaje: err.Error()})
+				continue
+			}
+		}
+		r, codigo, err := o.calcularEmpleado(ctx, pcE, pE, id, difs)
 		if err != nil {
 			if esErrorInfraestructura(err) {
 				return err
@@ -202,6 +223,7 @@ func (o *Orquestador) calcular(ctx context.Context, q *dto.Queries, periodo dto.
 			errores = append(errores, EmpleadoErrorOutput{EmpleadoID: id, Codigo: codigo, Mensaje: err.Error()})
 			continue
 		}
+		r.Detalle.Advertencias = append(r.Detalle.Advertencias, advRetro...)
 		if acumulado {
 			if !r.Detalle.TotalIngresos.IsPositive() {
 				continue
@@ -209,6 +231,12 @@ func (o *Orquestador) calcular(ctx context.Context, q *dto.Queries, periodo dto.
 			r.Acumulado = acumuladoDe(clase, anio, periodo, r, pE)
 		}
 		resultados = append(resultados, r)
+	}
+	for id := range retros {
+		if !calculados[id] {
+			errores = append(errores, EmpleadoErrorOutput{EmpleadoID: id, Codigo: "retroactivo_sin_contrato",
+				Mensaje: fmt.Sprintf("el empleado %d tiene un retroactivo pero no tiene contrato en el período", id)})
+		}
 	}
 	if len(errores) > 0 {
 		return &ErrCalculoConErrores{Errores: errores}
@@ -240,24 +268,47 @@ func (o *Orquestador) calcular(ctx context.Context, q *dto.Queries, periodo dto.
 
 // parametrosDelEmpleado: período y parámetros con que se calcula el empleado.
 // Si tiene parámetros generales propios vigentes a la fecha fin, se vuelven a
-// resolver con ellos (y con ellos el divisor y los días del período); si no,
-// los del período. aj = los valores propios aplicados (nil si no tiene).
+// resolver con ellos (y con ellos el divisor y los días del período); los
+// factores de hora extra y divisores de jornada propios reemplazan a los
+// generales. aj = los valores propios aplicados (nil si no tiene).
 func (o *Orquestador) parametrosDelEmpleado(ctx context.Context, clase ClaseTipoPlanilla, periodo dto.PeriodoCicloRow,
 	pc PeriodoParaCalculo, p ParametrosCalculo, empleadoID int64) (PeriodoParaCalculo, ParametrosCalculo, map[string]string, error) {
 	aj, err := o.c.AjustesEmpleado(ctx, empleadoID, periodo.FechaFin)
-	if err != nil || aj == nil {
+	if err != nil {
 		return pc, p, nil, err
 	}
-	pe, err := o.c.ParametrosEmpleado(ctx, empleadoID, clase, periodo.FechaFin, p)
-	if err != nil {
-		return pc, p, nil, fmt.Errorf("planilla: empleado_id=%d, parámetros propios: %w", empleadoID, err)
+	pe := p
+	if aj != nil {
+		if pe, err = o.c.ParametrosEmpleado(ctx, empleadoID, clase, periodo.FechaFin, p); err != nil {
+			return pc, p, nil, fmt.Errorf("planilla: empleado_id=%d, parámetros propios: %w", empleadoID, err)
+		}
+		div, err := divisorEntero(pe.DivisorDiasMes)
+		if err != nil {
+			return pc, p, nil, fmt.Errorf("planilla: empleado_id=%d, parámetros propios: %w", empleadoID, err)
+		}
+		pc.DivisorDiasMes, pc.DiasPeriodoCompleto, pc.LiqPrestamosModo = div, pe.DiasPeriodoCompleto, pe.LiqPrestamosModo
+		pc.conBasesSalario(pe)
 	}
-	div, err := divisorEntero(pe.DivisorDiasMes)
+	tablas, err := o.c.AjustesTablasEmpleado(ctx, empleadoID, periodo.FechaFin, &pe)
 	if err != nil {
-		return pc, p, nil, fmt.Errorf("planilla: empleado_id=%d, parámetros propios: %w", empleadoID, err)
+		return pc, p, nil, err
 	}
-	pc.DivisorDiasMes, pc.DiasPeriodoCompleto, pc.LiqPrestamosModo = div, pe.DiasPeriodoCompleto, pe.LiqPrestamosModo
+	if len(tablas) > 0 {
+		if aj == nil {
+			aj = make(map[string]string, len(tablas))
+		}
+		for k, v := range tablas {
+			aj[k] = v
+		}
+	}
 	return pc, pe, aj, nil
+}
+
+// conBasesSalario copia al período las bases y ventanas del salario de
+// vacaciones e incapacidad que rigen para el cálculo.
+func (pc *PeriodoParaCalculo) conBasesSalario(p ParametrosCalculo) {
+	pc.VacacionesSalarioBase, pc.VacacionesPromedioSemanas = p.VacacionesSalarioBase, p.VacacionesPromedioSemanas
+	pc.IncapacidadSalarioBase, pc.IncapacidadPromedioMeses = p.IncapacidadSalarioBase, p.IncapacidadPromedioMeses
 }
 
 // ventanaDelPeriodo: el año del acumulado es el de fecha_fin y el período debe
@@ -291,7 +342,7 @@ func acumuladoDe(clase ClaseTipoPlanilla, anio int32, periodo dto.PeriodoCicloRo
 
 // calcularEmpleado hidrata, calcula y valida el cuadre de un empleado.
 // Devuelve el código estable del error para EmpleadoErrorOutput.
-func (o *Orquestador) calcularEmpleado(ctx context.Context, pc PeriodoParaCalculo, p ParametrosCalculo, empleadoID int64) (ResultadoPersistible, string, error) {
+func (o *Orquestador) calcularEmpleado(ctx context.Context, pc PeriodoParaCalculo, p ParametrosCalculo, empleadoID int64, retros []RetroactivoInput) (ResultadoPersistible, string, error) {
 	ent, err := o.h.Hidratar(ctx, pc, empleadoID)
 	if err != nil {
 		var sinContrato ErrEmpleadoSinContrato
@@ -307,6 +358,7 @@ func (o *Orquestador) calcularEmpleado(ctx context.Context, pc PeriodoParaCalcul
 		}
 		return ResultadoPersistible{}, "datos_incompletos", err
 	}
+	ent.Input.Retroactivos = retros
 	det, err := o.m.CalcularEmpleado(ctx, ent.Input, p)
 	if err != nil {
 		return ResultadoPersistible{}, "calculo_invalido", err

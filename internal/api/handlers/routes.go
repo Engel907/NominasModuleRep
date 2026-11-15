@@ -32,7 +32,9 @@ type Deps struct {
 	PlanillaExport   *planilla.ExportService
 	PlanillaPeriodo  *planilla.PeriodoService
 	PlanillaDevengos *planilla.DevengosService
-	Contabilidad     *ContabilidadDeps
+	// PlanillaRetroactivos: retroactivos que paga un período regular.
+	PlanillaRetroactivos *planilla.RetroactivosService
+	Contabilidad         *ContabilidadDeps
 
 	// Acumulados: POST /aguinaldo/:anio/ejecutar y /salario-escolar/:anio/ejecutar.
 	Acumulados *planilla.EjecutorAcumulados
@@ -129,6 +131,9 @@ func RegisterRoutes(rg *gin.RouterGroup, sqlDB *sql.DB, tokenMaker credenciales.
 		NewPlanillaPeriodoHandler(deps.PlanillaPeriodo).RegisterRoutes(planillas)
 		if deps.PlanillaDevengos != nil {
 			NewPlanillaDevengosHandler(deps.PlanillaDevengos).RegisterRoutes(planillas)
+		}
+		if deps.PlanillaRetroactivos != nil {
+			NewPlanillaRetroactivosHandler(deps.PlanillaRetroactivos).RegisterRoutes(planillas)
 		}
 	}
 

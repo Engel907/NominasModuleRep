@@ -188,6 +188,18 @@ func RegistroEspecs(v Validadores) map[string]EspecTabla {
 		{Nombre: "empleado_parametros_generales", ColumnasClave: []Columna{id("empleado_id"), txt("clave", 80)},
 			ColumnasValor: []Columna{txt("valor", 255), txt("tipo", 20)},
 			PermiteBaja:   true, FuenteLegal: true, CreadoPor: true, Validar: validarGeneral},
+		// Factor de hora extra propio de un empleado: prevalece sobre
+		// parametros_horas_extra; la baja lo devuelve al general.
+		{Nombre: "empleado_parametros_horas_extra", ColumnasClave: []Columna{id("empleado_id"), id("tipo_hora_extra_id")},
+			ColumnasValor: []Columna{dec("factor_recargo")},
+			PermiteBaja:   true, FuenteLegal: true, CreadoPor: true,
+			Validar: cadaFila(func(f Fila) error { return minimo(f, "factor_recargo", 1, false) })},
+		// Divisor de la hora ordinaria propio de un empleado para una jornada:
+		// prevalece sobre parametros_jornada; la baja lo devuelve al general.
+		{Nombre: "empleado_parametros_jornada", ColumnasClave: []Columna{id("empleado_id"), id("jornada_id")},
+			ColumnasValor: []Columna{dec("divisor_horas_mensuales")},
+			PermiteBaja:   true, FuenteLegal: true, CreadoPor: true,
+			Validar: cadaFila(func(f Fila) error { return minimo(f, "divisor_horas_mensuales", 0, false) })},
 		{Nombre: "orden_calculo_concepto", ColumnasClave: []Columna{id("concepto_salarial_id")},
 			ColumnasValor: []Columna{{Nombre: "orden", Tipo: ColEntero}}, PermiteBaja: true,
 			Validar: cadaFila(func(f Fila) error { return minimo(f, "orden", 0, false) })},

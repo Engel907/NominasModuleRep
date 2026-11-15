@@ -56,14 +56,14 @@ type VigenciaContrato struct {
 }
 
 // SegmentoSalario: parte del período con un mismo contrato y salario.
-// Salario va en la unidad de Modalidad (mes, día u hora).
+// Salario va en la unidad de Modalidad (mes, quincena o semana).
 type SegmentoSalario struct {
 	Inicio, Fin time.Time
 	Salario     decimal.Decimal
 	Modalidad   string
 	JornadaID   int64
 	ContratoID  int64
-	Dias        int // días comerciales
+	Dias        int // días en la base de la modalidad (comerciales o naturales)
 }
 
 // SegmentarPeriodo recorta las vigencias a [desde, hasta] y las ordena. Los
@@ -106,26 +106,37 @@ func SegmentarPeriodo(desde, hasta time.Time, v []VigenciaContrato, divisor int)
 	}
 	out := segs[:0]
 	for _, x := range segs {
-		x.Dias = DiasComerciales(x.Inicio, x.Fin, divisor)
+		if x.Modalidad == "" {
+			x.Modalidad = ModalidadMensual
+		}
+		if !ModalidadSalarioValida(x.Modalidad) {
+			return nil, fmt.Errorf("planilla: contrato_id=%d con modalidad de salario desconocida %q", x.ContratoID, x.Modalidad)
+		}
+		x.Dias = x.Base(divisor).Contar(x.Inicio, x.Fin)
 		out = append(out, x)
 	}
 	return out, nil
 }
 
-// SalarioBasePeriodo = Σ(salario × días ÷ divisor), con un solo redondeo a 2
-// decimales al final.
-func SalarioBasePeriodo(s []SegmentoSalario, divisor decimal.Decimal) decimal.Decimal {
+// SalarioBasePeriodo: Σ de lo que devenga cada segmento por sus días
+// (montoSegmento), con un solo redondeo a 2 decimales al final.
+func SalarioBasePeriodo(s []SegmentoSalario, divisor decimal.Decimal) (decimal.Decimal, error) {
 	if !divisor.IsPositive() {
-		return decimal.Zero
+		return decimal.Zero, errors.New("planilla: divisor de días del mes no definido")
 	}
+	p := ParametrosCalculo{DivisorDiasMes: divisor}
 	total := decimal.Zero
 	for _, x := range s {
-		total = total.Add(x.Salario.Mul(decimal.NewFromInt(int64(x.Dias))))
+		m, err := x.montoSegmento(p)
+		if err != nil {
+			return decimal.Zero, err
+		}
+		total = total.Add(m)
 	}
-	return total.DivRound(divisor, 6).Round(dosDecimales)
+	return total.Round(dosDecimales), nil
 }
 
-// DiasSegmentos: total de días comerciales con contrato.
+// DiasSegmentos: total de días con contrato (cada segmento en su base).
 func DiasSegmentos(s []SegmentoSalario) int {
 	n := 0
 	for _, x := range s {

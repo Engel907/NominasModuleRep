@@ -89,7 +89,9 @@ func nuevoCierre(t *testing.T) *cierre {
 	c.ex(`INSERT INTO parametros_generales (clave, valor, tipo, descripcion, fuente_legal, fecha_inicio_vigencia, creado_por)
 VALUES ('SALARIO_MINIMO_INEMBARGABLE', '300000', 'decimal', 'fixture', 'FIXTURE DE PRUEBA', '2025-01-01', 1),
        ('LIQ_PRESTAMOS_MODO', 'cuota', 'texto', 'fixture', 'FIXTURE DE PRUEBA', '2025-01-01', 1),
-       ('LIQ_CESANTIA_METODO', 'acumulado_por_anio', 'texto', 'fixture', 'FIXTURE DE PRUEBA', '2025-01-01', 1)`)
+       ('LIQ_CESANTIA_METODO', 'acumulado_por_anio', 'texto', 'fixture', 'FIXTURE DE PRUEBA', '2025-01-01', 1),
+       ('VACACIONES_SALARIO_BASE', 'vigente', 'texto', 'fixture', 'FIXTURE DE PRUEBA', '2025-01-01', 1),
+       ('INCAPACIDAD_SALARIO_BASE', 'vigente', 'texto', 'fixture', 'FIXTURE DE PRUEBA', '2025-01-01', 1)`)
 	c.ex(`INSERT INTO mapeo_concepto_cuenta (concepto_salarial_id, programa_presupuestario_id, tipo_asiento_id, cuenta_contable_id, tipo_movimiento, fecha_inicio_vigencia)
 SELECT cs.id, ?, ta.id, cc.id, v.mov, '2025-01-01'
 FROM (SELECT 'SAL_BASE' cod, 'PAGO_PLANILLA' ta, '1101' cta, 'haber' mov

@@ -13,6 +13,7 @@ const (
 	BanderaBaseAguinaldo  = "base_aguinaldo"
 	BanderaBaseVacaciones = "base_vacaciones"
 	BanderaBaseCesantia   = "base_cesantia"
+	BanderaBaseCCSS       = "base_ccss"
 )
 
 type sumadorBase interface {

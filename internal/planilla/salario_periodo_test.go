@@ -79,7 +79,7 @@ func TestSalarioBasePeriodoGolden(t *testing.T) {
 		if got := DiasSegmentos(segs); got != c.wantDias {
 			t.Errorf("%s: días = %d, esperado %d", c.nombre, got, c.wantDias)
 		}
-		if got := SalarioBasePeriodo(segs, d("30")); got.StringFixed(2) != c.wantSalario {
+		if got, err := SalarioBasePeriodo(segs, d("30")); err != nil || got.StringFixed(2) != c.wantSalario {
 			t.Errorf("%s: salario = %s, esperado %s", c.nombre, got.StringFixed(2), c.wantSalario)
 		}
 	}

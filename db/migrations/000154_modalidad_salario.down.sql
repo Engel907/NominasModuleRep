@@ -1,5 +1,5 @@
 -- Revertir solo es posible si todos los contratos son mensuales: el CHECK falla
--- (y nada se modifica) si existe algún contrato diario o por hora.
+-- (y nada se modifica) si existe algún contrato quincenal o semanal.
 ALTER TABLE contratos ADD CONSTRAINT chk_contrato_solo_mensual CHECK (modalidad_salario = 'mensual');
 ALTER TABLE contratos DROP CHECK chk_contrato_solo_mensual;
 

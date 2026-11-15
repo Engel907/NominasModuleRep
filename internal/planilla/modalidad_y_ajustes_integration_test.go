@@ -30,15 +30,6 @@ INSERT INTO empleado_parametros_generales (empleado_id, clave, valor, tipo, fuen
 VALUES (?, ?, ?, ?, 'Adenda de contrato', '2026-01-01', ?)`, emp, clave, valor, tipo, f.aprobador)
 }
 
-func (f *fixtureCalculo) asistir(t *testing.T, emp int64, horas string, fechas ...string) {
-	t.Helper()
-	for _, d := range fechas {
-		mustExec(t, f.db, `
-INSERT INTO registro_asistencia_detalle (empleado_id, fecha, horas_ordinarias, estado, creado_por)
-VALUES (?, ?, ?, 'presente', ?)`, emp, d, horas, f.preparador)
-	}
-}
-
 func (f *fixtureCalculo) calcularOFallar(t *testing.T, svc *PeriodoService, p dto.PeriodoCicloRow) {
 	t.Helper()
 	if _, err := svc.Calcular(context.Background(), f.preparador, p.ID); err != nil {
@@ -50,45 +41,38 @@ func (f *fixtureCalculo) calcularOFallar(t *testing.T, svc *PeriodoService, p dt
 	}
 }
 
-// Salario diario y por hora: la base del diario es un parámetro general
-// (para todos) que un empleado puede tener distinto (solo para él).
+// Salario quincenal y semanal, con un factor de hora extra propio de un
+// empleado y un parámetro general propio de otro.
 func TestModalidadesDeSalarioYAjustePorEmpleado(t *testing.T) {
 	f := nuevoFixtureCalculo(t)
 	f.sembrarSalarioMinimoInembargable(t)
-	f.general(t, ClaveSalarioDiarioBase, SalarioDiarioComerciales, "texto")
 
-	mustExec(t, f.db, `UPDATE contratos SET modalidad_salario = 'diario', salario_pactado = 30000 WHERE id = ?`, f.contrato[1])
-	mustExec(t, f.db, `UPDATE contratos SET modalidad_salario = 'por_hora', salario_pactado = 4000 WHERE id = ?`, f.contrato[2])
-	mustExec(t, f.db, `
-UPDATE parametros_jornada SET fecha_fin_vigencia = '2026-02-28'
-WHERE jornada_id = (SELECT id FROM jornadas WHERE codigo = 'DIURNA') AND fecha_fin_vigencia IS NULL`)
-	mustExec(t, f.db, `
-INSERT INTO parametros_jornada (jornada_id, horas_diarias_ordinarias, divisor_horas_mensuales, fuente_legal, fecha_inicio_vigencia, creado_por)
-SELECT id, 8, 240, 'Código de Trabajo, art. 136', '2026-03-01', 1 FROM jornadas WHERE codigo = 'DIURNA'`)
-	f.asistir(t, f.emp[2], "8", "2026-03-02", "2026-03-03")
-	f.asistir(t, f.emp[2], "4", "2026-03-04")
+	mustExec(t, f.db, `UPDATE contratos SET modalidad_salario = 'quincenal', salario_pactado = 450000 WHERE id = ?`, f.contrato[1])
+	mustExec(t, f.db, `UPDATE contratos SET modalidad_salario = 'semanal', salario_pactado = 70000 WHERE id = ?`, f.contrato[2])
 
 	svc := f.servicio()
 	p := marzo(t, svc, f)
 	f.calcularOFallar(t, svc, p)
 	if m, _ := f.montoConcepto(t, p.ID, f.emp[1], "SAL_BASE"); m != "900000.00" {
-		t.Errorf("diario por días comerciales: SAL_BASE %s, esperado 30 × 30000 = 900000.00", m)
+		t.Errorf("quincenal: SAL_BASE %s, esperado 2 × 450000 = 900000.00", m)
 	}
-	if m, _ := f.montoConcepto(t, p.ID, f.emp[2], "SAL_BASE"); m != "80000.00" {
-		t.Errorf("por hora: SAL_BASE %s, esperado 20 h × 4000 = 80000.00", m)
+	if m, _ := f.montoConcepto(t, p.ID, f.emp[2], "SAL_BASE"); m != "310000.00" {
+		t.Errorf("semanal: SAL_BASE %s, esperado 31 días × 70000 ÷ 7 = 310000.00", m)
 	}
-	if m, _ := f.montoConcepto(t, p.ID, f.emp[2], "HRS_EXTRA"); m != "36000.00" {
-		t.Errorf("por hora: HRS_EXTRA %s, esperado 6 h × 4000 × 1.5 = 36000.00", m)
+	if m, _ := f.montoConcepto(t, p.ID, f.emp[2], "HRS_EXTRA"); m != "11250.00" {
+		t.Errorf("semanal: HRS_EXTRA %s, esperado 6 h × (300000 ÷ 240) × 1.5 = 11250.00", m)
 	}
 
 	if _, err := svc.Descartar(context.Background(), f.preparador, p.ID); err != nil {
 		t.Fatal(err)
 	}
-	f.generalDelEmpleado(t, f.emp[1], ClaveSalarioDiarioBase, SalarioDiarioAsistencia, "texto")
-	f.asistir(t, f.emp[1], "8", "2026-03-09", "2026-03-10", "2026-03-11")
+	mustExec(t, f.db, `
+INSERT INTO empleado_parametros_horas_extra (empleado_id, tipo_hora_extra_id, factor_recargo, fuente_legal, fecha_inicio_vigencia, creado_por)
+SELECT ?, id, 2.0000, 'Convención colectiva', '2026-01-01', ? FROM tipos_hora_extra`, f.emp[2], f.aprobador)
+	f.generalDelEmpleado(t, f.emp[1], ClaveVacacionesSalarioBase, SalarioBasePromedio, "texto")
 	f.calcularOFallar(t, svc, p)
-	if m, _ := f.montoConcepto(t, p.ID, f.emp[1], "SAL_BASE"); m != "90000.00" {
-		t.Errorf("diario por asistencia (solo emp[1]): SAL_BASE %s, esperado 3 × 30000 = 90000.00", m)
+	if m, _ := f.montoConcepto(t, p.ID, f.emp[2], "HRS_EXTRA"); m != "15000.00" {
+		t.Errorf("factor propio: HRS_EXTRA %s, esperado 6 h × 1250 × 2 = 15000.00", m)
 	}
 	var snap string
 	if err := f.db.QueryRow(`SELECT parametros_snapshot FROM periodos_planilla WHERE id = ?`, p.ID).Scan(&snap); err != nil {
@@ -97,8 +81,8 @@ SELECT id, 8, 240, 'Código de Trabajo, art. 136', '2026-03-01', 1 FROM jornadas
 	var s struct {
 		Ajustes map[string]map[string]string `json:"ajustes_por_empleado"`
 	}
-	if err := json.Unmarshal([]byte(snap), &s); err != nil || len(s.Ajustes) != 1 {
-		t.Fatalf("snapshot sin el ajuste del empleado: %v %s", err, snap)
+	if err := json.Unmarshal([]byte(snap), &s); err != nil || len(s.Ajustes) != 2 {
+		t.Fatalf("snapshot sin los ajustes de los dos empleados: %v %s", err, snap)
 	}
 }
 

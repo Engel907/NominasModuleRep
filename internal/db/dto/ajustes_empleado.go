@@ -3,6 +3,8 @@ package dto
 import (
 	"context"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 // ParametroGeneralEmpleadoRow: valor propio de un empleado para una clave de
@@ -71,4 +73,65 @@ SELECT valor FROM (
 ORDER BY prioridad, fecha_inicio_vigencia DESC
 LIMIT 1`, empleadoID, clave, fecha, fecha, clave, fecha, fecha).Scan(&v)
 	return v, err
+}
+
+// ParametroHoraExtraEmpleadoRow: factor propio de un empleado para un tipo de
+// hora extra.
+type ParametroHoraExtraEmpleadoRow struct {
+	TipoHoraExtraID int64
+	FactorRecargo   decimal.Decimal
+}
+
+// ListarParametrosHorasExtraEmpleadoEnFecha: factores propios del empleado
+// (empleado_parametros_horas_extra) vigentes a `fecha`.
+func (q *Queries) ListarParametrosHorasExtraEmpleadoEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) ([]ParametroHoraExtraEmpleadoRow, error) {
+	rows, err := q.db.QueryContext(ctx, `
+SELECT tipo_hora_extra_id, factor_recargo
+FROM empleado_parametros_horas_extra
+WHERE empleado_id = ?
+  AND fecha_inicio_vigencia <= ? AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
+ORDER BY tipo_hora_extra_id`, empleadoID, fecha, fecha)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ParametroHoraExtraEmpleadoRow
+	for rows.Next() {
+		var r ParametroHoraExtraEmpleadoRow
+		if err := rows.Scan(&r.TipoHoraExtraID, &r.FactorRecargo); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ParametroJornadaEmpleadoRow: divisor propio de un empleado para una jornada.
+type ParametroJornadaEmpleadoRow struct {
+	JornadaID             int64
+	DivisorHorasMensuales decimal.Decimal
+}
+
+// ListarParametrosJornadaEmpleadoEnFecha: divisores propios del empleado
+// (empleado_parametros_jornada) vigentes a `fecha`.
+func (q *Queries) ListarParametrosJornadaEmpleadoEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) ([]ParametroJornadaEmpleadoRow, error) {
+	rows, err := q.db.QueryContext(ctx, `
+SELECT jornada_id, divisor_horas_mensuales
+FROM empleado_parametros_jornada
+WHERE empleado_id = ?
+  AND fecha_inicio_vigencia <= ? AND (fecha_fin_vigencia IS NULL OR fecha_fin_vigencia >= ?)
+ORDER BY jornada_id`, empleadoID, fecha, fecha)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ParametroJornadaEmpleadoRow
+	for rows.Next() {
+		var r ParametroJornadaEmpleadoRow
+		if err := rows.Scan(&r.JornadaID, &r.DivisorHorasMensuales); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

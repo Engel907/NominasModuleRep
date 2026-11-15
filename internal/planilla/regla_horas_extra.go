@@ -8,9 +8,9 @@ import (
 )
 
 // reglaHorasExtra (horas_extra): la hora ordinaria sale del contrato vigente a
-// la fecha efectiva: salario mensual ÷ horas mensuales de la JORNADA
-// (parametros_jornada), salario diario ÷ horas diarias de la jornada, o la
-// tarifa por hora (valorHoraOrdinaria).
+// la fecha efectiva: salario llevado al mes (EquivalenteMensual) ÷ horas
+// mensuales de la JORNADA (parametros_jornada o el divisor propio del
+// empleado), con el factor general o el propio del empleado.
 type reglaHorasExtra struct{}
 
 func (reglaHorasExtra) Aplicar(rc *ContextoRegla) error {
@@ -33,7 +33,7 @@ func (reglaHorasExtra) Aplicar(rc *ContextoRegla) error {
 }
 
 // CalcularHorasExtra: función pura. Monto = salario × Σ(horas × factor) ÷
-// divisor de la hora (horas del mes, del día, o 1 si el salario es por hora).
+// divisor de la hora (horas mensuales ordinarias de la jornada).
 func CalcularHorasExtra(
 	salarioMensual, horasMensualesOrdinarias decimal.Decimal,
 	horas []HoraExtraInput,

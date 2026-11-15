@@ -146,9 +146,10 @@ func buildDeps(cfg *config.Config, sqlDB *sql.DB, tokenMaker credenciales.TokenM
 
 		Liquidacion: rrhh.NewLiquidacionService(sqlDB, queries, infra.NewMotorRepository(queries), generales),
 
-		PlanillaExport:   planilla.NewExportService(infra.NewExportRepository(queries, llavero), infra.NewExportUnitOfWork(sqlDB, llavero)),
-		PlanillaPeriodo:  periodoSvc,
-		PlanillaDevengos: planilla.NewDevengosService(sqlDB),
+		PlanillaExport:       planilla.NewExportService(infra.NewExportRepository(queries, llavero), infra.NewExportUnitOfWork(sqlDB, llavero)),
+		PlanillaPeriodo:      periodoSvc,
+		PlanillaDevengos:     planilla.NewDevengosService(sqlDB),
+		PlanillaRetroactivos: planilla.NewRetroactivosService(sqlDB),
 
 		Vacaciones: asistencia.NewVacacionesService(sqlDB, queries),
 		HorasExtra: asistencia.NewHorasExtraService(sqlDB),

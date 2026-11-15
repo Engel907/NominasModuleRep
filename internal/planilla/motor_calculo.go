@@ -15,7 +15,7 @@ type ContratoVigente struct {
 	EmpleadoID       int64
 	RegimenLaboralID int64
 	SalarioPactado   decimal.Decimal
-	ModalidadSalario string // unidad de SalarioPactado (modalidad_salario.go)
+	ModalidadSalario string // mensual | quincenal | semanal: período que remunera SalarioPactado
 	Jornada          string
 	JornadaID        *int64 // el divisor de la hora extra depende de la jornada
 }
@@ -163,17 +163,13 @@ type ParametrosCalculo struct {
 	// de los días comerciales y del salario diario.
 	DivisorDiasMes decimal.Decimal
 
-	// Divisor de la hora ordinaria por jornada (parametros_jornada):
-	// jornada_id -> horas mensuales ordinarias.
+	// Divisor de la hora ordinaria por jornada (parametros_jornada, con los
+	// divisores propios del empleado ya aplicados): jornada_id -> horas
+	// mensuales ordinarias.
 	DivisorPorJornada map[int64]decimal.Decimal
-	// Horas ordinarias de un día por jornada (parametros_jornada; solo las
-	// que lo tienen definido): valoran el día de un salario por hora y la
-	// hora de un salario diario.
-	HorasDiariasPorJornada map[int64]decimal.Decimal
-
-	// SALARIO_DIARIO_BASE vigente (comerciales | asistencia); "" = no
-	// configurado (solo se exige con contratos diarios).
-	SalarioDiarioBase string
+	// FactoresHoraExtraEmpleado: factores propios del empleado
+	// (empleado_parametros_horas_extra); prevalecen sobre los generales.
+	FactoresHoraExtraEmpleado map[int64]ParametroHoraExtra `json:"-"`
 
 	// Fracción del mes que cubre el tipo de planilla (mes 1, quincena 0.5) y
 	// días comerciales del período completo (= DivisorDiasMes × fracción).
@@ -188,6 +184,14 @@ type ParametrosCalculo struct {
 
 	// VACACIONES_MODO_PAGO vigente; "" = no configurado.
 	VacacionesModoPago string
+
+	// Salario con que se pagan vacaciones e incapacidad (salario_promedio.go):
+	// vigente | promedio | mayor; "" = no configurado. Las ventanas en
+	// semanas / meses; 0 = no configurada.
+	VacacionesSalarioBase     string
+	VacacionesPromedioSemanas int
+	IncapacidadSalarioBase    string
+	IncapacidadPromedioMeses  int
 
 	// Factores del feriado laborado; nil = no configurado.
 	FactorFeriadoObligatorio   *decimal.Decimal
@@ -260,6 +264,11 @@ type estadoCalculo struct {
 	vacacionesCompensadas []int64
 }
 
+// advertir agrega una advertencia no fatal al resultado del empleado.
+func (s *estadoCalculo) advertir(m string) {
+	s.res.Advertencias = append(s.res.Advertencias, m)
+}
+
 func (s *estadoCalculo) agregar(c ConceptoAplicable, monto, cantidad decimal.Decimal) {
 	l := ConceptoCalculadoOutput{
 		ConceptoSalarialID:   c.ConceptoSalarialID,
@@ -277,14 +286,39 @@ func (s *estadoCalculo) agregar(c ConceptoAplicable, monto, cantidad decimal.Dec
 
 		EsDeduccionObligatoria: c.EsDeduccionObligatoria,
 	}
-	s.lineas = append(s.lineas, l)
 	if c.FormulaID != 0 {
 		s.formulas[c.ConceptoSalarialID] = c.FormulaID
 	}
 	if c.FormulaEmpleadoID != 0 {
 		s.formulasEmpleado[c.ConceptoSalarialID] = c.FormulaEmpleadoID
 	}
-	if c.Naturaleza == naturalezaIngreso {
+	s.sumar(l)
+}
+
+// agregarRetroactivo: línea del concepto que paga la diferencia de un período
+// aprobado; lleva las banderas de base del concepto, sin fórmula.
+func (s *estadoCalculo) agregarRetroactivo(c ConceptoAplicable, r RetroactivoInput) {
+	l := ConceptoCalculadoOutput{
+		ConceptoSalarialID:   c.ConceptoSalarialID,
+		Codigo:               c.Codigo,
+		Naturaleza:           c.Naturaleza,
+		OrdenCalculo:         c.OrdenCalculo,
+		Monto:                r.Monto,
+		AfectaBaseCCSS:       c.AfectaBaseCCSS,
+		AfectaBaseRenta:      c.AfectaBaseRenta,
+		AfectaBaseAguinaldo:  c.AfectaBaseAguinaldo,
+		AfectaBaseCesantia:   c.AfectaBaseCesantia,
+		AfectaBaseVacaciones: c.AfectaBaseVacaciones,
+		AfectaBaseEmbargo:    c.AfectaBaseEmbargo,
+		Retroactivo:          &r,
+	}
+	s.sumar(l)
+}
+
+func (s *estadoCalculo) sumar(l ConceptoCalculadoOutput) {
+	s.lineas = append(s.lineas, l)
+	monto := l.Monto
+	if l.Naturaleza == naturalezaIngreso {
 		s.ingresos = append(s.ingresos, l)
 		s.totalIng = s.totalIng.Add(monto)
 	} else {
@@ -329,11 +363,29 @@ func (m *MotorEmpleado) CalcularEmpleado(ctx context.Context, in CalculoEmpleado
 		for _, x := range ps {
 			factores[x.TipoHoraExtraID] = x
 		}
+		for id, x := range p.FactoresHoraExtraEmpleado {
+			factores[id] = x
+		}
+	}
+
+	retros := map[int64][]RetroactivoInput{}
+	for _, r := range in.Retroactivos {
+		if !aplicables[r.ConceptoSalarialID] {
+			return nil, fmt.Errorf("planilla: empleado_id=%d tiene un retroactivo del concepto_salarial_id=%d que no aplica a su régimen/tipo de planilla",
+				in.EmpleadoID, r.ConceptoSalarialID)
+		}
+		retros[r.ConceptoSalarialID] = append(retros[r.ConceptoSalarialID], r)
 	}
 
 	for _, c := range conceptos {
 		if err := m.calcularConcepto(c, contrato, in, p, manuales, factores, st); err != nil {
 			return nil, fmt.Errorf("planilla: empleado_id=%d, concepto %q: %w", in.EmpleadoID, c.Codigo, err)
+		}
+		for _, r := range retros[c.ConceptoSalarialID] {
+			if c.Naturaleza != naturalezaIngreso {
+				return nil, fmt.Errorf("planilla: empleado_id=%d, retroactivo del concepto %q que no es ingreso", in.EmpleadoID, c.Codigo)
+			}
+			st.agregarRetroactivo(c, r)
 		}
 	}
 

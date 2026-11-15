@@ -148,6 +148,16 @@ func (e *EscritorDetalle) Escribir(ctx context.Context, q *dto.Queries, periodoI
 		}
 		for _, l := range d.DesglosePorConcepto {
 			c := dto.DetalleConceptoInsert{DetalleEmpleadoID: pdeID, ConceptoSalarialID: l.ConceptoSalarialID, Monto: l.Monto}
+			if r := l.Retroactivo; r != nil {
+				origen, motivo := r.PeriodoOrigenID, r.Motivo
+				c.RetroactivoPeriodoOrigenID, c.MotivoAjuste = &origen, &motivo
+				if r.LineaOrigenID != 0 {
+					linea := r.LineaOrigenID
+					c.AjusteDeID = &linea
+				}
+				conceptos = append(conceptos, c)
+				continue
+			}
 			if f, ok := d.FormulaPorConcepto[l.ConceptoSalarialID]; ok && f != 0 {
 				c.FormulaID = &f
 			}

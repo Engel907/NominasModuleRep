@@ -31,16 +31,16 @@ type fuenteFalsa struct {
 	comps        map[int64][]dto.CompensacionVacacionesRow
 	vacs         map[int64][]dto.VacacionesAprobadasRow
 	liqs         map[int64][]dto.LiquidacionParaPeriodoRow
-	asistencia   map[int64][]dto.DiaAsistenciaRow
-	feriadosOb   []time.Time
 	embargosMes  map[int64]dto.EmbargosMesRow
+	promedios    map[string]dto.BasePromedioRow // columna -> Σ de la ventana
+	compsPagadas map[int64][]dto.CompensacionVacacionesRow
 }
 
-func (f *fuenteFalsa) ListarAsistenciaPresenteEnRango(_ context.Context, id int64, _, _ time.Time) ([]dto.DiaAsistenciaRow, error) {
-	return f.asistencia[id], nil
+func (f *fuenteFalsa) SumarBasePromedioEmpleado(_ context.Context, _ int64, _, _ time.Time, columna string) (dto.BasePromedioRow, error) {
+	return f.promedios[columna], nil
 }
-func (f *fuenteFalsa) ListarFeriadosPagoObligatorioEnRango(context.Context, time.Time, time.Time) ([]time.Time, error) {
-	return f.feriadosOb, nil
+func (f *fuenteFalsa) ListarCompensacionesVacacionesPagadasPorPeriodo(_ context.Context, id, _ int64) ([]dto.CompensacionVacacionesRow, error) {
+	return f.compsPagadas[id], nil
 }
 func (f *fuenteFalsa) SumarEmbargosMesEmpleado(_ context.Context, id, _ int64, _, _ time.Time) (dto.EmbargosMesRow, error) {
 	return f.embargosMes[id], nil

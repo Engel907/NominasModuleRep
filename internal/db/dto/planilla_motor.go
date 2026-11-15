@@ -12,7 +12,7 @@ type ContratoVigenteEnFechaRow struct {
 	EmpleadoID       int64
 	RegimenLaboralID int64
 	SalarioPactado   decimal.Decimal
-	ModalidadSalario string // mensual | diario | por_hora
+	ModalidadSalario string // mensual | quincenal | semanal
 	Jornada          string // jornadas.codigo
 	JornadaID        *int64
 }
@@ -159,16 +159,15 @@ ORDER BY tipo_hora_extra_id ASC`, fecha, fecha)
 }
 
 type ParametroJornadaRow struct {
-	JornadaID              int64
-	JornadaCodigo          string
-	DivisorHorasMensuales  decimal.Decimal
-	HorasDiariasOrdinarias decimal.NullDecimal
+	JornadaID             int64
+	JornadaCodigo         string
+	DivisorHorasMensuales decimal.Decimal
 }
 
 // ListarParametrosJornadaEnFecha: divisor de la hora ordinaria vigente por jornada.
 func (q *Queries) ListarParametrosJornadaEnFecha(ctx context.Context, fecha time.Time) ([]ParametroJornadaRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
-SELECT p.jornada_id, j.codigo, p.divisor_horas_mensuales, p.horas_diarias_ordinarias
+SELECT p.jornada_id, j.codigo, p.divisor_horas_mensuales
 FROM parametros_jornada p
 JOIN jornadas j ON j.id = p.jornada_id
 WHERE p.fecha_inicio_vigencia <= ?
@@ -181,7 +180,7 @@ ORDER BY p.jornada_id ASC`, fecha, fecha)
 	var out []ParametroJornadaRow
 	for rows.Next() {
 		var r ParametroJornadaRow
-		if err := rows.Scan(&r.JornadaID, &r.JornadaCodigo, &r.DivisorHorasMensuales, &r.HorasDiariasOrdinarias); err != nil {
+		if err := rows.Scan(&r.JornadaID, &r.JornadaCodigo, &r.DivisorHorasMensuales); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

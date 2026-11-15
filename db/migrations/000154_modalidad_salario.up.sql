@@ -1,11 +1,11 @@
 ALTER TABLE contratos
-  ADD COLUMN modalidad_salario ENUM('mensual','diario','por_hora') NOT NULL DEFAULT 'mensual'
-    COMMENT 'Unidad de salario_pactado: mensual = monto del mes; diario = monto por día; por_hora = monto por hora ordinaria' AFTER salario_pactado;
+  ADD COLUMN modalidad_salario ENUM('mensual','quincenal','semanal') NOT NULL DEFAULT 'mensual'
+    COMMENT 'Período que remunera salario_pactado: mensual = monto del mes; quincenal = monto de la quincena; semanal = monto de la semana' AFTER salario_pactado;
 
 ALTER TABLE contratos ALTER COLUMN modalidad_salario DROP DEFAULT;
 
 ALTER TABLE contratos
-  MODIFY salario_pactado DECIMAL(14,2) NOT NULL COMMENT 'Salario pactado en la unidad de modalidad_salario (mes, día u hora)';
+  MODIFY salario_pactado DECIMAL(14,2) NOT NULL COMMENT 'Salario pactado en la unidad de modalidad_salario (mes, quincena o semana)';
 
 DROP TRIGGER IF EXISTS trg_aud_contratos_ins;
 CREATE TRIGGER trg_aud_contratos_ins AFTER INSERT ON contratos

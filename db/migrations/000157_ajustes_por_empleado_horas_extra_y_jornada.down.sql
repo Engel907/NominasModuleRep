@@ -1,0 +1,2 @@
+DROP TABLE empleado_parametros_jornada;
+DROP TABLE empleado_parametros_horas_extra;

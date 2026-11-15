@@ -44,7 +44,7 @@ se puede calcular hasta que exista un valor vigente (error explícito).
 
 | Valor | Efecto en la planilla regular |
 |---|---|
-| `compensacion` | Paga en dinero los días registrados con `POST /vacaciones/empleados/:id/compensaciones` (días × valor del día del contrato; ver [modalidad del salario](#modalidad-del-salario-mensual-diario-o-por-hora)). Los días disfrutados siguen dentro de `SAL_BASE`. |
+| `compensacion` | Paga en dinero los días registrados con `POST /vacaciones/empleados/:id/compensaciones` (días × valor del día según `VACACIONES_SALARIO_BASE`; ver [salario de vacaciones e incapacidad](#salario-de-vacaciones-e-incapacidad-vigente-o-promedio)). Los días disfrutados siguen dentro de `SAL_BASE`. |
 | `disfrute` | Los días de vacaciones aprobadas dentro del período salen de `SAL_BASE` y se pagan como `PAGO_VACACIONES` (mismo neto, otra línea). Una compensación pendiente da error. |
 | `ambos` | Las dos cosas. |
 
@@ -56,7 +56,7 @@ Una compensación queda ligada al período que la calcula y se marca pagada
 ```http
 POST /api/v1/contratos
 {"empleado_id": 42, "puesto_id": 7, "regimen_laboral_id": 1, "tipo_contrato_id": 2,
- "salario_pactado": "3500", "modalidad_salario": "por_hora", "jornada_id": 1,
+ "salario_pactado": "450000", "modalidad_salario": "quincenal", "jornada_id": 1,
  "fecha_inicio_contrato": "2026-01-05", "fecha_efectiva": "2026-01-05"}
 PUT  /api/v1/empleados/{id}/contrato        # nueva versión con los mismos campos (sin empleado_id)
 GET  /api/v1/contratos?tipo_contrato_id=2&es_vigente=true
@@ -66,37 +66,92 @@ GET  /api/v1/contratos?tipo_contrato_id=2&es_vigente=true
 (`/api/v1/configuracion/catalogos`); las respuestas traen además `tipo_contrato` y
 `jornada` con el código de cada catálogo, de solo lectura.
 
-## Modalidad del salario: mensual, diario o por hora
+## Modalidad del salario: mensual, quincenal o semanal
 
-Cada versión de contrato dice en qué unidad está `salario_pactado`
+Cada versión de contrato dice qué período remunera `salario_pactado`
 (`modalidad_salario`, obligatorio al crear o actualizar el contrato):
 
-| Modalidad | `SAL_BASE` del período | Valor del día (incapacidad, vacaciones) | Hora ordinaria (horas extra, feriado laborado) |
-|---|---|---|---|
-| `mensual` | salario × días comerciales ÷ `DIVISOR_DIAS_MES` | salario ÷ `DIVISOR_DIAS_MES` | salario ÷ horas mensuales de la jornada |
-| `diario` | según `SALARIO_DIARIO_BASE` (abajo) | el salario diario | salario ÷ horas diarias de la jornada |
-| `por_hora` | tarifa × horas ordinarias registradas en asistencia, más los días pagados sin trabajar a horas diarias de la jornada | tarifa × horas diarias de la jornada | la tarifa |
+| Modalidad | Días con que se devenga | `SAL_BASE` del período | Valor del día vigente | Equivalente mensual (hora ordinaria, salario mínimo) |
+|---|---|---|---|---|
+| `mensual` | comerciales (`DIVISOR_DIAS_MES` por mes) | salario × días ÷ `DIVISOR_DIAS_MES` | salario ÷ `DIVISOR_DIAS_MES` | el salario |
+| `quincenal` | comerciales | salario × 2 × días ÷ `DIVISOR_DIAS_MES` | salario × 2 ÷ `DIVISOR_DIAS_MES` | salario × 2 |
+| `semanal` | naturales | salario × días ÷ 7 | salario ÷ 7 | salario ÷ 7 × `DIVISOR_DIAS_MES` |
 
-`SALARIO_DIARIO_BASE` (texto, con vigencia, **no se siembra**; se exige solo si hay un
-contrato diario en el período):
+- Una quincena completa vale 15 días comerciales en cualquier mes (también la segunda de
+  febrero), así que paga exactamente el salario quincenal; una semana completa vale 7 días
+  naturales y paga exactamente el salario semanal, aunque cruce de mes.
+- El salario semanal incluye el descanso semanal, como el mensual incluye los descansos del mes.
+- La hora ordinaria (horas extra, feriado laborado) es el equivalente mensual ÷ horas
+  mensuales de la jornada (`parametros_jornada.divisor_horas_mensuales` o el divisor propio
+  del empleado).
+- Incapacidad y vacaciones descuentan de `SAL_BASE` los días en la base de la modalidad
+  (comerciales o naturales).
+- Al crear o actualizar un contrato el salario se valida contra el salario mínimo mensual del
+  puesto llevado al mes con la misma tabla (el error informa el equivalente mensual).
 
-| Valor | Días que paga un salario diario |
-|---|---|
-| `comerciales` | los días comerciales con contrato, como el salario mensual (incluye descansos y feriados) |
-| `asistencia` | los días con asistencia `presente`, más los feriados de pago obligatorio y los días de vacaciones aprobadas que no se trabajaron (estos últimos solo si `PAGO_VACACIONES` no paga el disfrute) |
+La modalidad no obliga a una periodicidad de planilla: se siembran los tipos `mensual`
+(fracción 1), `quincenal` (0.5) y `semanal` (0.2308 = 12 ÷ 52 de mes, que prorratea la base
+mínima CCSS, los embargos y las asignaciones mensuales). Un salario mensual pagado en planilla
+semanal se devenga por días comerciales y suma el salario completo al cerrar el mes.
 
-Lo pagado por asistencia sale de `registro_asistencia_detalle` (estado `presente` y horas
-ordinarias > 0) y del calendario laboral; un día con incapacidad no se paga como salario
-aunque tenga marca (lo paga `SUB_INCAP`). Los días de descanso semanal no se pagan en ese
-modo: si la empresa los paga, use `comerciales` o un concepto propio.
+## Salario de vacaciones e incapacidad: vigente o promedio
 
-Los salarios diario y por hora necesitan las horas diarias de su jornada
-(`parametros_jornada.horas_diarias_ordinarias`, que la semilla deja en blanco): sin ese
-valor falla, con error explícito, el empleado que lo use.
+`PAGO_VACACIONES` (compensación y disfrute) y `SUB_INCAP` valoran el día según un parámetro
+general (texto, con vigencia, **no se siembra**; se exige solo al empleado que tiene qué
+pagar en el período):
 
-Al crear o actualizar un contrato, el salario se valida contra el salario mínimo mensual
-del puesto llevado al mes: diario × `DIVISOR_DIAS_MES`, por hora × horas mensuales de la
-jornada (el error informa el equivalente mensual).
+| Clave | Valores | Ventana del promedio |
+|---|---|---|
+| `VACACIONES_SALARIO_BASE` | `vigente` \| `promedio` \| `mayor` | `VENTANA_PROMEDIO_VACACIONES_SEMANAS` semanas antes del inicio del período (sembrado en 50, Código de Trabajo, art. 157; es la misma ventana de la liquidación), sobre `base_vacaciones` |
+| `INCAPACIDAD_SALARIO_BASE` | `vigente` \| `promedio` \| `mayor` | `INCAPACIDAD_PROMEDIO_MESES` meses antes del inicio de cada boleta (entero, **no se siembra**, se exige con `promedio` o `mayor`), sobre `base_ccss` |
+
+- `vigente`: el salario del contrato de cada día (valor del día de su modalidad).
+- `promedio`: Σ de la base de los períodos regulares aprobados, pagados o contabilizados con
+  `fecha_fin` dentro de la ventana (más los meses del histórico previo a la puesta en marcha;
+  para incapacidad el histórico aporta `monto_bruto`) ÷ Σ de su `fraccion_mensual` ÷
+  `DIVISOR_DIAS_MES`, igual que el promedio de la liquidación.
+- `mayor`: el mayor de los dos, día por día.
+
+Sin planillas en la ventana (empleado nuevo) se paga con el salario vigente y el detalle del
+empleado lleva una advertencia. Una boleta larga usa el mismo promedio en todos los períodos
+que toca, porque la ventana se mide desde su inicio. Los períodos de ingreso a mitad de mes
+cuentan su fracción completa y bajan el promedio; `mayor` protege ese caso.
+
+## Retroactivos
+
+Un aumento (o cualquier cambio de contrato, parámetro o registro) con fecha pasada sobre
+períodos ya aprobados se paga en un período regular en borrador:
+
+```http
+POST   /api/v1/planillas/{id}/retroactivos
+{"empleado_id": 42, "desde": "2026-01-01", "hasta": "2026-03-31", "motivo": "Aumento por resolución 12-2026"}
+GET    /api/v1/planillas/{id}/retroactivos?empleado_id=42
+DELETE /api/v1/planillas/{id}/retroactivos/{retroactivo_id}
+```
+
+`hasta` debe ser anterior al inicio del período; un empleado tiene a lo sumo un retroactivo
+por período (para otro rango, elimínelo y regístrelo con el rango completo). Permisos: los
+de los devengos (`planilla.crear` para registrar o eliminar, `planilla.ver` para listar).
+
+Al calcular el período, por cada período regular aprobado, pagado o contabilizado del
+empleado con `fecha_fin` en `[desde, hasta]` y en el que tuvo detalle:
+
+1. se recalcula con los datos de hoy para esas fechas (versiones de contrato, parámetros
+   vigentes en esas fechas, horas extra, incapacidades, vacaciones y devengos de ese período,
+   y las compensaciones de vacaciones que ese período pagó; sin préstamos ni embargos, que
+   no cambian lo devengado);
+2. por concepto de ingreso, la diferencia = recalculado − lo que pagó el período − lo que ya
+   pagaron por él otros retroactivos;
+3. si la diferencia neta es positiva, cada diferencia se agrega como línea de su concepto
+   (con sus banderas de base: cotiza, grava y acumula aguinaldo en el período que la paga),
+   con `retroactivo_periodo_origen_id` = período de origen, `concepto_ajuste_de_id` = línea
+   corregida y `motivo_ajuste`. Si es cero o negativa no se paga y queda una advertencia:
+   recuperar lo pagado de más no se hace por retroactivo.
+
+Las cargas, la renta y los embargos del período se calculan sobre el total, retroactivo
+incluido. Un retroactivo que no se puede recalcular (falta un parámetro de aquel período, el
+concepto ya no aplica al régimen) deja al empleado con error `retroactivo_invalido` y el
+período no se calcula hasta corregirlo o eliminar el retroactivo.
 
 ## Cargas sociales: agregadas o por componente
 
@@ -244,7 +299,9 @@ por el mismo circuito de propuesta y aprobación:
 | Para todos | Solo para un empleado (prevalece sobre la general) |
 |---|---|
 | `concepto_salarial_formula` (fórmula o monto de un concepto) | `empleado_concepto_formula` (clave `empleado_id` + `concepto_salarial_id`) |
-| `parametros_generales` (p. ej. `VACACIONES_MODO_PAGO`, `SALARIO_DIARIO_BASE`, `LIQ_PRESTAMOS_MODO`, `DIVISOR_DIAS_MES`) | `empleado_parametros_generales` (clave `empleado_id` + `clave`) |
+| `parametros_generales` (p. ej. `VACACIONES_MODO_PAGO`, `VACACIONES_SALARIO_BASE`, `LIQ_PRESTAMOS_MODO`, `DIVISOR_DIAS_MES`) | `empleado_parametros_generales` (clave `empleado_id` + `clave`) |
+| `parametros_horas_extra` (factor por tipo de hora extra) | `empleado_parametros_horas_extra` (clave `empleado_id` + `tipo_hora_extra_id`; `factor_recargo` > 1) |
+| `parametros_jornada` (divisor de la hora ordinaria por jornada) | `empleado_parametros_jornada` (clave `empleado_id` + `jornada_id`; `divisor_horas_mensuales` > 0, rige mientras el empleado esté en esa jornada) |
 
 ```http
 POST /api/v1/parametros/propuestas
@@ -252,7 +309,14 @@ POST /api/v1/parametros/propuestas
   "tabla": "empleado_parametros_generales",
   "fecha_inicio_vigencia": "2027-01-01",
   "fuente_legal": "Adenda al contrato de 2026-12-15",
-  "payload": {"filas": [{"empleado_id": 42, "clave": "SALARIO_DIARIO_BASE", "valor": "asistencia", "tipo": "texto"}]}
+  "payload": {"filas": [{"empleado_id": 42, "clave": "VACACIONES_SALARIO_BASE", "valor": "mayor", "tipo": "texto"}]}
+}
+POST /api/v1/parametros/propuestas
+{
+  "tabla": "empleado_parametros_horas_extra",
+  "fecha_inicio_vigencia": "2027-01-01",
+  "fuente_legal": "Convención colectiva, cláusula 18",
+  "payload": {"filas": [{"empleado_id": 42, "tipo_hora_extra_id": 1, "factor_recargo": "1.75"}]}
 }
 POST /api/v1/parametros/propuestas
 {
@@ -269,7 +333,8 @@ La fórmula propia debe ser del mismo `tipo_calculo` que el concepto (`monto_fij
 concepto fijo, `expresion_formula` para uno de fórmula). Cada línea de planilla registra qué
 fórmula usó (`concepto_salarial_formula_id` o `empleado_concepto_formula_id`) y el
 `parametros_snapshot` del período guarda los parámetros propios con que se calculó a cada
-empleado (`ajustes_por_empleado`). La liquidación también lee los parámetros generales
+empleado (`ajustes_por_empleado`: claves de `parametros_generales` y, para las tablas,
+`tabla.columna[clave]`). La liquidación también lee los parámetros generales
 propios del empleado (p. ej. `LIQ_CESANTIA_METODO`).
 
 Un cambio de modalidad o de salario se hace en el contrato del empleado
@@ -486,11 +551,11 @@ Marcar cada punto con fecha y responsable antes del primer pago real.
 **Parámetros y datos legales**
 - [ ] `jobs verificar-parametros --fecha <hoy>` sale con 0 (sin faltantes); `GET /readyz` responde 200.
 - [ ] `SALARIO_MINIMO_INEMBARGABLE` cargado con monto, fecha y fuente legal confirmados.
-- [ ] Configuración que el sistema exige y no siembra: `VACACIONES_MODO_PAGO`, `VACACIONES_POLITICA_ACUMULACION`, `LIQ_PRESTAMOS_MODO`, `LIQ_EMBARGO_MONTO_FIJO` (si hay embargos de monto fijo), `LIQ_CESANTIA_METODO`, `SALARIO_DIARIO_BASE` y horas diarias de cada jornada (si hay contratos diarios o por hora), `DIAS_LABORALES_SEMANA`, `FERIADO_LABORADO_FACTOR_NO_OBLIGATORIO`, `RENTA_METODO_PERIODO` (si hay planillas quincenales o semanales); divisores de jornada MIXTA/NOCTURNA y `parametros_franja_nocturna` (si hay horas extra nocturnas o mixtas).
+- [ ] Configuración que el sistema exige y no siembra: `VACACIONES_MODO_PAGO`, `VACACIONES_POLITICA_ACUMULACION`, `LIQ_PRESTAMOS_MODO`, `LIQ_EMBARGO_MONTO_FIJO` (si hay embargos de monto fijo), `LIQ_CESANTIA_METODO`, `VACACIONES_SALARIO_BASE`, `INCAPACIDAD_SALARIO_BASE` (e `INCAPACIDAD_PROMEDIO_MESES` si es `promedio` o `mayor`), `DIAS_LABORALES_SEMANA`, `FERIADO_LABORADO_FACTOR_NO_OBLIGATORIO`, `RENTA_METODO_PERIODO` (si hay planillas quincenales o semanales); divisores de jornada MIXTA/NOCTURNA y `parametros_franja_nocturna` (si hay horas extra nocturnas o mixtas).
 - [ ] Cargas sociales revisadas para el tipo de empleador (sector público o privado) y, si hay pensionados u otros regímenes, filas por `regimen_ccss_id`; tasa de la póliza de riesgos del trabajo (`INS_RT`) si se contabiliza.
 - [ ] Conceptos asignados de cada empleado (asociación, sindicato, pólizas) y, si se arranca a mitad de año, histórico de salarios cargado.
 - [ ] Valores iniciales de `parametros_*` revisados por RR. HH./Legal (`GET /api/v1/parametros/tablas/{tabla}`), incluidos `parametros_motivos_salida`, las escalas de cesantía/preaviso y `VENTANA_PROMEDIO_VACACIONES_SEMANAS`.
-- [ ] Modalidad de salario de cada contrato revisada (`mensual`, `diario`, `por_hora`) y, si se migran contratos, todos con `tipo_contrato_id` y `jornada_id` del catálogo antes de la migración 000153.
+- [ ] Modalidad de salario de cada contrato revisada (`mensual`, `quincenal`, `semanal`) y, si se migran contratos, todos con `tipo_contrato_id` y `jornada_id` del catálogo antes de la migración 000153.
 - [ ] Criterios de cálculo revisados: días comerciales, base mínima CCSS prorrateada, banderas de LIQ_*/AGUINALDO/SUB_INCAP/PAGO_VACACIONES, renta y embargo en la planilla de liquidación.
 - [ ] Catálogo de feriados revisado (`GET /calendario/feriados-catalogo`) y calendario del año generado; tolerancia de tardanza definida en cada turno.
 - [ ] `regimen_ccss_id` cargado a cada empleado (`GET /empleados?sin_regimen_ccss=true` vacío).

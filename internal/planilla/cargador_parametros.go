@@ -167,7 +167,16 @@ func (c *CargadorParametros) cargarGenerales(ctx context.Context, f time.Time, o
 	}
 	out.VacacionesModoPago = modo
 
-	if out.SalarioDiarioBase, err = c.textoOpcional(ctx, ClaveSalarioDiarioBase, f, BaseSalarioDiarioValida, "comerciales | asistencia"); err != nil {
+	if out.VacacionesSalarioBase, err = c.textoOpcional(ctx, ClaveVacacionesSalarioBase, f, SalarioBaseValida, "vigente | promedio | mayor"); err != nil {
+		return err
+	}
+	if out.IncapacidadSalarioBase, err = c.textoOpcional(ctx, ClaveIncapacidadSalarioBase, f, SalarioBaseValida, "vigente | promedio | mayor"); err != nil {
+		return err
+	}
+	if out.VacacionesPromedioSemanas, err = c.enteroOpcional(ctx, ClaveVentanaPromedioVacacionesSemanas, f); err != nil {
+		return err
+	}
+	if out.IncapacidadPromedioMeses, err = c.enteroOpcional(ctx, ClaveIncapacidadPromedioMeses, f); err != nil {
 		return err
 	}
 
@@ -192,6 +201,22 @@ func (c *CargadorParametros) textoOpcional(ctx context.Context, clave string, f 
 		return "", fmt.Errorf("planilla: %s = %q inválido (%s)", clave, v, admitidos)
 	}
 	return v, nil
+}
+
+// enteroOpcional: 0 si la clave no está configurada; si lo está, debe ser un
+// entero > 0.
+func (c *CargadorParametros) enteroOpcional(ctx context.Context, clave string, f time.Time) (int, error) {
+	d, err := c.generales.Decimal(ctx, clave, f)
+	var nc parametros.ErrParametroNoConfigurado
+	switch {
+	case errors.As(err, &nc):
+		return 0, nil
+	case err != nil:
+		return 0, err
+	case !d.IsPositive() || !d.Equal(d.Truncate(0)):
+		return 0, fmt.Errorf("planilla: %s debe ser un entero > 0, es %s", clave, d)
+	}
+	return int(d.IntPart()), nil
 }
 
 // factorOpcional: nil si la clave no está configurada; si lo está, debe ser
@@ -423,18 +448,11 @@ func (c *CargadorParametros) cargarJornadas(ctx context.Context, f time.Time, ou
 		return fmt.Errorf("planilla: leyendo parametros_jornada: %w", err)
 	}
 	out.DivisorPorJornada = make(map[int64]decimal.Decimal, len(rows))
-	out.HorasDiariasPorJornada = make(map[int64]decimal.Decimal, len(rows))
 	for _, r := range rows {
 		if !r.DivisorHorasMensuales.IsPositive() {
 			return fmt.Errorf("planilla: divisor de horas de la jornada %s debe ser > 0, es %s", r.JornadaCodigo, r.DivisorHorasMensuales)
 		}
 		out.DivisorPorJornada[r.JornadaID] = r.DivisorHorasMensuales
-		if r.HorasDiariasOrdinarias.Valid {
-			if !r.HorasDiariasOrdinarias.Decimal.IsPositive() {
-				return fmt.Errorf("planilla: horas diarias de la jornada %s deben ser > 0, son %s", r.JornadaCodigo, r.HorasDiariasOrdinarias.Decimal)
-			}
-			out.HorasDiariasPorJornada[r.JornadaID] = r.HorasDiariasOrdinarias.Decimal
-		}
 	}
 	return nil
 }
@@ -506,14 +524,64 @@ func (c *CargadorParametros) CargarMetodoRenta(ctx context.Context, fecha time.T
 }
 
 // AjustesEmpleadoLector: valores propios de un empleado vigentes a una fecha
-// (empleado_parametros_generales).
+// (empleado_parametros_generales, empleado_parametros_horas_extra y
+// empleado_parametros_jornada).
 type AjustesEmpleadoLector interface {
 	ListarParametrosGeneralesEmpleadoEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) ([]dto.ParametroGeneralEmpleadoRow, error)
+	ListarParametrosHorasExtraEmpleadoEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) ([]dto.ParametroHoraExtraEmpleadoRow, error)
+	ListarParametrosJornadaEmpleadoEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) ([]dto.ParametroJornadaEmpleadoRow, error)
 }
 
-// ConAjustesPorEmpleado habilita los parámetros generales propios de un
-// empleado: lector dice si el empleado tiene alguno vigente y paraEmpleado da
-// el lector de generales que los aplica sobre los generales.
+// AjustesTablasEmpleado aplica sobre p los factores de hora extra y los
+// divisores de jornada propios del empleado vigentes a `fecha` (sin tocar los
+// mapas del período) y devuelve lo aplicado (tabla.columna[clave] -> valor);
+// nil si no tiene o no están habilitados.
+func (c *CargadorParametros) AjustesTablasEmpleado(ctx context.Context, empleadoID int64, fecha time.Time, p *ParametrosCalculo) (map[string]string, error) {
+	if c.ajustes == nil {
+		return nil, nil
+	}
+	he, err := c.ajustes.ListarParametrosHorasExtraEmpleadoEnFecha(ctx, empleadoID, fecha)
+	if err != nil {
+		return nil, fmt.Errorf("planilla: leyendo factores de hora extra propios del empleado_id=%d: %w", empleadoID, err)
+	}
+	jo, err := c.ajustes.ListarParametrosJornadaEmpleadoEnFecha(ctx, empleadoID, fecha)
+	if err != nil {
+		return nil, fmt.Errorf("planilla: leyendo divisores de jornada propios del empleado_id=%d: %w", empleadoID, err)
+	}
+	if len(he) == 0 && len(jo) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(he)+len(jo))
+	if len(he) > 0 {
+		p.FactoresHoraExtraEmpleado = make(map[int64]ParametroHoraExtra, len(he))
+		for _, r := range he {
+			if r.FactorRecargo.LessThan(decimal.NewFromInt(1)) {
+				return nil, fmt.Errorf("planilla: empleado_id=%d, factor propio de hora extra %s < 1", empleadoID, r.FactorRecargo)
+			}
+			p.FactoresHoraExtraEmpleado[r.TipoHoraExtraID] = ParametroHoraExtra{TipoHoraExtraID: r.TipoHoraExtraID, FactorRecargo: r.FactorRecargo}
+			out[fmt.Sprintf("empleado_parametros_horas_extra.factor_recargo[tipo_hora_extra_id=%d]", r.TipoHoraExtraID)] = r.FactorRecargo.String()
+		}
+	}
+	if len(jo) > 0 {
+		div := make(map[int64]decimal.Decimal, len(p.DivisorPorJornada)+len(jo))
+		for k, v := range p.DivisorPorJornada {
+			div[k] = v
+		}
+		for _, r := range jo {
+			if !r.DivisorHorasMensuales.IsPositive() {
+				return nil, fmt.Errorf("planilla: empleado_id=%d, divisor propio de la jornada %d debe ser > 0", empleadoID, r.JornadaID)
+			}
+			div[r.JornadaID] = r.DivisorHorasMensuales
+			out[fmt.Sprintf("empleado_parametros_jornada.divisor_horas_mensuales[jornada_id=%d]", r.JornadaID)] = r.DivisorHorasMensuales.String()
+		}
+		p.DivisorPorJornada = div
+	}
+	return out, nil
+}
+
+// ConAjustesPorEmpleado habilita los parámetros propios de un empleado:
+// lector dice si el empleado tiene alguno vigente y paraEmpleado da el lector
+// de generales que aplica los generales propios sobre los generales.
 func (c *CargadorParametros) ConAjustesPorEmpleado(lector AjustesEmpleadoLector, paraEmpleado func(empleadoID int64) GeneralesLector) *CargadorParametros {
 	c.ajustes, c.paraEmpleado = lector, paraEmpleado
 	return c

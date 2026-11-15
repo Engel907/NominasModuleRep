@@ -33,6 +33,12 @@ type PeriodoParaCalculo struct {
 	DivisorDiasMes      int
 	// LiqPrestamosModo: LIQ_PRESTAMOS_MODO vigente; "" = no configurado.
 	LiqPrestamosModo string
+	// Bases y ventanas del salario de vacaciones e incapacidad
+	// (salario_promedio.go); deciden si se carga el promedio.
+	VacacionesSalarioBase     string
+	VacacionesPromedioSemanas int
+	IncapacidadSalarioBase    string
+	IncapacidadPromedioMeses  int
 }
 
 // EntradaEmpleado: input del motor más los datos que el escritor de detalle
@@ -63,9 +69,9 @@ type FuenteHidratacion interface {
 	ListarLiquidacionesParaPeriodo(ctx context.Context, periodoID, empleadoID int64, hasta time.Time) ([]dto.LiquidacionParaPeriodoRow, error)
 	SumarRentaMesEmpleado(ctx context.Context, empleadoID, excluirPeriodoID int64, desde, hasta time.Time) (dto.RentaMesRow, error)
 	ListarAsignacionesVigentesEnFecha(ctx context.Context, empleadoID int64, fecha time.Time) ([]dto.AsignacionVigenteRow, error)
-	ListarAsistenciaPresenteEnRango(ctx context.Context, empleadoID int64, desde, hasta time.Time) ([]dto.DiaAsistenciaRow, error)
-	ListarFeriadosPagoObligatorioEnRango(ctx context.Context, desde, hasta time.Time) ([]time.Time, error)
 	SumarEmbargosMesEmpleado(ctx context.Context, empleadoID, excluirPeriodoID int64, desde, hasta time.Time) (dto.EmbargosMesRow, error)
+	SumarBasePromedioEmpleado(ctx context.Context, empleadoID int64, desde, hasta time.Time, columna string) (dto.BasePromedioRow, error)
+	ListarCompensacionesVacacionesPagadasPorPeriodo(ctx context.Context, empleadoID, periodoID int64) ([]dto.CompensacionVacacionesRow, error)
 }
 
 var _ FuenteHidratacion = (*dto.Queries)(nil)
@@ -126,6 +132,21 @@ func (h *Hidratador) Hidratar(ctx context.Context, p PeriodoParaCalculo, emplead
 	case ClaseLiquidacion:
 		return h.hidratarLiquidacion(ctx, p, empleadoID)
 	}
+	return h.hidratarRegular(ctx, p, empleadoID, false)
+}
+
+// HidratarRecalculo arma la entrada de un empleado en un período regular ya
+// aprobado para recalcular lo que devenga (retroactivos): las compensaciones
+// de vacaciones son las que ese período pagó y no se cargan préstamos ni
+// embargos.
+func (h *Hidratador) HidratarRecalculo(ctx context.Context, p PeriodoParaCalculo, empleadoID int64) (EntradaEmpleado, error) {
+	if ClaseTipoPlanilla(p.Clase) != ClaseRegular {
+		return EntradaEmpleado{}, fmt.Errorf("planilla: solo se recalculan períodos regulares (el %d es %s)", p.ID, p.Clase)
+	}
+	return h.hidratarRegular(ctx, p, empleadoID, true)
+}
+
+func (h *Hidratador) hidratarRegular(ctx context.Context, p PeriodoParaCalculo, empleadoID int64, recalculo bool) (EntradaEmpleado, error) {
 	if !p.DiasPeriodoCompleto.IsPositive() || p.DivisorDiasMes <= 0 {
 		return EntradaEmpleado{}, errors.New("planilla: DiasPeriodoCompleto/DivisorDiasMes del período no definidos para hidratar")
 	}
@@ -168,10 +189,15 @@ func (h *Hidratador) Hidratar(ctx context.Context, p PeriodoParaCalculo, emplead
 	if err := h.hidratarAsistencia(ctx, p, empleadoID, &in); err != nil {
 		return EntradaEmpleado{}, err
 	}
-	if err := h.hidratarDeducciones(ctx, empleadoID, fecha, &in); err != nil {
+	if !recalculo {
+		if err := h.hidratarDeducciones(ctx, empleadoID, fecha, &in); err != nil {
+			return EntradaEmpleado{}, err
+		}
+	}
+	if err := h.hidratarVacaciones(ctx, p, empleadoID, recalculo, &in); err != nil {
 		return EntradaEmpleado{}, err
 	}
-	if err := h.hidratarVacaciones(ctx, p, empleadoID, &in); err != nil {
+	if err := h.hidratarPromedios(ctx, p, empleadoID, &in); err != nil {
 		return EntradaEmpleado{}, err
 	}
 	if err := h.hidratarCreditos(ctx, empleadoID, fecha, &in); err != nil {
@@ -474,36 +500,6 @@ func (h *Hidratador) hidratarAsistencia(ctx context.Context, p PeriodoParaCalcul
 		return fmt.Errorf("planilla: empleado_id=%d: %w", empleadoID, err)
 	}
 	in.DiasTrabajados = decimal.NewFromInt(int64(DiasSegmentos(netos)))
-	return h.hidratarDiasPagables(ctx, p, empleadoID, in)
-}
-
-// hidratarDiasPagables: asistencia registrada y feriados de pago obligatorio
-// del período, solo si algún segmento se paga por día u hora.
-func (h *Hidratador) hidratarDiasPagables(ctx context.Context, p PeriodoParaCalculo, empleadoID int64, in *CalculoEmpleadoInput) error {
-	necesita := false
-	for _, s := range in.Segmentos {
-		if s.Modalidad == ModalidadDiario || s.Modalidad == ModalidadPorHora {
-			necesita = true
-			break
-		}
-	}
-	if !necesita {
-		return nil
-	}
-	dias, err := h.f.ListarAsistenciaPresenteEnRango(ctx, empleadoID, p.Inicio, p.Fin)
-	if err != nil {
-		return fmt.Errorf("planilla: empleado_id=%d, asistencia: %w", empleadoID, err)
-	}
-	for _, d := range dias {
-		in.Asistencia = append(in.Asistencia, DiaAsistencia{Fecha: soloFecha(d.Fecha), Horas: d.Horas})
-	}
-	feriados, err := h.f.ListarFeriadosPagoObligatorioEnRango(ctx, p.Inicio, p.Fin)
-	if err != nil {
-		return fmt.Errorf("planilla: feriados de pago obligatorio: %w", err)
-	}
-	for _, f := range feriados {
-		in.FeriadosPagoObligatorio = append(in.FeriadosPagoObligatorio, soloFecha(f))
-	}
 	return nil
 }
 
@@ -553,10 +549,17 @@ func (h *Hidratador) hidratarDeducciones(ctx context.Context, empleadoID int64, 
 	return nil
 }
 
-// hidratarVacaciones: compensaciones pendientes hasta el fin del período
-// y vacaciones aprobadas que tocan el período (recortadas a él).
-func (h *Hidratador) hidratarVacaciones(ctx context.Context, p PeriodoParaCalculo, empleadoID int64, in *CalculoEmpleadoInput) error {
-	comps, err := h.f.ListarCompensacionesVacacionesPendientes(ctx, empleadoID, p.ID, p.Fin)
+// hidratarVacaciones: compensaciones pendientes hasta el fin del período (en
+// un recálculo, las que el período pagó) y vacaciones aprobadas que tocan el
+// período (recortadas a él).
+func (h *Hidratador) hidratarVacaciones(ctx context.Context, p PeriodoParaCalculo, empleadoID int64, recalculo bool, in *CalculoEmpleadoInput) error {
+	var comps []dto.CompensacionVacacionesRow
+	var err error
+	if recalculo {
+		comps, err = h.f.ListarCompensacionesVacacionesPagadasPorPeriodo(ctx, empleadoID, p.ID)
+	} else {
+		comps, err = h.f.ListarCompensacionesVacacionesPendientes(ctx, empleadoID, p.ID, p.Fin)
+	}
 	if err != nil {
 		return fmt.Errorf("planilla: empleado_id=%d, compensaciones de vacaciones: %w", empleadoID, err)
 	}
@@ -572,6 +575,51 @@ func (h *Hidratador) hidratarVacaciones(ctx context.Context, p PeriodoParaCalcul
 			Desde: maxFecha(soloFecha(s.FechaInicio), p.Inicio), Hasta: minFecha(soloFecha(s.FechaFin), p.Fin)})
 	}
 	return nil
+}
+
+// hidratarPromedios: promedio de la base de vacaciones de las semanas
+// anteriores al período y, por boleta, de la base CCSS de los meses anteriores
+// al inicio de la incapacidad. Solo si el empleado tiene qué pagar y la base
+// configurada es promedio | mayor.
+func (h *Hidratador) hidratarPromedios(ctx context.Context, p PeriodoParaCalculo, empleadoID int64, in *CalculoEmpleadoInput) error {
+	if (len(in.VacacionesCompensacion) > 0 || len(in.VacacionesDisfrute) > 0) && UsaPromedio(p.VacacionesSalarioBase) {
+		if p.VacacionesPromedioSemanas <= 0 {
+			return fmt.Errorf("%w: %s (%s = %s)", ErrParametroFaltante, ClaveVentanaPromedioVacacionesSemanas,
+				ClaveVacacionesSalarioBase, p.VacacionesSalarioBase)
+		}
+		desde, hasta := ventanaSemanas(soloFecha(p.Inicio).AddDate(0, 0, -1), p.VacacionesPromedioSemanas)
+		prom, err := h.promedio(ctx, empleadoID, desde, hasta, BanderaBaseVacaciones)
+		if err != nil {
+			return err
+		}
+		in.PromedioVacaciones = prom
+	}
+	if len(in.Incapacidades) == 0 || !UsaPromedio(p.IncapacidadSalarioBase) {
+		return nil
+	}
+	if p.IncapacidadPromedioMeses <= 0 {
+		return fmt.Errorf("%w: %s (%s = %s)", ErrParametroFaltante, ClaveIncapacidadPromedioMeses,
+			ClaveIncapacidadSalarioBase, p.IncapacidadSalarioBase)
+	}
+	for i := range in.Incapacidades {
+		inc := &in.Incapacidades[i]
+		inicio := soloFecha(inc.Desde).AddDate(0, 0, -int(inc.DiaSerieDesde-1))
+		desde, hasta := ventanaMeses(inicio.AddDate(0, 0, -1), p.IncapacidadPromedioMeses)
+		prom, err := h.promedio(ctx, empleadoID, desde, hasta, BanderaBaseCCSS)
+		if err != nil {
+			return err
+		}
+		inc.Promedio = prom
+	}
+	return nil
+}
+
+func (h *Hidratador) promedio(ctx context.Context, empleadoID int64, desde, hasta time.Time, columna string) (*PromedioSalario, error) {
+	r, err := h.f.SumarBasePromedioEmpleado(ctx, empleadoID, desde, hasta, columna)
+	if err != nil {
+		return nil, fmt.Errorf("planilla: empleado_id=%d, promedio de %s: %w", empleadoID, columna, err)
+	}
+	return &PromedioSalario{Desde: desde, Hasta: hasta, Total: r.Total, Meses: r.Meses, Periodos: int(r.Periodos)}, nil
 }
 
 // hidratarCreditos traduce la declaración familiar vigente a créditos
